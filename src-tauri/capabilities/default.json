@@ -24,6 +24,7 @@
     "opener:allow-open-url",
     "dialog:default",
     "dialog:allow-open",
+    "store:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-create",
     "core:window:allow-set-focus",

@@ -86,10 +86,16 @@ pub struct Db(pub Mutex<Connection>);
 
 // ── Paths ───────────────────────────────────────────────────────────────────
 
-/// The memory root: `~/Projects/tfl/memory`.
-pub fn memory_root() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    Path::new(&home).join("Projects/tfl/memory")
+/// The configured memory root, read from Tauri managed state
+/// (`settings::MemoryRoot`). This is resolved from the persisted settings at
+/// startup and kept in sync whenever settings are saved, so search indexes and
+/// queries the user's configured root rather than a hardcoded path. Falls back
+/// to `~/Projects/tfl/memory` if the lock is poisoned.
+fn memory_root(root: &State<'_, crate::settings::MemoryRoot>) -> PathBuf {
+    root.0
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| crate::settings::default_memory_root())
 }
 
 // ── Schema / connection ─────────────────────────────────────────────────────
@@ -412,10 +418,14 @@ fn yaml_list(values: &[String]) -> String {
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn search(payload: SearchInput, db: State<'_, Db>) -> Result<SearchResponse, String> {
+pub fn search(
+    payload: SearchInput,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<SearchResponse, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     if payload.rebuild {
-        build_index(&memory_root(), &conn).map_err(|e| e.to_string())?;
+        build_index(&memory_root(&memory), &conn).map_err(|e| e.to_string())?;
     }
     let results = run_search(&conn, &payload).map_err(|e| e.to_string())?;
     let types = distinct_types(&conn).map_err(|e| e.to_string())?;
@@ -461,8 +471,12 @@ fn write_new_file(root: &Path, payload: &CreateFileInput, today: &str) -> Result
 }
 
 #[tauri::command]
-pub fn create_file(payload: CreateFileInput, db: State<'_, Db>) -> Result<String, String> {
-    let root = memory_root();
+pub fn create_file(
+    payload: CreateFileInput,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<String, String> {
+    let root = memory_root(&memory);
     let file_path = write_new_file(&root, &payload, &today_iso())?;
 
     // Rebuild the index so the new file is immediately searchable.

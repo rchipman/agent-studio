@@ -27,6 +27,8 @@ tauri-plugin-fs = "2.5.1"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-store = "2.4.3"
+keyring = { version = "4.1.1", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 gray_matter = "0.3.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

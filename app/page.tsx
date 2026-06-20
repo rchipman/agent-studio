@@ -9,6 +9,7 @@ import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
 import PanelDivider from '@/components/PanelDivider'
 import TypeChip from '@/components/TypeChip'
+import SettingsModal from '@/components/SettingsModal'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -390,6 +391,7 @@ export default function Home() {
 
   // UI state
   const [showNewModal, setShowNewModal] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
@@ -683,6 +685,11 @@ export default function Home() {
         setTimeout(() => searchRef.current?.focus(), 50)
         return
       }
+      if (mod && e.key === ',') {
+        e.preventDefault()
+        setShowSettings(true)
+        return
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -801,6 +808,28 @@ export default function Home() {
           >
             Spawn Claude
           </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            title="Settings (⌘,)"
+            aria-label="Settings"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 28,
+              height: 28,
+              background: 'transparent',
+              color: color.inkSoft,
+              border: `1px solid ${color.line}`,
+              borderRadius: radius.md,
+              cursor: 'pointer',
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -912,6 +941,10 @@ export default function Home() {
         ticketId={activeTicket}
         onClose={() => setActiveTicket(null)}
       />
+
+      {showSettings && (
+        <SettingsModal open onClose={() => setShowSettings(false)} />
+      )}
     </div>
   )
 }
