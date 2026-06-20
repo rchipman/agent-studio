@@ -1,34 +1,32 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import dynamic from 'next/dynamic'
 import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
 import TerminalPanel from '@/components/TerminalPanel'
 import CommandPalette from '@/components/CommandPalette'
-import { MemorySearchResult } from '@/lib/types'
-
-const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
+import WorkspacePanel from '@/components/WorkspacePanel'
+import PanelDivider from '@/components/PanelDivider'
+import TypeChip from '@/components/TypeChip'
+import { color, radius, space, font, shadow } from '@/lib/tokens'
+import {
+  MemorySearchResult,
+  PanelSide,
+  PanelState,
+  PanelTab,
+  LoadedFile,
+} from '@/lib/types'
 
 const MEMORY_ROOT = '/Users/rob/Projects/tfl/memory'
 const RECENTS_KEY = 'agent-studio-recents'
 const RECENTS_MAX = 8
+const LAYOUT_KEY = 'agent-studio-layout'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length
-}
-
-function formatDate(iso: string): string {
-  if (!iso) return ''
-  try {
-    const d = new Date(iso)
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  } catch {
-    return iso
-  }
 }
 
 function slugify(name: string): string {
@@ -39,6 +37,8 @@ function slugify(name: string): string {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
 }
+
+const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : 'left')
 
 // ── Tauri fs helpers ──────────────────────────────────────────────────────────
 
@@ -102,151 +102,6 @@ async function createFile(body: {
   } catch (err) {
     return { error: String(err) }
   }
-}
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function TypeChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: '3px 10px',
-        borderRadius: '12px',
-        border: active ? '1.5px solid #3E5641' : '1px solid rgba(38,35,32,0.18)',
-        background: active ? '#3E5641' : 'transparent',
-        color: active ? '#fff' : '#6B6760',
-        fontSize: '11px',
-        fontWeight: active ? 600 : 400,
-        cursor: 'pointer',
-        fontFamily: 'system-ui, sans-serif',
-        transition: 'all 0.12s ease',
-      }}
-    >
-      {label}
-    </button>
-  )
-}
-
-function MetaBar({ result }: { result: MemorySearchResult }) {
-  const projects = result.projects.filter(Boolean)
-  const dateStr = formatDate(result.updated || result.created)
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        flexWrap: 'wrap',
-        marginBottom: '4px',
-      }}
-    >
-      {result.type && (
-        <span
-          style={{
-            padding: '1px 7px',
-            borderRadius: '9px',
-            background: 'rgba(62,86,65,0.10)',
-            color: '#3E5641',
-            fontSize: '10px',
-            fontWeight: 600,
-            letterSpacing: '0.02em',
-          }}
-        >
-          {result.type}
-        </span>
-      )}
-      {projects.map((p) => (
-        <span
-          key={p}
-          style={{
-            padding: '1px 7px',
-            borderRadius: '9px',
-            background: 'rgba(155,123,90,0.10)',
-            color: '#9B7B5A',
-            fontSize: '10px',
-            fontWeight: 500,
-          }}
-        >
-          {p}
-        </span>
-      ))}
-      {dateStr && (
-        <span style={{ fontSize: '10px', color: '#9B9490', marginLeft: 'auto' }}>
-          {dateStr}
-        </span>
-      )}
-    </div>
-  )
-}
-
-function ResultCard({
-  result,
-  active,
-  onClick,
-}: {
-  result: MemorySearchResult
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'block',
-        width: '100%',
-        textAlign: 'left',
-        padding: '12px 16px',
-        background: active ? 'rgba(62,86,65,0.06)' : 'rgba(255,255,255,0.55)',
-        border: active ? '1.5px solid rgba(62,86,65,0.30)' : '1px solid rgba(38,35,32,0.08)',
-        borderRadius: '8px',
-        cursor: 'pointer',
-        transition: 'all 0.1s ease',
-        marginBottom: '6px',
-      }}
-      onMouseEnter={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.85)'
-          e.currentTarget.style.borderColor = 'rgba(38,35,32,0.15)'
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = 'rgba(255,255,255,0.55)'
-          e.currentTarget.style.borderColor = 'rgba(38,35,32,0.08)'
-        }
-      }}
-    >
-      <MetaBar result={result} />
-      <div
-        style={{
-          fontSize: '13px',
-          fontWeight: 600,
-          color: '#262320',
-          marginBottom: '3px',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {result.name}
-      </div>
-      {result.excerpt && (
-        <div
-          style={{
-            fontSize: '11px',
-            color: '#6B6760',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            lineHeight: '1.4',
-          }}
-        >
-          {result.excerpt}
-        </div>
-      )}
-    </button>
-  )
 }
 
 // ── New-file modal ────────────────────────────────────────────────────────────
@@ -314,7 +169,7 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
     <div
       style={{
         position: 'fixed', inset: 0, zIndex: 2000,
-        background: 'rgba(38,35,32,0.45)',
+        background: color.scrim,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
       onClick={onClose}
@@ -325,25 +180,23 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         aria-labelledby="new-file-modal-title"
         style={{
           width: 480,
-          background: '#FCFAF4',
-          borderRadius: 12,
-          boxShadow: '0 20px 60px rgba(38,35,32,0.25)',
-          padding: '24px',
+          background: color.bgRaised,
+          borderRadius: radius.lg,
+          boxShadow: shadow.modal,
+          padding: space[7],
           display: 'flex',
           flexDirection: 'column',
-          gap: '16px',
+          gap: space[5],
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div id="new-file-modal-title" style={{ fontSize: '15px', fontWeight: 700, color: '#262320' }}>
+        <div id="new-file-modal-title" style={{ fontSize: 15, fontWeight: 700, color: color.ink }}>
           New memory file
         </div>
 
         {/* Name */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <label style={{ fontSize: '11px', fontWeight: 600, color: '#6B6760', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            Name
-          </label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: space[1] }}>
+          <label style={labelStyle}>Name</label>
           <input
             autoFocus
             type="text"
@@ -354,16 +207,16 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
             style={inputStyle}
           />
           {slug && (
-            <div style={{ fontSize: '10px', color: '#9B9490', paddingLeft: '2px' }}>
+            <div style={{ fontSize: 10, color: color.inkFaint, paddingLeft: 2 }}>
               Slug: {slug}
             </div>
           )}
         </div>
 
         {/* Type */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
           <label style={labelStyle}>Type</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
             {['feedback', 'project', 'user', 'reference', ...knownTypes.filter((t) => !['feedback','project','user','reference'].includes(t))].map((t) => (
               <TypeChip key={t} label={t} active={type === t} onClick={() => setType(t)} />
             ))}
@@ -381,9 +234,9 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         </div>
 
         {/* Projects */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
           <label style={labelStyle}>Project(s)</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
             {knownProjects.map((p) => (
               <TypeChip key={p} label={p} active={projects.includes(p)} onClick={() => toggleProject(p)} />
             ))}
@@ -401,7 +254,7 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         </div>
 
         {/* Tags */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: space[1] }}>
           <label style={labelStyle}>Tags (comma-separated, optional)</label>
           <input
             type="text"
@@ -413,12 +266,12 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         </div>
 
         {error && (
-          <div style={{ fontSize: '12px', color: '#B04040', padding: '6px 10px', background: 'rgba(176,64,64,0.08)', borderRadius: '6px' }}>
+          <div style={{ fontSize: 12, color: color.notice, padding: '6px 10px', background: 'rgba(155,123,90,0.08)', borderRadius: radius.md }}>
             {error}
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '4px' }}>
+        <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end', marginTop: space[1] }}>
           <button onClick={onClose} style={secondaryBtnStyle}>Cancel</button>
           <button onClick={handleCreate} disabled={creating} style={primaryBtnStyle}>
             {creating ? 'Creating…' : 'Create file'}
@@ -434,120 +287,87 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
 const inputStyle: React.CSSProperties = {
   width: '100%',
   padding: '6px 10px',
-  border: '1px solid rgba(38,35,32,0.18)',
-  borderRadius: '6px',
-  background: 'rgba(255,255,255,0.7)',
-  color: '#262320',
-  fontSize: '13px',
+  border: `1px solid ${color.line}`,
+  borderRadius: radius.md,
+  background: color.bgField,
+  color: color.ink,
+  fontSize: 13,
   outline: 'none',
   boxSizing: 'border-box',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: font.sans,
 }
 
 const labelStyle: React.CSSProperties = {
-  fontSize: '11px',
+  fontSize: 11,
   fontWeight: 600,
-  color: '#6B6760',
+  color: color.inkSoft,
   textTransform: 'uppercase',
   letterSpacing: '0.04em',
 }
 
 const primaryBtnStyle: React.CSSProperties = {
-  background: '#3E5641',
+  background: color.forest,
   color: '#fff',
   border: 'none',
-  borderRadius: '6px',
+  borderRadius: radius.md,
   padding: '7px 16px',
-  fontSize: '12px',
+  fontSize: 12,
   fontWeight: 600,
   cursor: 'pointer',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: font.sans,
 }
 
 const secondaryBtnStyle: React.CSSProperties = {
   background: 'transparent',
-  color: '#6B6760',
-  border: '1px solid rgba(38,35,32,0.18)',
-  borderRadius: '6px',
+  color: color.inkSoft,
+  border: `1px solid ${color.line}`,
+  borderRadius: radius.md,
   padding: '7px 16px',
-  fontSize: '12px',
+  fontSize: 12,
   cursor: 'pointer',
-  fontFamily: 'system-ui, sans-serif',
+  fontFamily: font.sans,
 }
 
-// ── Editor metadata bar ───────────────────────────────────────────────────────
+// ── Persisted layout ──────────────────────────────────────────────────────────
 
-function EditorMetaBar({ result }: { result: MemorySearchResult }) {
-  const projects = result.projects.filter(Boolean)
-  const dateStr = formatDate(result.updated || result.created)
-  return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '8px',
-        flexWrap: 'wrap',
-        padding: '8px 0 16px',
-        borderBottom: '1px solid rgba(38,35,32,0.08)',
-        marginBottom: '24px',
-      }}
-    >
-      {result.type && (
-        <span
-          style={{
-            padding: '2px 9px',
-            borderRadius: '10px',
-            background: 'rgba(62,86,65,0.10)',
-            color: '#3E5641',
-            fontSize: '11px',
-            fontWeight: 600,
-          }}
-        >
-          {result.type}
-        </span>
-      )}
-      {projects.map((p) => (
-        <span
-          key={p}
-          style={{
-            padding: '2px 9px',
-            borderRadius: '10px',
-            background: 'rgba(155,123,90,0.10)',
-            color: '#9B7B5A',
-            fontSize: '11px',
-            fontWeight: 500,
-          }}
-        >
-          {p}
-        </span>
-      ))}
-      {result.tags?.filter(Boolean).map((t) => (
-        <span
-          key={t}
-          style={{
-            padding: '2px 9px',
-            borderRadius: '10px',
-            background: 'rgba(38,35,32,0.06)',
-            color: '#6B6760',
-            fontSize: '11px',
-          }}
-        >
-          {t}
-        </span>
-      ))}
-      {dateStr && (
-        <span style={{ fontSize: '11px', color: '#9B9490', marginLeft: 'auto' }}>
-          Updated {dateStr}
-        </span>
-      )}
-    </div>
-  )
+interface PersistedLayout {
+  left: PanelState
+  right: PanelState
+  rightOpen: boolean
+  leftWidth: number
+}
+
+const DEFAULT_PANEL: PanelState = { activePath: null, activeTab: 'content' }
+
+function loadLayout(): PersistedLayout {
+  const fallback: PersistedLayout = {
+    left: { ...DEFAULT_PANEL },
+    right: { ...DEFAULT_PANEL },
+    rightOpen: false,
+    leftWidth: 50,
+  }
+  try {
+    const stored = localStorage.getItem(LAYOUT_KEY)
+    if (!stored) return fallback
+    const parsed = JSON.parse(stored) as Partial<PersistedLayout>
+    return {
+      left: parsed.left ?? fallback.left,
+      right: parsed.right ?? fallback.right,
+      rightOpen: parsed.rightOpen ?? false,
+      leftWidth:
+        typeof parsed.leftWidth === 'number' && parsed.leftWidth >= 20 && parsed.leftWidth <= 80
+          ? parsed.leftWidth
+          : 50,
+    }
+  } catch {
+    return fallback
+  }
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function Home() {
-  // Search state
+  // Search state (global — shared by both panels)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeType, setActiveType] = useState('')
   const [activeProject, setActiveProject] = useState('')
@@ -556,13 +376,16 @@ export default function Home() {
   const [knownProjects, setKnownProjects] = useState<string[]>([])
   const [searching, setSearching] = useState(false)
 
-  // Editor state
-  const [activePath, setActivePath] = useState<string | null>(null)
-  const [activeFileMeta, setActiveFileMeta] = useState<MemorySearchResult | null>(null)
-  const [fileContent, setFileContent] = useState<string>('')
-  const [rawContent, setRawContent] = useState<string>('')
-  const [isLoadingFile, setIsLoadingFile] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
+  // Per-path loaded-file cache (shared so a file open in both panels stays in sync)
+  const [files, setFiles] = useState<Record<string, LoadedFile>>({})
+
+  // Panel layout
+  const [leftPanel, setLeftPanel] = useState<PanelState>(DEFAULT_PANEL)
+  const [rightPanel, setRightPanel] = useState<PanelState>(DEFAULT_PANEL)
+  const [rightOpen, setRightOpen] = useState(false)
+  const [leftWidth, setLeftWidth] = useState(50)
+  const [layoutReady, setLayoutReady] = useState(false)
+
   const [recentPaths, setRecentPaths] = useState<string[]>([])
 
   // UI state
@@ -570,14 +393,18 @@ export default function Home() {
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
 
   const searchRef = useRef<HTMLInputElement>(null)
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One debounce timer per edited path, so editing two panels never drops a save.
+  const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const latestMarkdownRef = useRef<string>('')
+  // Latest in-flight markdown, keyed by the path being edited
+  const latestMarkdownRef = useRef<Record<string, string>>({})
+  const lastOpenedPathRef = useRef<string | null>(null)
 
-  // ── Recents ──
+  // ── Hydrate persisted state (recents + layout) ──
 
   useEffect(() => {
     try {
@@ -587,6 +414,22 @@ export default function Home() {
         if (Array.isArray(parsed)) setRecentPaths(parsed)
       }
     } catch { /* ignore */ }
+
+    const layout = loadLayout()
+    setLeftPanel(layout.left)
+    setRightPanel(layout.right)
+    setRightOpen(layout.rightOpen)
+    setLeftWidth(layout.leftWidth)
+    lastOpenedPathRef.current = layout.right.activePath ?? layout.left.activePath
+
+    // Restore file contents for whatever was open in each panel
+    const toRestore = new Set<string>()
+    if (layout.left.activePath) toRestore.add(layout.left.activePath)
+    if (layout.right.activePath) toRestore.add(layout.right.activePath)
+    toRestore.forEach((p) => loadFile(p))
+
+    setLayoutReady(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   function pushRecent(filePath: string) {
@@ -596,6 +439,16 @@ export default function Home() {
       return next
     })
   }
+
+  // ── Persist layout whenever it changes (after hydration) ──
+
+  useEffect(() => {
+    if (!layoutReady) return
+    const payload: PersistedLayout = { left: leftPanel, right: rightPanel, rightOpen, leftWidth }
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload))
+    } catch { /* ignore */ }
+  }, [layoutReady, leftPanel, rightPanel, rightOpen, leftWidth])
 
   // ── Search ──
 
@@ -618,7 +471,6 @@ export default function Home() {
     runSearch('', '', '', true)
   }, [runSearch])
 
-  // Debounced search on query/filter changes
   const handleSearchChange = useCallback(
     (q: string) => {
       setSearchQuery(q)
@@ -648,59 +500,88 @@ export default function Home() {
     [activeType, activeProject, searchQuery, runSearch]
   )
 
-  // ── File load / save ──
+  // ── File load into the cache ──
 
-  const loadFile = useCallback(async (filePath: string, meta?: MemorySearchResult) => {
-    setIsLoadingFile(true)
-    setActivePath(filePath)
+  const loadFile = useCallback((filePath: string, meta?: MemorySearchResult) => {
     pushRecent(filePath)
-    if (meta) setActiveFileMeta(meta)
+    lastOpenedPathRef.current = filePath
 
-    try {
-      const { readTextFile } = await getTauriFns()
-      const raw = await readTextFile(filePath)
-      setRawContent(raw)
-      try {
-        const parsed = matter(raw)
-        setFileContent(parsed.content)
-        latestMarkdownRef.current = parsed.content
-
-        // Build meta from frontmatter if not passed in
-        if (!meta) {
-          const data = parsed.data as Record<string, unknown>
-          const projectsRaw = data.projects
-          const projects = Array.isArray(projectsRaw)
-            ? (projectsRaw as string[])
-            : projectsRaw ? [String(projectsRaw)] : []
-          const tagsRaw = data.tags
-          const tags = Array.isArray(tagsRaw) ? (tagsRaw as string[]) : tagsRaw ? [String(tagsRaw)] : []
-          setActiveFileMeta({
-            path: filePath,
-            name: String(data.name ?? filePath.split('/').pop()?.replace(/\.md$/, '') ?? ''),
-            type: String(data.type ?? ''),
-            projects,
-            created: String(data.created ?? ''),
-            updated: String(data.updated ?? ''),
-            tags,
-            status: String(data.status ?? 'active'),
-            excerpt: '',
-          })
-        }
-      } catch {
-        setFileContent(raw)
-        latestMarkdownRef.current = raw
+    // Seed a loading entry (or refresh meta if already cached)
+    setFiles((prev) => {
+      const existing = prev[filePath]
+      return {
+        ...prev,
+        [filePath]: {
+          content: existing?.content ?? '',
+          raw: existing?.raw ?? '',
+          meta: meta ?? existing?.meta ?? null,
+          loading: true,
+        },
       }
-    } catch (err) {
-      console.error('[loadFile]', err)
-    } finally {
-      setIsLoadingFile(false)
-    }
+    })
+
+    ;(async () => {
+      try {
+        const { readTextFile } = await getTauriFns()
+        const raw = await readTextFile(filePath)
+        let content = raw
+        let derivedMeta: MemorySearchResult | null = meta ?? null
+        try {
+          const parsed = matter(raw)
+          content = parsed.content
+          if (!meta) {
+            const data = parsed.data as Record<string, unknown>
+            const projectsRaw = data.projects
+            const projects = Array.isArray(projectsRaw)
+              ? (projectsRaw as string[])
+              : projectsRaw ? [String(projectsRaw)] : []
+            const tagsRaw = data.tags
+            const tags = Array.isArray(tagsRaw) ? (tagsRaw as string[]) : tagsRaw ? [String(tagsRaw)] : []
+            derivedMeta = {
+              path: filePath,
+              name: String(data.name ?? filePath.split('/').pop()?.replace(/\.md$/, '') ?? ''),
+              type: String(data.type ?? ''),
+              projects,
+              created: String(data.created ?? ''),
+              updated: String(data.updated ?? ''),
+              tags,
+              status: String(data.status ?? 'active'),
+              excerpt: '',
+            }
+          }
+        } catch {
+          content = raw
+        }
+        latestMarkdownRef.current[filePath] = content
+        setFiles((prev) => ({
+          ...prev,
+          [filePath]: { content, raw, meta: derivedMeta ?? prev[filePath]?.meta ?? null, loading: false },
+        }))
+      } catch (err) {
+        console.error('[loadFile]', err)
+        setFiles((prev) => ({
+          ...prev,
+          [filePath]: { ...(prev[filePath] ?? { content: '', raw: '', meta: meta ?? null }), loading: false },
+        }))
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const saveFile = useCallback(async (content: string) => {
-    if (!activePath) return
+  // Open a file into a specific panel side. Opening into the right panel reveals it.
+  const openInSide = useCallback((filePath: string, side: PanelSide, meta?: MemorySearchResult) => {
+    if (side === 'right') setRightOpen(true)
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => ({ ...prev, activePath: filePath }))
+    loadFile(filePath, meta)
+  }, [loadFile])
+
+  // ── Save (routes by path) ──
+
+  const saveFile = useCallback(async (filePath: string, content: string) => {
     setIsSaving(true)
     try {
+      const rawContent = files[filePath]?.raw ?? ''
       let toWrite = content
       try {
         const parsed = matter(rawContent)
@@ -710,33 +591,69 @@ export default function Home() {
       } catch { /* no frontmatter */ }
 
       const { writeTextFile } = await getTauriFns()
-      await writeTextFile(activePath, toWrite)
-      setRawContent(toWrite)
-      setFileContent(content)
+      await writeTextFile(filePath, toWrite)
+      setFiles((prev) => ({
+        ...prev,
+        [filePath]: { ...(prev[filePath] ?? { meta: null, loading: false }), content, raw: toWrite },
+      }))
     } finally {
       setIsSaving(false)
     }
-  }, [activePath, rawContent])
+  }, [files])
 
-  const handleEditorChange = useCallback((markdown: string) => {
-    latestMarkdownRef.current = markdown
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = setTimeout(() => { saveFile(markdown) }, 300)
+  const makeEditorChange = useCallback((filePath: string | null) => (markdown: string) => {
+    if (!filePath) return
+    latestMarkdownRef.current[filePath] = markdown
+    const timers = saveTimersRef.current
+    if (timers[filePath]) clearTimeout(timers[filePath])
+    timers[filePath] = setTimeout(() => { saveFile(filePath, markdown) }, 300)
   }, [saveFile])
 
-  const handleEditorSave = useCallback(() => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    saveFile(latestMarkdownRef.current)
+  const makeEditorSave = useCallback((filePath: string | null) => () => {
+    if (!filePath) return
+    const timers = saveTimersRef.current
+    if (timers[filePath]) clearTimeout(timers[filePath])
+    saveFile(filePath, latestMarkdownRef.current[filePath] ?? '')
   }, [saveFile])
+
+  // ── Open-result handler (⌘-click routes to the OTHER panel) ──
+
+  const makeOpenResult = useCallback(
+    (side: PanelSide) => (result: MemorySearchResult, e: React.MouseEvent) => {
+      const target = e.metaKey || e.ctrlKey ? otherSide(side) : side
+      openInSide(result.path, target, result)
+    },
+    [openInSide]
+  )
 
   // ── New file modal ──
 
-  const handleFileCreated = useCallback(async (filePath: string) => {
+  const handleFileCreated = useCallback((filePath: string) => {
     setShowNewModal(false)
-    await loadFile(filePath)
-    // Refresh search results
+    openInSide(filePath, 'left')
     runSearch(searchQuery, activeType, activeProject)
-  }, [loadFile, runSearch, searchQuery, activeType, activeProject])
+  }, [openInSide, runSearch, searchQuery, activeType, activeProject])
+
+  // ── Right-panel toggle ──
+
+  const toggleRightPanel = useCallback(() => {
+    setRightOpen((open) => {
+      if (open) return false
+      // Opening: restore the last-used file into the right panel if it's empty.
+      setRightPanel((prev) => {
+        if (prev.activePath) return prev
+        const last = lastOpenedPathRef.current ?? leftPanel.activePath
+        if (last) {
+          loadFile(last)
+          return { ...prev, activePath: last }
+        }
+        return prev
+      })
+      return true
+    })
+  }, [leftPanel.activePath, loadFile])
+
+  const closeRightPanel = useCallback(() => setRightOpen(false), [])
 
   // ── Keyboard shortcuts ──
 
@@ -750,27 +667,44 @@ export default function Home() {
         setPaletteOpen(true)
         return
       }
-
       if (mod && e.key === 'n') {
         e.preventDefault()
         setShowNewModal(true)
         return
       }
-
+      if (mod && e.key === '\\') {
+        e.preventDefault()
+        toggleRightPanel()
+        return
+      }
       if (mod && e.key === 'f') {
         e.preventDefault()
-        setActivePath(null)
-        setActiveFileMeta(null)
+        setLeftPanel((prev) => ({ ...prev, activePath: null }))
         setTimeout(() => searchRef.current?.focus(), 50)
         return
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [toggleRightPanel])
 
-  const wordCount = countWords(fileContent)
-  const inEditor = activePath !== null
+  // ── Derived ──
+
+  const leftLoaded = leftPanel.activePath ? files[leftPanel.activePath] ?? null : null
+  const rightLoaded = rightPanel.activePath ? files[rightPanel.activePath] ?? null : null
+
+  // Top-bar context follows the most relevant panel: the right when open, else left.
+  const focusPanel = rightOpen && rightPanel.activePath ? rightPanel : leftPanel
+  const focusLoaded = focusPanel.activePath ? files[focusPanel.activePath] ?? null : null
+  const inEditor = focusPanel.activePath !== null
+  const wordCount = countWords(focusLoaded?.content ?? '')
+
+  const setLeftTab = useCallback((tab: PanelTab) => setLeftPanel((p) => ({ ...p, activeTab: tab })), [])
+  const setRightTab = useCallback((tab: PanelTab) => setRightPanel((p) => ({ ...p, activeTab: tab })), [])
+
+  const goHome = useCallback(() => {
+    setLeftPanel((p) => ({ ...p, activePath: null }))
+  }, [])
 
   return (
     <div
@@ -778,36 +712,36 @@ export default function Home() {
         display: 'flex',
         flexDirection: 'column',
         height: '100vh',
-        background: '#F2F0ED',
-        color: '#262320',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
+        background: color.bgApp,
+        color: color.ink,
+        fontFamily: font.sans,
         overflow: 'hidden',
       }}
     >
       {/* Top bar */}
       <header
         style={{
-          height: '44px',
+          height: 44,
           display: 'flex',
           alignItems: 'center',
-          borderBottom: '1px solid rgba(38,35,32,0.10)',
+          borderBottom: `1px solid ${color.hair}`,
           padding: '0 20px',
-          gap: '16px',
+          gap: space[5],
           flexShrink: 0,
-          background: '#F2F0ED',
+          background: color.bgApp,
         }}
       >
         {/* Wordmark / back button */}
         <button
-          onClick={() => { setActivePath(null); setActiveFileMeta(null) }}
+          onClick={goHome}
           style={{
             fontFamily: "'Fraunces', 'Georgia', serif",
-            fontSize: '15px',
+            fontSize: 15,
             fontWeight: 600,
-            color: '#3E5641',
+            color: color.forest,
             letterSpacing: '-0.01em',
             flexShrink: 0,
-            minWidth: '120px',
+            minWidth: 120,
             background: 'transparent',
             border: 'none',
             cursor: 'pointer',
@@ -818,56 +752,51 @@ export default function Home() {
           {inEditor ? '← Agent Studio' : 'Agent Studio'}
         </button>
 
-        {/* Center: filename when in editor, empty otherwise */}
-        <div
-          style={{
-            flex: 1,
-            textAlign: 'center',
-            fontSize: '12px',
-            color: '#6B6760',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {inEditor && activeFileMeta?.name}
+        {/* Center: filename when in editor */}
+        <div style={{ flex: 1, textAlign: 'center', fontSize: 12, color: color.inkSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {inEditor && focusLoaded?.meta?.name}
         </div>
 
         {/* Right side */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-            flexShrink: 0,
-            minWidth: '160px',
-            justifyContent: 'flex-end',
-          }}
-        >
+        <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, minWidth: 160, justifyContent: 'flex-end' }}>
           {inEditor && (
-            <span style={{ fontSize: '12px', color: '#6B6760' }}>
+            <span style={{ fontSize: 12, color: color.inkSoft }}>
               {isSaving ? 'Saving…' : `${wordCount.toLocaleString()} words`}
             </span>
           )}
           <button
-            onClick={() => setShowNewModal(true)}
-            title="New memory file (⌘N)"
-            style={primaryBtnStyle}
+            onClick={toggleRightPanel}
+            title="Toggle right panel (⌘\)"
+            aria-pressed={rightOpen}
+            style={{
+              background: rightOpen ? color.forestTint : 'transparent',
+              color: rightOpen ? color.forest : color.inkSoft,
+              border: `1px solid ${rightOpen ? color.forestLine : color.line}`,
+              borderRadius: radius.md,
+              padding: '4px 10px',
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: 'pointer',
+              fontFamily: font.sans,
+            }}
           >
+            Split
+          </button>
+          <button onClick={() => setShowNewModal(true)} title="New memory file (⌘N)" style={primaryBtnStyle}>
             + New
           </button>
           <button
             onClick={() => alert('Coming soon')}
             style={{
-              background: '#3E5641',
+              background: color.forest,
               color: '#fff',
               border: 'none',
-              borderRadius: '5px',
+              borderRadius: radius.md,
               padding: '4px 12px',
-              fontSize: '12px',
+              fontSize: 12,
               fontWeight: 500,
               cursor: 'pointer',
-              fontFamily: 'system-ui, sans-serif',
+              fontFamily: font.sans,
             }}
           >
             Spawn Claude
@@ -875,125 +804,85 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Body */}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        {/* Main content */}
-        <main style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-          {!inEditor ? (
-            /* ── Search view ── */
-            <div
-              style={{
-                maxWidth: '680px',
-                width: '100%',
-                margin: '0 auto',
-                padding: '32px 24px 80px',
-                boxSizing: 'border-box',
-              }}
-            >
-              {/* Search bar */}
-              <div style={{ position: 'relative', marginBottom: '16px' }}>
-                <svg
-                  style={{
-                    position: 'absolute',
-                    left: '14px',
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    opacity: 0.35,
-                    pointerEvents: 'none',
-                  }}
-                  width="16" height="16" viewBox="0 0 16 16" fill="none"
-                >
-                  <circle cx="6.5" cy="6.5" r="5.5" stroke="#262320" strokeWidth="1.5" />
-                  <line x1="11" y1="11" x2="14.5" y2="14.5" stroke="#262320" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-                <input
-                  ref={searchRef}
-                  type="text"
-                  placeholder="Search memory…"
-                  value={searchQuery}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '10px 14px 10px 38px',
-                    border: '1.5px solid rgba(38,35,32,0.15)',
-                    borderRadius: '10px',
-                    background: 'rgba(255,255,255,0.7)',
-                    color: '#262320',
-                    fontSize: '14px',
-                    outline: 'none',
-                    boxSizing: 'border-box',
-                    fontFamily: 'system-ui, sans-serif',
-                    boxShadow: '0 1px 4px rgba(38,35,32,0.06)',
-                  }}
-                  onFocus={(e) => { e.currentTarget.style.borderColor = '#3E5641' }}
-                  onBlur={(e) => { e.currentTarget.style.borderColor = 'rgba(38,35,32,0.15)' }}
-                />
-                {searching && (
-                  <div style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', fontSize: '11px', color: '#9B9490' }}>
-                    …
-                  </div>
-                )}
-              </div>
+      {/* Body: one or two panels */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
+        {/* LEFT panel — always present, flexes to leftWidth when split is open */}
+        <div
+          style={{
+            display: 'flex',
+            flexBasis: rightOpen ? `${leftWidth}%` : '100%',
+            flexGrow: rightOpen ? 0 : 1,
+            flexShrink: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+          }}
+        >
+          <WorkspacePanel
+            side="left"
+            activeTab={leftPanel.activeTab}
+            onSelectTab={setLeftTab}
+            activePath={leftPanel.activePath}
+            loaded={leftLoaded}
+            searchQuery={searchQuery}
+            searching={searching}
+            searchResults={searchResults}
+            knownTypes={knownTypes}
+            knownProjects={knownProjects}
+            activeType={activeType}
+            activeProject={activeProject}
+            onSearchChange={handleSearchChange}
+            onTypeFilter={handleTypeFilter}
+            onProjectFilter={handleProjectFilter}
+            searchInputRef={searchRef}
+            onOpenResult={makeOpenResult('left')}
+            onEditorChange={makeEditorChange(leftPanel.activePath)}
+            onEditorSave={makeEditorSave(leftPanel.activePath)}
+          />
+        </div>
 
-              {/* Filter chips */}
-              {(knownTypes.length > 0 || knownProjects.length > 0) && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '20px' }}>
-                  {knownTypes.map((t) => (
-                    <TypeChip key={t} label={t} active={activeType === t} onClick={() => handleTypeFilter(t)} />
-                  ))}
-                  <div style={{ width: '1px', background: 'rgba(38,35,32,0.12)', margin: '0 2px', alignSelf: 'stretch' }} />
-                  {knownProjects.map((p) => (
-                    <TypeChip key={p} label={p} active={activeProject === p} onClick={() => handleProjectFilter(p)} />
-                  ))}
-                </div>
-              )}
+        {/* Divider — only when split is open */}
+        {rightOpen && (
+          <PanelDivider
+            onResize={(pct) => setLeftWidth(pct)}
+            onSnap={() => setLeftWidth(50)}
+          />
+        )}
 
-              {/* Results */}
-              <div>
-                {searchResults.length === 0 && !searching && (
-                  <div style={{ textAlign: 'center', color: '#9B9490', fontSize: '13px', paddingTop: '40px' }}>
-                    {searchQuery || activeType || activeProject ? 'No results' : 'No files indexed'}
-                  </div>
-                )}
-                {searchResults.map((r) => (
-                  <ResultCard
-                    key={r.path}
-                    result={r}
-                    active={activePath === r.path}
-                    onClick={() => loadFile(r.path, r)}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            /* ── Editor view ── */
-            <div
-              style={{
-                maxWidth: '720px',
-                width: '100%',
-                margin: '0 auto',
-                padding: '32px 40px 80px',
-                boxSizing: 'border-box',
-              }}
-            >
-              {isLoadingFile ? (
-                <div style={{ color: '#6B6760', fontSize: '13px', textAlign: 'center', paddingTop: '60px' }}>
-                  Loading…
-                </div>
-              ) : (
-                <>
-                  {activeFileMeta && <EditorMetaBar result={activeFileMeta} />}
-                  <MarkdownEditor
-                    key={activePath ?? ''}
-                    initialContent={fileContent}
-                    onChange={handleEditorChange}
-                    onSave={handleEditorSave}
-                  />
-                </>
-              )}
-            </div>
-          )}
-        </main>
+        {/* RIGHT panel — kept mounted (display:none) when closed to preserve state */}
+        <div
+          style={{
+            display: rightOpen ? 'flex' : 'none',
+            flexBasis: `${100 - leftWidth}%`,
+            flexGrow: 0,
+            flexShrink: 1,
+            minWidth: 0,
+            overflow: 'hidden',
+            borderLeft: `1px solid ${color.hairSoft}`,
+          }}
+        >
+          <WorkspacePanel
+            side="right"
+            activeTab={rightPanel.activeTab}
+            onSelectTab={setRightTab}
+            showClose
+            onClose={closeRightPanel}
+            activePath={rightPanel.activePath}
+            loaded={rightLoaded}
+            searchQuery={searchQuery}
+            searching={searching}
+            searchResults={searchResults}
+            knownTypes={knownTypes}
+            knownProjects={knownProjects}
+            activeType={activeType}
+            activeProject={activeProject}
+            onSearchChange={handleSearchChange}
+            onTypeFilter={handleTypeFilter}
+            onProjectFilter={handleProjectFilter}
+            onOpenResult={makeOpenResult('right')}
+            onEditorChange={makeEditorChange(rightPanel.activePath)}
+            onEditorSave={makeEditorSave(rightPanel.activePath)}
+          />
+        </div>
       </div>
 
       {/* Modals / overlays */}
@@ -1009,7 +898,7 @@ export default function Home() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
-        onSelect={(path) => { loadFile(path) }}
+        onSelect={(path) => { openInSide(path, 'left') }}
         memoryRoot={MEMORY_ROOT}
       />
 
