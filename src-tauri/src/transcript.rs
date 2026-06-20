@@ -368,12 +368,8 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
             let first_msg = turns
                 .iter()
                 .find(|t| t.role == "human")
-                .map(|t| {
-                    let s = t.content.trim();
-                    if s.len() > 200 { &s[..200] } else { s }
-                })
-                .unwrap_or("")
-                .to_string();
+                .map(|t| t.content.trim().chars().take(200).collect::<String>())
+                .unwrap_or_default();
 
             // Full text for FTS: all turns joined.
             let full_text: String = turns
