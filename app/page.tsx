@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import dynamic from 'next/dynamic'
+import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
 import TerminalPanel from '@/components/TerminalPanel'
@@ -70,13 +71,14 @@ async function fetchSearch(params: {
   project?: string
   init?: boolean
 }): Promise<SearchApiResponse> {
-  const url = new URL('/api/search', window.location.origin)
-  if (params.q) url.searchParams.set('q', params.q)
-  if (params.type) url.searchParams.set('type', params.type)
-  if (params.project) url.searchParams.set('project', params.project)
-  if (params.init) url.searchParams.set('init', 'true')
-  const res = await fetch(url.toString())
-  return res.json() as Promise<SearchApiResponse>
+  return invoke<SearchApiResponse>('search', {
+    payload: {
+      q: params.q ?? '',
+      typeFilter: params.type ?? '',
+      projectFilter: params.project ?? '',
+      rebuild: params.init ?? false,
+    },
+  })
 }
 
 async function createFile(body: {
@@ -86,12 +88,20 @@ async function createFile(body: {
   projects: string | string[]
   tags?: string[]
 }): Promise<{ path?: string; error?: string }> {
-  const res = await fetch('/api/files', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return res.json() as Promise<{ path?: string; error?: string }>
+  try {
+    const path = await invoke<string>('create_file', {
+      payload: {
+        name: body.name,
+        slug: body.slug,
+        fileType: body.type,
+        projects: Array.isArray(body.projects) ? body.projects : [body.projects],
+        tags: body.tags ?? [],
+      },
+    })
+    return { path }
+  } catch (err) {
+    return { error: String(err) }
+  }
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────

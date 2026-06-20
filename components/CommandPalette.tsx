@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { MemorySearchResult } from '@/lib/types'
 
 interface CommandPaletteProps {
@@ -11,12 +12,10 @@ interface CommandPaletteProps {
 }
 
 async function searchViaApi(q: string): Promise<MemorySearchResult[]> {
-  const url = new URL('/api/search', window.location.origin)
-  if (q) url.searchParams.set('q', q)
-  url.searchParams.set('limit', '30')
   try {
-    const res = await fetch(url.toString())
-    const data = await res.json() as { results?: MemorySearchResult[] }
+    const data = await invoke<{ results?: MemorySearchResult[] }>('search', {
+      payload: { q, typeFilter: '', projectFilter: '', limit: 30, rebuild: false },
+    })
     return data.results ?? []
   } catch {
     return []
