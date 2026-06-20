@@ -1,5 +1,68 @@
 @import "tailwindcss";
 
+/* ── Design tokens ───────────────────────────────────────────────────────────
+   The named set from docs/design/studio-surfaces.md. Mirrored in lib/tokens.ts
+   for inline-styled React (the app's prevailing style). Reference tokens, never
+   magic numbers. Note: there is no red token — removals and errors read as calm,
+   recessive states (heather / tan), never as alarm. */
+:root {
+  /* Color */
+  --bg-app: #F2F0ED;
+  --bg-raised: #FCFAF4;
+  --bg-field: rgba(255, 255, 255, 0.70);
+  --bg-field-strong: rgba(255, 255, 255, 0.85);
+  --bg-card: rgba(255, 255, 255, 0.55);
+  --ink: #262320;
+  --ink-soft: #6B6760;
+  --ink-faint: #9B9490;
+  --forest: #3E5641;
+  --forest-tint: rgba(62, 86, 65, 0.10);
+  --forest-line: rgba(62, 86, 65, 0.30);
+  --forest-wash: rgba(62, 86, 65, 0.06);
+  --tan: #9B7B5A;
+  --tan-tint: rgba(155, 123, 90, 0.10);
+  --hair: rgba(38, 35, 32, 0.10);
+  --hair-soft: rgba(38, 35, 32, 0.08);
+  --line: rgba(38, 35, 32, 0.18);
+  --scrim: rgba(38, 35, 32, 0.45);
+  --term-bg: #1a1917;
+  --term-fg: #d4d0cb;
+
+  /* Semantic accents — used sparingly, never as alarm */
+  --add: #3E5641;
+  --add-wash: rgba(62, 86, 65, 0.08);
+  --remove: #7C6A86;
+  --remove-wash: rgba(124, 106, 134, 0.08);
+  --notice: #9B7B5A;
+
+  /* Spacing — 4px base scale */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 12px;
+  --sp-5: 16px;
+  --sp-6: 20px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+
+  /* Radii */
+  --r-sm: 3px;
+  --r-chip: 9px;
+  --r-md: 6px;
+  --r-card: 8px;
+  --r-field: 10px;
+  --r-lg: 12px;
+
+  /* Type families (only what's actually loaded) */
+  --font-serif: 'Literata Variable', Georgia, serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Chrome shadows */
+  --shadow-modal: 0 20px 60px rgba(38, 35, 32, 0.25);
+  --shadow-panel: -4px 0 24px rgba(38, 35, 32, 0.12);
+}
+
 * {
   box-sizing: border-box;
 }
