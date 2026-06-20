@@ -5,9 +5,9 @@ import type { NextConfig } from 'next'
 // so output:'export' is not only unnecessary but can cause dev-server
 // quirks. Only enable it for production builds.
 //
-// API routes live in pages/api/ (pages router) which is automatically
-// excluded from output: 'export'. They run via the Next.js dev server
-// in `tauri dev` mode.
+// There are no Next.js API routes: search and file creation are handled by
+// Rust Tauri commands (`invoke('search')` / `invoke('create_file')`), so the
+// static export has no server-side dependencies to exclude.
 const isProd = process.env.NODE_ENV === 'production'
 
 const nextConfig: NextConfig = {
