@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
-import TerminalPanel from '@/components/TerminalPanel'
+import TerminalPanel, { RunRequest } from '@/components/TerminalPanel'
+import Launcher from '@/components/Launcher'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
 import PanelDivider from '@/components/PanelDivider'
@@ -403,8 +404,10 @@ export default function Home() {
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
+  const [showLauncher, setShowLauncher] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
+  const runRef = useRef<((req: RunRequest) => void) | null>(null)
 
   const searchRef = useRef<HTMLInputElement>(null)
   // One debounce timer per edited path, so editing two panels never drops a save.
@@ -716,10 +719,22 @@ export default function Home() {
         setRightPanel((prev) => ({ ...prev, activeTab: 'diff' }))
         return
       }
+      if (mod && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault()
+        setShowLauncher(true)
+        return
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [toggleRightPanel])
+
+  // The launcher hands a composed run to the terminal: slide it up, then spawn.
+  const handleLaunch = useCallback((req: RunRequest) => {
+    setTerminalOpen(true)
+    // Let the terminal mount/init before invoking its run handler.
+    setTimeout(() => runRef.current?.(req), 60)
+  }, [])
 
   // ── Derived ──
 
@@ -819,7 +834,8 @@ export default function Home() {
             + New
           </button>
           <button
-            onClick={() => alert('Coming soon')}
+            onClick={() => setShowLauncher(true)}
+            title="Launch (⌘R)"
             style={{
               background: color.forest,
               color: '#fff',
@@ -832,7 +848,7 @@ export default function Home() {
               fontFamily: font.sans,
             }}
           >
-            Spawn Claude
+            Launch
           </button>
           <button
             onClick={() => setShowSettings(true)}
@@ -964,6 +980,7 @@ export default function Home() {
         isOpen={terminalOpen}
         onClose={() => setTerminalOpen(false)}
         spawnRef={spawnClaudeRef}
+        runRef={runRef}
       />
       <LinearPanel
         ticketId={activeTicket}
@@ -973,6 +990,13 @@ export default function Home() {
       {showSettings && (
         <SettingsModal open onClose={() => setShowSettings(false)} />
       )}
+
+      <Launcher
+        open={showLauncher}
+        onClose={() => setShowLauncher(false)}
+        onRun={handleLaunch}
+        onOpenSettings={() => { setShowLauncher(false); setShowSettings(true) }}
+      />
 
       {showQuickCapture && (
         <QuickCapture

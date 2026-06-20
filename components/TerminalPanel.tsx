@@ -3,25 +3,48 @@
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef, useCallback } from 'react'
 
+/** A fully-composed launch: the agent to spawn, where, and the briefing bundle
+ *  already written to a temp file. The launcher passes one of these to run(). */
+export interface RunRequest {
+  /** Human label for the agent (printed in the terminal banner). */
+  label: string
+  /** Executable to spawn. */
+  command: string
+  /** Arguments, with the bundle path already substituted in. */
+  args: string[]
+  /** Working directory to spawn in. */
+  cwd: string
+  /** The composed briefing bundle, piped to the child's stdin after spawn. */
+  bundle: string
+}
+
 interface TerminalPanelProps {
   isOpen: boolean
   onClose: () => void
   spawnRef: React.MutableRefObject<((filePath: string | null) => void) | null>
+  /** Launcher entry point: run a composed agent launch in the terminal. */
+  runRef?: React.MutableRefObject<((req: RunRequest) => void) | null>
 }
 
-export default function TerminalPanel({ isOpen, onClose, spawnRef }: TerminalPanelProps) {
+export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const termRef = useRef<any>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fitAddonRef = useRef<any>(null)
   const initializedRef = useRef(false)
+  // The live child process, so xterm keystrokes can be forwarded to its stdin
+  // (interactive sessions). Cleared when the process closes.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const childRef = useRef<any>(null)
+  const inputBoundRef = useRef(false)
 
   const writeLine = useCallback((text: string) => {
     if (termRef.current) {
       termRef.current.writeln(text)
     }
   }, [])
+  void writeLine
 
   // Initialize xterm once container is available and panel first opens
   useEffect(() => {
@@ -57,7 +80,21 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef }: TerminalPan
       termRef.current = term
       fitAddonRef.current = fitAddon
 
-      term.writeln('\x1b[32mAgent Studio terminal\x1b[0m — use the \x1b[33mSpawn Claude\x1b[0m button to start a session')
+      // Forward keystrokes to the live child's stdin when one is running, so the
+      // launched agent session is interactive. No child = keystrokes are ignored.
+      if (!inputBoundRef.current) {
+        inputBoundRef.current = true
+        term.onData((data: string) => {
+          const child = childRef.current
+          if (child) {
+            // Echo locally so typing is visible, then forward to the process.
+            term.write(data)
+            child.write(data).catch(() => {})
+          }
+        })
+      }
+
+      term.writeln('\x1b[32mAgent Studio terminal\x1b[0m — press \x1b[33m⌘R\x1b[0m to compose and launch a session')
       term.write('\r\n$ ')
     })()
 
@@ -117,6 +154,67 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef }: TerminalPan
       }
     }
   }, [spawnRef])
+
+  // Expose the launcher's run() via ref. Spawns the chosen agent in the chosen
+  // cwd, streams stdout/stderr into xterm, and pipes the composed bundle to the
+  // child's stdin so the agent starts fully briefed. Keystrokes route to stdin
+  // via childRef (bound above) for an interactive session.
+  useEffect(() => {
+    if (!runRef) return
+    runRef.current = async (req) => {
+      if (!termRef.current) return
+      const term = termRef.current
+
+      term.writeln('')
+      term.writeln(`\x1b[33m> ${req.command} ${req.args.join(' ')}\x1b[0m`)
+      term.writeln(`\x1b[90m  in ${req.cwd}\x1b[0m`)
+
+      try {
+        const { Command } = await import('@tauri-apps/plugin-shell')
+        const cmd = Command.create(req.command, req.args, { cwd: req.cwd })
+
+        cmd.stdout.on('data', (data: string) => {
+          term.write(data.replace(/\n/g, '\r\n'))
+        })
+        cmd.stderr.on('data', (data: string) => {
+          // No red alarm: dim the agent's stderr rather than flag it.
+          term.write('\x1b[90m' + data.replace(/\n/g, '\r\n') + '\x1b[0m')
+        })
+        cmd.on('close', (code: { code: number | null }) => {
+          childRef.current = null
+          term.writeln('')
+          term.writeln(`\x1b[90mSession ended (${code?.code ?? 'unknown'})\x1b[0m`)
+          term.write('\r\n$ ')
+        })
+        cmd.on('error', (err: string) => {
+          childRef.current = null
+          term.writeln('')
+          term.writeln(`\x1b[33m${err}\x1b[0m`)
+          term.write('\r\n$ ')
+        })
+
+        const child = await cmd.spawn()
+        childRef.current = child
+
+        // Inject the briefing bundle via stdin. The bundle path is also in the
+        // agent's args (see composeAgentArgs), so a `claude`-style CLI can read
+        // it as a file; piping to stdin covers prompt-on-stdin agents too.
+        if (req.bundle) {
+          try {
+            await child.write(req.bundle)
+          } catch {
+            /* some agents close stdin early; the file arg still carries it */
+          }
+        }
+      } catch (err) {
+        childRef.current = null
+        const msg = err instanceof Error ? err.message : String(err)
+        term.writeln(`\x1b[33mCould not start ${req.label}: ${msg}\x1b[0m`)
+        term.writeln(`\x1b[90mCheck that \`${req.command}\` is installed and on your PATH.\x1b[0m`)
+        term.write('\r\n$ ')
+      }
+    }
+  }, [runRef])
 
   return (
     <>
