@@ -12,12 +12,19 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  tauri::Builder::default()
+  let builder = tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_opener::init())
-    .plugin(tauri_plugin_store::Builder::default().build())
+    .plugin(tauri_plugin_store::Builder::default().build());
+
+  // E2E only: embed a W3C WebDriver server so WebdriverIO can drive the real app
+  // (TIN-1645). Behind the `webdriver` feature; absent from normal builds.
+  #[cfg(feature = "webdriver")]
+  let builder = builder.plugin(tauri_plugin_webdriver::init());
+
+  builder
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

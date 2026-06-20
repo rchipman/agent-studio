@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e": "node e2e/run.mjs"
   },
   "dependencies": {
     "@fontsource-variable/literata": "^5.2.8",
@@ -48,6 +49,7 @@
     "jsdom": "^29.1.1",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vitest": "^2.1.9"
+    "vitest": "^2.1.9",
+    "webdriverio": "^9.29.0"
   }
 }

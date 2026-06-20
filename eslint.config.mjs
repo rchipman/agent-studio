@@ -3,7 +3,7 @@ import nextVitals from 'eslint-config-next/core-web-vitals'
 import nextTs from 'eslint-config-next/typescript'
 
 export default defineConfig([
-  globalIgnores(['.next/**', 'out/**', 'node_modules/**', 'src-tauri/**', 'coverage/**']),
+  globalIgnores(['.next/**', 'out/**', 'node_modules/**', 'src-tauri/**', 'coverage/**', 'e2e/**']),
   nextVitals,
   nextTs,
   {

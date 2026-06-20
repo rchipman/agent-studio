@@ -32,3 +32,10 @@ keyring = { version = "4.1.1", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 gray_matter = "0.3.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# E2E only (TIN-1645): embeds a W3C WebDriver server (port 4445) so WebdriverIO
+# can drive the real app. Behind the `webdriver` feature so it is entirely
+# excluded from normal dev/release builds — build E2E with `--features webdriver`.
+tauri-plugin-webdriver = { version = "0.2", optional = true }
+
+[features]
+webdriver = ["dep:tauri-plugin-webdriver"]
