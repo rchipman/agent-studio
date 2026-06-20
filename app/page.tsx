@@ -15,6 +15,7 @@ import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
 import { getSettings } from '@/lib/settings'
+import { slugify } from '@/lib/slug'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -35,14 +36,6 @@ function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length
 }
 
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-}
 
 const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : 'left')
 

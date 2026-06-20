@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { color, radius, shadow, type as typeTokens, space, font } from '@/lib/tokens'
+import { slugify } from '@/lib/slug'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -14,16 +15,6 @@ type FileType = (typeof FILE_TYPES)[number]
 const PROJECTS = ['attic', 'understory', 'website', 'studio', 'shared'] as const
 type Project = (typeof PROJECTS)[number]
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .trim()
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-}
 
 function getLastProject(): Project {
   try {
