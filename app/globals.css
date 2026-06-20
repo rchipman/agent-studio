@@ -1,26 +1,143 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+* {
+  box-sizing: border-box;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #F2F0ED;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* Prevent text-selection cursor everywhere — feels like a native app */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Re-enable selection in content areas only */
+.prose-content,
+textarea,
+input[type="text"],
+input[type="search"] {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Kill default blue link styling everywhere except markdown content */
+a:not(.prose-content a) {
+  color: inherit;
+  text-decoration: none;
 }
+
+/* Prevent default web cursor on interactive elements */
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(38, 35, 32, 0.18);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(38, 35, 32, 0.3);
+}
+
+/* ── Milkdown / Crepe editor overrides ──────────────────────────────────── */
+
+/* Make the editor fill the content column with no chrome */
+.milkdown-editor-host {
+  width: 100%;
+  min-height: calc(100vh - 200px);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Strip the frame theme's card border, shadow, and background */
+.milkdown-editor-host .milkdown,
+.milkdown-editor-host .milkdown .editor {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+
+/* Match the prose reading font exactly */
+.milkdown-editor-host .ProseMirror {
+  font-family: 'Literata Variable', Georgia, serif !important;
+  font-size: 18px !important;
+  line-height: 1.75 !important;
+  color: #262320 !important;
+  background: transparent !important;
+  outline: none !important;
+  padding: 0 !important;
+  caret-color: #262320;
+}
+
+/* Headings */
+.milkdown-editor-host .ProseMirror h1,
+.milkdown-editor-host .ProseMirror h2,
+.milkdown-editor-host .ProseMirror h3,
+.milkdown-editor-host .ProseMirror h4 {
+  font-family: 'Literata Variable', Georgia, serif !important;
+  color: #262320 !important;
+}
+
+/* Paragraphs */
+.milkdown-editor-host .ProseMirror p {
+  margin: 0 0 1em !important;
+}
+
+/* Links */
+.milkdown-editor-host .ProseMirror a {
+  color: #3E5641;
+}
+
+/* Block quotes */
+.milkdown-editor-host .ProseMirror blockquote {
+  border-left: 3px solid rgba(38,35,32,0.2);
+  padding-left: 1em;
+  color: #6B6760;
+  margin-left: 0;
+}
+
+/* Code blocks */
+.milkdown-editor-host .ProseMirror pre,
+.milkdown-editor-host .ProseMirror code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace !important;
+  font-size: 14px !important;
+}
+
+/* Hide the top-bar / slash menu placeholder that ships with frame theme by default */
+.milkdown-editor-host .crepe-top-bar {
+  display: none !important;
+}
+
+/* rehype-highlight code theme (dark) */
+.hljs {
+  color: #abb2bf;
+  background: transparent;
+}
+.hljs-keyword, .hljs-selector-tag { color: #c678dd; }
+.hljs-string, .hljs-attr { color: #98c379; }
+.hljs-number, .hljs-literal { color: #d19a66; }
+.hljs-comment { color: #5c6370; font-style: italic; }
+.hljs-function, .hljs-title { color: #61aeee; }
+.hljs-variable, .hljs-params { color: #e06c75; }
+.hljs-built_in, .hljs-type { color: #e6c07b; }
+.hljs-meta { color: #56b6c2; }

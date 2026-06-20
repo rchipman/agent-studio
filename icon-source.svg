@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="224" fill="#2D4230"/>
+
+  <!-- Terminal window chrome -->
+  <rect x="140" y="280" width="744" height="464" rx="20" fill="#1A2B1D" opacity="0.85"/>
+
+  <!-- Traffic lights -->
+  <circle cx="218" cy="334" r="18" fill="#FF5F57" opacity="0.9"/>
+  <circle cx="272" cy="334" r="18" fill="#FEBC2E" opacity="0.9"/>
+  <circle cx="326" cy="334" r="18" fill="#28C840" opacity="0.9"/>
+
+  <!-- Window title bar divider -->
+  <line x1="140" y1="368" x2="884" y2="368" stroke="#FFFFFF" stroke-width="1.5" opacity="0.08"/>
+
+  <!-- Prompt caret  > -->
+  <path d="M196 480 L296 544 L196 608"
+        stroke="#5C8F5A" stroke-width="36" fill="none"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Cursor block -->
+  <rect x="322" y="508" width="52" height="68" rx="5" fill="#8ACA86" opacity="0.9"/>
+
+  <!-- Blinking underscore lines (simulated output) -->
+  <line x1="196" y1="660" x2="480" y2="660" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.18"/>
+  <line x1="196" y1="692" x2="620" y2="692" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" opacity="0.12"/>
+</svg>
