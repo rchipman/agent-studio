@@ -6,6 +6,7 @@ import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
 import TerminalPanel, { RunRequest } from '@/components/TerminalPanel'
 import Launcher from '@/components/Launcher'
+import TranscriptBrowser from '@/components/TranscriptBrowser'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
 import PanelDivider from '@/components/PanelDivider'
@@ -405,6 +406,7 @@ export default function Home() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [showLauncher, setShowLauncher] = useState(false)
+  const [showTranscripts, setShowTranscripts] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
   const runRef = useRef<((req: RunRequest) => void) | null>(null)
@@ -724,6 +726,11 @@ export default function Home() {
         setShowLauncher(true)
         return
       }
+      if (mod && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault()
+        setShowTranscripts(true)
+        return
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -849,6 +856,27 @@ export default function Home() {
             }}
           >
             Launch
+          </button>
+          <button
+            onClick={() => setShowTranscripts(true)}
+            title="Transcripts (⌘T)"
+            aria-label="Transcripts"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 28,
+              height: 28,
+              background: 'transparent',
+              color: color.inkSoft,
+              border: `1px solid ${color.line}`,
+              borderRadius: radius.md,
+              cursor: 'pointer',
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
           </button>
           <button
             onClick={() => setShowSettings(true)}
@@ -997,6 +1025,10 @@ export default function Home() {
         onRun={handleLaunch}
         onOpenSettings={() => { setShowLauncher(false); setShowSettings(true) }}
       />
+
+      {showTranscripts && (
+        <TranscriptBrowser onClose={() => setShowTranscripts(false)} />
+      )}
 
       {showQuickCapture && (
         <QuickCapture

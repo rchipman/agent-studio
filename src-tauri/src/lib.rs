@@ -2,6 +2,7 @@ mod git;
 mod launcher;
 mod search;
 mod settings;
+mod transcript;
 
 use std::sync::Mutex;
 
@@ -55,6 +56,10 @@ pub fn run() {
       launcher::list_prompts,
       launcher::list_skills,
       launcher::read_prompt,
+      transcript::list_transcript_projects,
+      transcript::list_sessions,
+      transcript::get_session,
+      transcript::search_transcripts,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
