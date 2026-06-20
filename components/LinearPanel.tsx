@@ -5,17 +5,20 @@ import { useEffect, useRef } from 'react'
 /**
  * Opens (or focuses) a native Tauri WebviewWindow for a Linear ticket.
  *
- * - First call for a ticket creates a new window.
- * - Subsequent calls while the window is still open focus it instead.
- * - Closing the window is handled by the OS chrome; the window label is
- *   reused across sessions so the webview keeps its own cookie/session store.
+ * - Each ticket gets its own window, keyed by a per-ticket label, so opening
+ *   a different ticket shows that ticket (Tauri v2 has no JS navigate() to
+ *   repoint a live window).
+ * - Reopening the same ticket while its window is still open focuses it
+ *   instead of spawning a duplicate, and the webview keeps its own
+ *   cookie/session store across opens.
  */
 async function openLinearWindow(ticketId: string): Promise<void> {
   const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
 
   const url = `https://linear.app/tiny-forest/issue/${ticketId}`
-  const label = 'linear'
+  // Per-ticket label (labels allow [a-zA-Z0-9_-], which covers TIN-1234).
+  const label = `linear-${ticketId}`
 
   // Reuse the existing window if it is still alive
   const existing = await WebviewWindow.getByLabel(label)
