@@ -10,6 +10,8 @@ import WorkspacePanel from '@/components/WorkspacePanel'
 import PanelDivider from '@/components/PanelDivider'
 import TypeChip from '@/components/TypeChip'
 import SettingsModal from '@/components/SettingsModal'
+import QuickCapture from '@/components/QuickCapture'
+import Toast from '@/components/Toast'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -392,6 +394,8 @@ export default function Home() {
   // UI state
   const [showNewModal, setShowNewModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showQuickCapture, setShowQuickCapture] = useState(false)
+  const [toast, setToast] = useState<{ message: string; path: string } | null>(null)
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
@@ -669,9 +673,10 @@ export default function Home() {
         setPaletteOpen(true)
         return
       }
-      if (mod && e.key === 'n') {
+      if (mod && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault()
-        setShowNewModal(true)
+        if (e.shiftKey) setShowQuickCapture(true)
+        else setShowNewModal(true)
         return
       }
       if (mod && e.key === '\\') {
@@ -944,6 +949,26 @@ export default function Home() {
 
       {showSettings && (
         <SettingsModal open onClose={() => setShowSettings(false)} />
+      )}
+
+      {showQuickCapture && (
+        <QuickCapture
+          open
+          onClose={() => setShowQuickCapture(false)}
+          onSaved={(path, project) => {
+            setShowQuickCapture(false)
+            setToast({ message: `Saved to ${project}.`, path })
+          }}
+        />
+      )}
+
+      {toast && (
+        <Toast
+          message={toast.message}
+          actionLabel="Open"
+          onAction={() => { openInSide(toast.path, 'left'); setToast(null) }}
+          onDismiss={() => setToast(null)}
+        />
       )}
     </div>
   )

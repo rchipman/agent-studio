@@ -70,6 +70,7 @@ export const font = {
 export const shadow = {
   modal: '0 20px 60px rgba(38,35,32,0.25)',
   panel: '-4px 0 24px rgba(38,35,32,0.12)',
+  toast: '0 4px 20px rgba(38,35,32,0.16)',
 } as const
 
 /**
