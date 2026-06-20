@@ -5,6 +5,7 @@ import dynamic from 'next/dynamic'
 import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
 import { MemorySearchResult, PanelSide, PanelTab, LoadedFile } from '@/lib/types'
 import TypeChip from '@/components/TypeChip'
+import DiffView from '@/components/DiffView'
 
 const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
 
@@ -240,6 +241,13 @@ export interface WorkspacePanelProps {
   /** Open a result/file in this panel, or the other panel when ⌘-clicked. */
   onOpenResult: (result: MemorySearchResult, e: React.MouseEvent) => void
 
+  /**
+   * Working directory for the Diff tab. The orchestrator (app/page.tsx) passes
+   * this from settings / agent cwd. Defaults to empty string (DiffView will
+   * surface "not-a-repo" in that case).
+   */
+  workingDir?: string
+
   // Editor
   onEditorChange: (markdown: string) => void
   onEditorSave: () => void
@@ -269,6 +277,7 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
     onOpenResult,
     onEditorChange,
     onEditorSave,
+    workingDir = '',
   } = props
 
   const fallbackSearchRef = useRef<HTMLInputElement>(null)
@@ -319,7 +328,7 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
         )}
 
         {activeTab === 'diff' && (
-          <CalmEmpty>Nothing changed yet.</CalmEmpty>
+          <DiffView workingDir={workingDir} />
         )}
       </div>
     </section>

@@ -12,6 +12,7 @@ import TypeChip from '@/components/TypeChip'
 import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
+import { getSettings } from '@/lib/settings'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -396,6 +397,9 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false)
   const [showQuickCapture, setShowQuickCapture] = useState(false)
   const [toast, setToast] = useState<{ message: string; path: string } | null>(null)
+  // Working directory the Diff tab inspects — defaults to the first registered
+  // agent's cwd from settings (the launcher updates this when a session starts).
+  const [activeWorkingDir, setActiveWorkingDir] = useState('')
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
@@ -663,6 +667,16 @@ export default function Home() {
 
   // ── Keyboard shortcuts ──
 
+  // Load the Diff tab's working directory from settings (first agent's cwd).
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        const cwd = s.agents?.[0]?.cwd
+        if (cwd) setActiveWorkingDir(cwd)
+      })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMac = navigator.platform.includes('Mac')
@@ -693,6 +707,13 @@ export default function Home() {
       if (mod && e.key === ',') {
         e.preventDefault()
         setShowSettings(true)
+        return
+      }
+      if (mod && e.key === 'd') {
+        e.preventDefault()
+        // Show the diff alongside the file: open the right panel on its Diff tab.
+        setRightOpen(true)
+        setRightPanel((prev) => ({ ...prev, activeTab: 'diff' }))
         return
       }
     }
@@ -853,6 +874,7 @@ export default function Home() {
         >
           <WorkspacePanel
             side="left"
+            workingDir={activeWorkingDir}
             activeTab={leftPanel.activeTab}
             onSelectTab={setLeftTab}
             activePath={leftPanel.activePath}
@@ -896,6 +918,7 @@ export default function Home() {
         >
           <WorkspacePanel
             side="right"
+            workingDir={activeWorkingDir}
             activeTab={rightPanel.activeTab}
             onSelectTab={setRightTab}
             showClose

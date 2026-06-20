@@ -1,3 +1,4 @@
+mod git;
 mod search;
 mod settings;
 
@@ -48,6 +49,8 @@ pub fn run() {
       settings::set_embedding_key,
       settings::embedding_key_status,
       settings::reveal_embedding_key,
+      git::git_status,
+      git::git_diff,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
