@@ -26,6 +26,7 @@ export const color = {
   tanTint: 'rgba(155,123,90,0.10)',
   hair: 'rgba(38,35,32,0.10)',
   hairSoft: 'rgba(38,35,32,0.08)',
+  neutralTint: 'rgba(38,35,32,0.06)',
   line: 'rgba(38,35,32,0.18)',
   scrim: 'rgba(38,35,32,0.45)',
   termBg: '#1a1917',
