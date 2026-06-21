@@ -295,7 +295,7 @@ function DiffLineRow({ line }: { line: DiffLine }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-type ViewState = 'loading' | 'clean' | 'not-a-repo' | 'error' | 'ready'
+type ViewState = 'loading' | 'clean' | 'not-a-repo' | 'error' | 'ready' | 'no-dir'
 
 interface FileDiff {
   raw: string
@@ -323,6 +323,12 @@ export default function DiffView({ workingDir }: DiffViewProps) {
   // ── Load status ──
 
   const loadStatus = useCallback(async () => {
+    // No configured working directory yet (e.g. no agent set up). Show a calm
+    // prompt instead of running git against an empty path and erroring.
+    if (!workingDir.trim()) {
+      setViewState('no-dir')
+      return
+    }
     setViewState('loading')
     setSelectedFile(null)
     setFileDiff(null)
@@ -370,6 +376,10 @@ export default function DiffView({ workingDir }: DiffViewProps) {
         Reading changes…
       </div>
     )
+  }
+
+  if (viewState === 'no-dir') {
+    return <CalmEmpty>Set a working directory in Settings to see changes.</CalmEmpty>
   }
 
   if (viewState === 'not-a-repo') {
