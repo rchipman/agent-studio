@@ -2,6 +2,7 @@ mod git;
 mod launcher;
 mod search;
 mod settings;
+mod terminal;
 mod transcript;
 
 use std::sync::Mutex;
@@ -46,6 +47,7 @@ pub fn run() {
       }
       app.manage(Db(Mutex::new(conn)));
       app.manage(MemoryRoot(Mutex::new(root)));
+      app.manage(terminal::TerminalState::default());
 
       Ok(())
     })
@@ -67,6 +69,9 @@ pub fn run() {
       transcript::list_sessions,
       transcript::get_session,
       transcript::search_transcripts,
+      terminal::spawn_agent,
+      terminal::terminal_write,
+      terminal::terminal_kill,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
