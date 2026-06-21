@@ -153,15 +153,16 @@ export async function buildBundle(
 }
 
 /**
- * Write the composed bundle to a temp markdown file and return its absolute path.
- * Uses the OS temp dir so it survives the spawn but is not littered into the repo.
+ * Write the composed bundle to a markdown file and return its absolute path.
+ * Lives under ~/.agent-studio/launches so it stays inside the app's filesystem
+ * scope (the OS temp dir is outside $HOME and is denied by the fs capability).
  */
 export async function writeBundle(bundle: string): Promise<string> {
-  const { tempDir } = await import('@tauri-apps/api/path')
+  const { homeDir } = await import('@tauri-apps/api/path')
   const { writeTextFile, mkdir } = await import('@tauri-apps/plugin-fs')
-  const dir = await tempDir()
+  const dir = await homeDir()
   const sep = dir.endsWith('/') ? '' : '/'
-  const folder = `${dir}${sep}agent-studio`
+  const folder = `${dir}${sep}.agent-studio/launches`
   try {
     await mkdir(folder, { recursive: true })
   } catch {
