@@ -11,17 +11,21 @@ import TranscriptBrowser from '@/components/TranscriptBrowser'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
 import PanelDivider from '@/components/PanelDivider'
-import TypeChip from '@/components/TypeChip'
 import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
+import FrontmatterForm from '@/components/FrontmatterForm'
 import { linkSuggest } from '@/lib/links'
+import { suggestFrontmatter, importMarkdown, type Suggestion } from '@/lib/frontmatter'
 import { getSettings } from '@/lib/settings'
+
+// Import flow + audit view (TIN-1638), loaded lazily / client-only.
+const ImportModal = dynamic(() => import('@/components/ImportModal'), { ssr: false })
+const AuditView = dynamic(() => import('@/components/AuditView'), { ssr: false })
 
 // The graph view pulls in d3-force; load it lazily and client-only so it stays
 // out of the initial bundle and the static-export SSR pass.
 const GraphView = dynamic(() => import('@/components/GraphView'), { ssr: false })
-import { slugify } from '@/lib/slug'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -88,29 +92,6 @@ async function fetchSearch(params: {
   })
 }
 
-async function createFile(body: {
-  name: string
-  slug: string
-  type: string
-  projects: string | string[]
-  tags?: string[]
-}): Promise<{ path?: string; error?: string }> {
-  try {
-    const path = await invoke<string>('create_file', {
-      payload: {
-        name: body.name,
-        slug: body.slug,
-        fileType: body.type,
-        projects: Array.isArray(body.projects) ? body.projects : [body.projects],
-        tags: body.tags ?? [],
-      },
-    })
-    return { path }
-  } catch (err) {
-    return { error: String(err) }
-  }
-}
-
 // ── New-file modal ────────────────────────────────────────────────────────────
 
 interface NewFileModalProps {
@@ -121,56 +102,102 @@ interface NewFileModalProps {
 }
 
 function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFileModalProps) {
-  const [name, setName] = useState('')
-  const [type, setType] = useState(knownTypes[0] ?? 'feedback')
-  const [projects, setProjects] = useState<string[]>(knownProjects.length > 0 ? [knownProjects[0]] : [])
-  const [tags, setTags] = useState('')
-  const [customType, setCustomType] = useState('')
-  const [customProject, setCustomProject] = useState('')
+  const [content, setContent] = useState('')
+  const [fm, setFm] = useState<Suggestion>({
+    name: '',
+    title: '',
+    type: knownTypes[0] ?? 'feedback',
+    projects: knownProjects.length > 0 ? [knownProjects[0]] : [],
+    tags: [],
+    created: '',
+    status: 'active',
+  })
+  // Fields the user has hand-edited stay sacrosanct on re-describe.
+  const editedRef = useRef<Set<keyof Suggestion>>(new Set())
+  const [hasEdits, setHasEdits] = useState(false)
+  const [describing, setDescribing] = useState(false)
+  const [described, setDescribed] = useState(false)
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const slug = slugify(name)
+  const describe = useCallback(async (text: string) => {
+    if (!text.trim()) return
+    setDescribing(true)
+    try {
+      const s = await suggestFrontmatter(text)
+      setFm((prev) => {
+        const ed = editedRef.current
+        return {
+          name: ed.has('name') ? prev.name : s.name,
+          title: ed.has('title') ? prev.title : s.title,
+          type: ed.has('type') ? prev.type : s.type,
+          projects: ed.has('projects') ? prev.projects : s.projects,
+          tags: ed.has('tags') ? prev.tags : s.tags,
+          created: s.created || prev.created,
+          status: ed.has('status') ? prev.status : s.status || prev.status,
+        }
+      })
+      setDescribed(true)
+    } catch {
+      /* keep the user's manual values */
+    } finally {
+      setDescribing(false)
+    }
+  }, [])
 
-  const effectiveType = type === '__custom__' ? customType : type
-  const allProjects = [
-    ...projects.filter((p) => p !== '__custom__'),
-    ...(projects.includes('__custom__') && customProject ? [customProject] : []),
-  ]
+  // Debounced auto-describe as the note is written or pasted.
+  useEffect(() => {
+    if (!content.trim()) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => describe(content), 600)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [content, describe])
+
+  const handleFormChange = (next: Suggestion) => {
+    const ed = editedRef.current
+    ;(Object.keys(next) as (keyof Suggestion)[]).forEach((k) => {
+      if (JSON.stringify(next[k]) !== JSON.stringify(fm[k])) ed.add(k)
+    })
+    setHasEdits(ed.size > 0)
+    setFm(next)
+  }
+
+  const regenerate = () => {
+    // Re-describe from the note, but a hand-edited name stays the user's.
+    const keepName = editedRef.current.has('name')
+    editedRef.current = new Set(keepName ? (['name'] as (keyof Suggestion)[]) : [])
+    setHasEdits(keepName)
+    describe(content)
+  }
 
   async function handleCreate() {
-    if (!name.trim()) { setError('Name is required'); return }
-    if (!effectiveType.trim()) { setError('Type is required'); return }
-    if (allProjects.length === 0) { setError('At least one project is required'); return }
+    if (!fm.name.trim()) { setError('A name is needed.'); return }
+    if (!fm.type.trim()) { setError('A type is needed.'); return }
+    if (fm.projects.length === 0) { setError('At least one project is needed.'); return }
 
     setCreating(true)
     setError('')
     try {
-      const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean)
-      const result = await createFile({
-        name: name.trim(),
-        slug,
-        type: effectiveType,
-        projects: allProjects,
-        tags: tagList,
-      })
-      if (result.error) {
-        setError(result.error)
-        setCreating(false)
-      } else if (result.path) {
-        onCreated(result.path)
-      }
+      const today = new Date().toISOString().slice(0, 10)
+      const body = content.trim() ? content : `# ${fm.title || fm.name}\n`
+      const path = await importMarkdown(body, { ...fm, created: fm.created || today })
+      onCreated(path)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create file')
+      setError(err instanceof Error ? err.message : 'Could not create the file. Your work is still here.')
       setCreating(false)
     }
   }
 
-  function toggleProject(p: string) {
-    setProjects((prev) =>
-      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
-    )
-  }
+  const sourceLabel = describing
+    ? 'Describing…'
+    : described
+      ? hasEdits
+        ? 'Described, with your edits.'
+        : 'Described from your note.'
+      : undefined
 
   return (
     <div
@@ -187,6 +214,8 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         aria-labelledby="new-file-modal-title"
         style={{
           width: 480,
+          maxHeight: '86vh',
+          overflowY: 'auto',
           background: color.bgRaised,
           borderRadius: radius.lg,
           boxShadow: shadow.modal,
@@ -201,76 +230,40 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
           New memory file
         </div>
 
-        {/* Name */}
+        {/* The note itself — described into frontmatter as you write. */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: space[1] }}>
-          <label style={labelStyle}>Name</label>
-          <input
+          <label style={labelStyle}>Note</label>
+          <textarea
             autoFocus
-            type="text"
-            placeholder="EAS build gate"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
-            style={inputStyle}
-          />
-          {slug && (
-            <div style={{ fontSize: 10, color: color.inkFaint, paddingLeft: 2 }}>
-              Slug: {slug}
-            </div>
-          )}
-        </div>
-
-        {/* Type */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
-          <label style={labelStyle}>Type</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
-            {['feedback', 'project', 'user', 'reference', ...knownTypes.filter((t) => !['feedback','project','user','reference'].includes(t))].map((t) => (
-              <TypeChip key={t} label={t} active={type === t} onClick={() => setType(t)} />
-            ))}
-            <TypeChip label="+ custom" active={type === '__custom__'} onClick={() => setType('__custom__')} />
-          </div>
-          {type === '__custom__' && (
-            <input
-              type="text"
-              placeholder="custom type"
-              value={customType}
-              onChange={(e) => setCustomType(e.target.value)}
-              style={inputStyle}
-            />
-          )}
-        </div>
-
-        {/* Projects */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
-          <label style={labelStyle}>Project(s)</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
-            {knownProjects.map((p) => (
-              <TypeChip key={p} label={p} active={projects.includes(p)} onClick={() => toggleProject(p)} />
-            ))}
-            <TypeChip label="+ custom" active={projects.includes('__custom__')} onClick={() => toggleProject('__custom__')} />
-          </div>
-          {projects.includes('__custom__') && (
-            <input
-              type="text"
-              placeholder="project-name"
-              value={customProject}
-              onChange={(e) => setCustomProject(e.target.value)}
-              style={inputStyle}
-            />
-          )}
-        </div>
-
-        {/* Tags */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: space[1] }}>
-          <label style={labelStyle}>Tags (comma-separated, optional)</label>
-          <input
-            type="text"
-            placeholder="builds, eas, poppy"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            style={inputStyle}
+            placeholder="Paste or write the note. We’ll describe it for you."
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            style={{
+              width: '100%',
+              minHeight: 120,
+              resize: 'vertical',
+              border: 'none',
+              background: 'transparent',
+              color: color.ink,
+              fontFamily: font.serif,
+              fontSize: 15,
+              lineHeight: 1.6,
+              outline: 'none',
+              padding: 0,
+              boxSizing: 'border-box',
+            }}
           />
         </div>
+
+        <FrontmatterForm
+          value={fm}
+          onChange={handleFormChange}
+          knownTypes={knownTypes}
+          knownProjects={knownProjects}
+          onRegenerate={content.trim() ? regenerate : undefined}
+          regenerating={describing}
+          sourceLabel={sourceLabel}
+        />
 
         {error && (
           <div style={{ fontSize: 12, color: color.notice, padding: '6px 10px', background: 'rgba(155,123,90,0.08)', borderRadius: radius.md }}>
@@ -434,6 +427,10 @@ export default function Home() {
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
+  // Frontmatter manager (TIN-1638): import queue + audit view + drag affordance.
+  const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
+  const [showAudit, setShowAudit] = useState(false)
+  const [draggingImport, setDraggingImport] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [showLauncher, setShowLauncher] = useState(false)
   const [showTranscripts, setShowTranscripts] = useState(false)
@@ -753,6 +750,56 @@ export default function Home() {
     [openInSide]
   )
 
+  // ── Frontmatter import (⌘O + drag-drop) ──
+
+  /** Read a set of paths into {path, content}, keeping only `.md` files. */
+  const readImportFiles = useCallback(async (paths: string[]) => {
+    const md = paths.filter((p) => p.endsWith('.md'))
+    if (md.length === 0) return
+    const { readTextFile } = await getTauriFns()
+    const files = await Promise.all(
+      md.map(async (p) => ({ path: p, content: await readTextFile(p).catch(() => '') })),
+    )
+    setImportFiles(files)
+  }, [])
+
+  const openImportPicker = useCallback(async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    })
+    if (!selected) return
+    await readImportFiles(Array.isArray(selected) ? selected : [selected])
+  }, [readImportFiles])
+
+  // Drag-and-drop `.md` files onto the window opens the import flow. The veil
+  // (draggingImport) is shown only while markdown files are over the window.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    ;(async () => {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+      const u = await getCurrentWebview().onDragDropEvent((event) => {
+        const p = event.payload
+        if (p.type === 'enter') {
+          setDraggingImport(p.paths.some((x) => x.endsWith('.md')))
+        } else if (p.type === 'leave') {
+          setDraggingImport(false)
+        } else if (p.type === 'drop') {
+          setDraggingImport(false)
+          readImportFiles(p.paths)
+        }
+      })
+      if (cancelled) u()
+      else unlisten = u
+    })()
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [readImportFiles])
+
   // ── New file modal ──
 
   const handleFileCreated = useCallback((filePath: string) => {
@@ -886,6 +933,18 @@ export default function Home() {
         // Toggle the knowledge graph view (TIN-1639).
         e.preventDefault()
         setGraphOpen((open) => !open)
+        return
+      }
+      if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) {
+        // Frontmatter audit view (TIN-1638).
+        e.preventDefault()
+        setShowAudit(true)
+        return
+      }
+      if (mod && !e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+        // Import markdown files (TIN-1638).
+        e.preventDefault()
+        openImportPicker()
         return
       }
     }
@@ -1204,6 +1263,61 @@ export default function Home() {
           onOpenTicket={(id) => { setActiveTicket(id) }}
           onClose={() => setGraphOpen(false)}
         />
+      )}
+
+      {/* Frontmatter import flow (⌘O / drag-drop) — TIN-1638 */}
+      {importFiles && importFiles.length > 0 && (
+        <ImportModal
+          files={importFiles}
+          knownTypes={knownTypes}
+          knownProjects={knownProjects}
+          onClose={() => setImportFiles(null)}
+          onImported={(paths) => {
+            setImportFiles(null)
+            runSearch(searchQuery, activeType, activeProject)
+            if (paths.length === 1) openInSide(paths[0], focusedSideRef.current)
+          }}
+        />
+      )}
+
+      {/* Frontmatter audit (⌘⇧A) — TIN-1638 */}
+      {showAudit && (
+        <AuditView
+          onClose={() => setShowAudit(false)}
+          onOpenFile={(path) => { setShowAudit(false); openInSide(path, focusedSideRef.current) }}
+          knownTypes={knownTypes}
+          knownProjects={knownProjects}
+        />
+      )}
+
+      {/* Calm drag-to-import veil — shown only while .md files are over the window */}
+      {draggingImport && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 3000,
+            background: color.neutralTint,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            pointerEvents: 'none',
+          }}
+        >
+          <div
+            style={{
+              border: `2px dashed ${color.forestLine}`,
+              borderRadius: radius.lg,
+              padding: `${space[7]}px ${space[8]}px`,
+              background: color.bgRaised,
+              boxShadow: shadow.modal,
+              textAlign: 'center',
+            }}
+          >
+            <div style={{ fontFamily: font.serif, fontSize: 18, color: color.ink, marginBottom: space[2] }}>
+              Drop Markdown files to import.
+            </div>
+            <div style={{ fontFamily: font.sans, fontSize: 11, color: color.inkFaint }}>
+              We’ll describe each one before anything is saved.
+            </div>
+          </div>
+        </div>
       )}
 
       {showSettings && (

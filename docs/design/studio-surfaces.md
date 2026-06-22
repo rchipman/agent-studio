@@ -1348,3 +1348,196 @@ like a build failure. We do none of it, and the file is *more* legible for it:
 ---
 
 SELF-REPORT: confidence: high; model-fit: right (cross-surface design judgment, token discipline, and reuse mapping over a large existing spec, plus the load-bearing nuance of inverting alarm grammar so `missing` reads quietest while staying honest; a cheaper model would likely have reached for a status grid, a red/✗ vocabulary, or invented a new preview primitive instead of reusing ResultCard).
+
+---
+
+## Dark theme (TIN-1673)
+
+The same room at night. Not a second app — the cream room with the lights down: a
+warm near-black instead of paper, a soft warm off-white instead of ink, the forest
+still the accent, heather and tan re-tuned so they read against dark instead of
+disappearing into it. Every house rule carries over unchanged: no red, no alarm,
+removals stay calm, attention is earned in tan not demanded. The light theme is
+forest-on-cream; this is forest-on-ember.
+
+Two anchors set the whole mood and everything else hangs off them:
+
+- **`--bg-app` = `#1A1815`** — a warm near-black. Brown-black, not slate; it is the
+  cream `#F2F0ED` taken down to embers, keeping the same hue family so the room is
+  recognisably ours. (Cold `#0F1115`-style slates are explicitly rejected.)
+- **`--ink` = `#ECE7DF`** — a soft warm off-white, never `#FFF`. It is the light
+  theme's cream lifted to a text weight; pure white on a warm dark reads clinical
+  and buzzes, this reads like warm paper at night.
+
+### Inversion principle (how the light values map)
+
+The light theme builds backgrounds from **white at low alpha over cream** and lines
+from **ink at low alpha over light**. In dark, both invert: backgrounds are **warm
+white at low alpha over the near-black** (so raised surfaces get *lighter*, as they
+must), and hairlines/tints are **warm white at low alpha** (light-on-dark overlays),
+*not* the light theme's dark-on-light. The forest/tan/heather hues lighten and
+slightly desaturate so they sit on dark without glowing. Alphas are nudged up a
+touch because overlays read fainter on dark than on light.
+
+### Token → dark value (every `color` key)
+
+Paste-ready for a `[data-theme="dark"]` block. Names match `lib/tokens.ts` /
+`globals.css` exactly.
+
+| Token | Dark value | Note |
+| --- | --- | --- |
+| `bgApp` / `--bg-app` | `#1A1815` | Warm near-black. App background, top bar. |
+| `bgRaised` / `--bg-raised` | `#23211D` | Modals, panels, menus. One warm step up from bgApp. |
+| `bgField` / `--bg-field` | `rgba(255,250,242,0.06)` | Inputs, search fields. Warm-white veil, not white-white. |
+| `bgFieldStrong` / `--bg-field-strong` | `rgba(255,250,242,0.10)` | Hovered cards, inline inputs. |
+| `bgCard` / `--bg-card` | `rgba(255,250,242,0.04)` | Resting result cards. Barely-there lift. |
+| `ink` / `--ink` | `#ECE7DF` | Primary text. Soft warm off-white. |
+| `inkSoft` / `--ink-soft` | `#A8A199` | Secondary text, labels. |
+| `inkFaint` / `--ink-faint` | `#766F66` | Tertiary text, timestamps, hints. |
+| `forest` / `--forest` | `#8FB089` | Primary accent. Sage-lifted forest — the dark-room forest. |
+| `forestTint` / `--forest-tint` | `rgba(143,176,137,0.16)` | Type chips, forest badges. |
+| `forestLine` / `--forest-line` | `rgba(143,176,137,0.36)` | Active card border. |
+| `forestWash` / `--forest-wash` | `rgba(143,176,137,0.10)` | Active card fill, selected row. |
+| `tan` / `--tan` | `#C9A57E` | Project accent. Warmer, lighter tan. |
+| `tanTint` / `--tan-tint` | `rgba(201,165,126,0.16)` | Project chips, project badges. |
+| `hair` / `--hair` | `rgba(255,250,242,0.10)` | Standard hairline / divider. |
+| `hairSoft` / `--hair-soft` | `rgba(255,250,242,0.07)` | Card border, lighter divider. |
+| `neutralTint` / `--neutral-tint` | `rgba(255,250,242,0.06)` | Neutral badge, `attic` domain. |
+| `line` / `--line` | `rgba(255,250,242,0.18)` | Input border, control border. |
+| `scrim` / `--scrim` | `rgba(8,7,6,0.60)` | Modal overlay. Darkens the dark — must read as a layer below the raised card. |
+| `termBg` / `--term-bg` | `#15140F` | Terminal surface. Nudged *below* bgApp so the terminal still reads as its own well. |
+| `termFg` / `--term-fg` | `#D4D0CB` | Terminal text. Unchanged — already warm, still clears AA on the new termBg. |
+| `add` / `--add` | `#8FB089` | Diff additions, "saved". Same as forest. Forest, not green-LED. |
+| `addWash` / `--add-wash` | `rgba(143,176,137,0.14)` | Added-line background. Light-on-dark. |
+| `remove` / `--remove` | `#B9A6C6` | Diff removals. Lifted heather, never red. |
+| `removeWash` / `--remove-wash` | `rgba(185,166,198,0.14)` | Removed-line background. Light-on-dark. |
+| `notice` / `--notice` | `#C9A57E` | "Out of date", "unsaved". Same as tan. Attention without alarm. |
+
+Shadows also need re-tuning for dark (the light theme's `rgba(38,35,32,…)` ink
+shadows vanish on a near-black). Deepen them and lean on the `bgRaised` step +
+hairline for separation rather than the shadow alone:
+
+| Token | Dark value |
+| --- | --- |
+| `--shadow-modal` | `0 20px 60px rgba(0,0,0,0.55)` |
+| `--shadow-panel` | `-4px 0 24px rgba(0,0,0,0.40)` |
+| `--shadow-toast` | `0 4px 20px rgba(0,0,0,0.45)` |
+
+The `globals.css` hard-coded bits move into the theme blocks too: the
+`::-webkit-scrollbar-thumb` (`rgba(255,250,242,0.14)` / hover `0.24` in dark), the
+`html, body` background (`#1A1815`), and the Milkdown/ProseMirror `color`,
+`caret-color`, link, and blockquote values, which currently hard-code `#262320` /
+`#3E5641` / `#6B6760` — these should reference the ink/forest/inkSoft tokens so they
+follow the theme. The `hljs` code-highlight block is already a dark theme and stays.
+
+### Contrast checks (verified, sRGB WCAG 2.x)
+
+Computed against the anchors above. AA is 4.5:1 for body text, 3:1 for large text
+and UI accents.
+
+| Pair | Ratio | Verdict |
+| --- | --- | --- |
+| `ink` `#ECE7DF` on `bgApp` `#1A1815` | **14.4 : 1** | AAA — body text. The anchor pair. |
+| `ink` on `bgRaised` `#23211D` | 13.1 : 1 | AAA — text on modals/panels. |
+| `inkSoft` `#A8A199` on `bgApp` | **6.9 : 1** | AA (passes AAA for large). Secondary text, labels. |
+| `inkSoft` on `bgRaised` | 6.3 : 1 | AA. |
+| `inkFaint` `#766F66` on `bgApp` | 3.6 : 1 | Passes AA for large/non-essential (timestamps, hints, placeholders) by design — same role as in light. |
+| `forest` `#8FB089` on `bgApp` | **7.4 : 1** | AA. Accent text, active state, `add` gutter. |
+| `forest` on `bgRaised` | 6.7 : 1 | AA. |
+| `tan` `#C9A57E` (= `notice`) on `bgApp` | 7.7 : 1 | AA. Project accent, notice text. |
+| `remove` `#B9A6C6` heather on `bgApp` | 7.9 : 1 | AA. Diff removals — calm, never red. |
+| `add` text on `addWash`-over-`bgApp` | 5.8 : 1 | AA. The diff add line reads. |
+| `remove` text on `removeWash`-over-`bgApp` | 6.1 : 1 | AA. The diff remove line reads. |
+| `termFg` `#D4D0CB` on `termBg` `#15140F` | 11.5 : 1 | AAA. Terminal unaffected. |
+
+Body ink on app background clears AA (and AAA) with wide margin; every accent used
+as text clears AA. `inkFaint` intentionally sits at the large-text AA threshold for
+its tertiary role, matching its light-theme counterpart (`#9B9490` on cream ≈ 2.7:1
+there, so dark `inkFaint` is in fact *more* legible than light's).
+
+### Washes, tints, and overlays (the light-on-dark rule)
+
+The single rule: **on dark, every tint/wash/hairline is a light overlay, never a
+dark one.** The light theme's `rgba(38,35,32,…)` (ink-over-light) values would paint
+*darker* smudges on the near-black and read as holes. They all flip to warm-white or
+the lifted-accent hue:
+
+- **Neutral structure** (`hair`, `hairSoft`, `neutralTint`, `line`, the three
+  `bg*` field surfaces, scrollbar): warm white `rgba(255,250,242,α)`. Alpha bumped
+  ~+0.04 over the obvious inversion because a light veil reads fainter on a dark base
+  than a dark veil reads on a light one. `line` (control borders) is the strongest
+  at `0.18`; `bgCard` the faintest at `0.04`.
+- **Forest washes/tints** use the *lifted* forest `143,176,137`, not the light
+  `62,86,65` (which would barely register). `forestTint` `0.16`, `forestLine`
+  `0.36`, `forestWash` / `addWash` `0.10`–`0.14`.
+- **Heather/tan washes** likewise use the lifted hues (`185,166,198` /
+  `201,165,126`) at `0.14`–`0.16`.
+- **`scrim` is the one overlay that stays dark** (`rgba(8,7,6,0.60)`) — its job is
+  to push the underlying view *down* a layer beneath a raised card, and on a dark
+  base that still means darkening + the modal's own `bgRaised` lift carries the
+  separation. Alpha is raised from light's `0.45` to `0.60` so the modal still reads
+  as floating.
+
+The recessive notice block (hard-coded `rgba(155,123,90,0.08)` in `DiffView.tsx`,
+`WorkspacePanel.tsx`, etc.) should become a token-or-theme value; in dark use
+`rgba(201,165,126,0.12)` (lifted tan, slightly higher alpha) under `--notice` text.
+
+### Cross-surface domain hues still resolve
+
+The §Wiki-linking rule "a domain has one hue, everywhere" must survive the dark
+re-tune — the five graph/Links domains key off existing tokens, so they move with
+them and stay mutually distinguishable on `bgApp`: `studio` (forestTint/forest),
+`shared` (tanTint/tan), `attic` (neutralTint/inkSoft), `understory`
+(forestWash/forest — still a lighter forest than studio), `website`
+(removeWash/remove — heather as identity, still calm, still no red). Verified the
+five fills read as distinct washes against `#1A1815`.
+
+### Implementation: theme selector strategy
+
+**Recommendation: keep `:root` as the light theme (the default), add
+`:root[data-theme="dark"]` as the override.** Reasons:
+
+1. The app ships light today; an unset/legacy state must stay light, so light is the
+   natural base. A bare `:root` = light keeps that true with zero migration.
+2. Builders override only what changes inside one `[data-theme="dark"]` block — the
+   non-color tokens (space, radii, type, fonts) never fork.
+3. Add an explicit `:root[data-theme="light"]` block too, but only as an *alias of
+   the base values*, so "System → light" and "System → dark" are both addressable
+   and a future third theme has a clean slot. The base `:root` and
+   `[data-theme="light"]` hold identical color values (light); `[data-theme="dark"]`
+   holds the table above. `lib/tokens.ts` gains a parallel `darkColor` export (or a
+   `colorFor(theme)` helper) so inline-styled React — which reads JS tokens, not CSS
+   vars — can switch too; the components consume it via a `useTheme()` hook rather
+   than importing `color` directly. (This JS side is the real work; the CSS side is a
+   paste.)
+
+For **System**, resolve `prefers-color-scheme` to set `data-theme` on the root at
+load and on change; never leave it unset when System is chosen, so the JS token
+object and the CSS vars always agree.
+
+### Toggle UI
+
+**In Settings: a Light / Dark / System segmented control.** A new first row in a
+small **Appearance** section (above Roots), three segments reusing the `TypeChip`
+active/resting treatment (active = forest fill / ink-on-forest, resting =
+transparent / `inkSoft` with `line` border) so it introduces no new primitive.
+Default **System**. Label `Theme` (`--t-label`), the segment under it. This is the
+canonical, discoverable home for the choice — calm, explained once, set and
+forgotten.
+
+**Top-bar sun/moon: no.** It fails house rule 5 (a top-bar control that does one tiny
+job, permanently spending the calmest real estate in the app on a setting most users
+flip once). Theme is not a per-session act like search or run; it does not earn a
+persistent chrome affordance.
+
+**A command-palette action: yes, quietly.** Add a single `⌘K` entry —
+`Switch theme` (cycles Light → Dark → System, or opens the Settings row) — so power
+users who live in the palette can reach it without a mouse, and it stays an
+accelerator with a visible door (the Settings control), exactly per house rule 7. No
+new global chord: a dedicated theme keybinding would clutter the §B map for a
+once-a-month act. So: **segmented control in Settings (the door) + one command-
+palette entry (the accelerator), no top-bar glyph, no global shortcut.**
+
+---
+
+SELF-REPORT: confidence: high; model-fit: right (palette design with measured WCAG verification, token-name fidelity for a paste-in builder, and the load-bearing nuances — warm-not-cold near-black, light-on-dark overlay inversion, scrim staying dark, terminal nudged below bgApp, and the five cross-surface domain hues surviving the re-tune; a cheaper model would likely have produced a cold slate palette, inverted overlays as dark-on-dark smudges, or broken the no-red / domain-hue constraints).
