@@ -467,6 +467,161 @@ of any prompt is one keystroke.
 
 ---
 
+### Document tabs
+
+*Ticket TIN-1672. Extends the two-panel workspace (TIN-1640).*
+
+Today a panel holds exactly one document. Opening a second from search replaces the
+first, and the only way back to search is to clear the panel. That is the bug Rob
+felt: the panel forgets where you were. The fix is to let a panel hold *several* open
+documents, with Search always one click away, never closed.
+
+**The hard question: two kinds of tabs.** A panel already has surface tabs
+(Content / Links / Diff). We are adding document tabs (one per open file). They do
+not compete, because they answer different questions:
+
+- **Document tabs say *which note*** you are looking at. They live in a tab strip at
+  the very top of the panel.
+- **Surface tabs say *which face of that note*** — its Content, its Links, its Diff.
+  They become a quiet sub-selector that belongs to the active document tab.
+
+So the panel reads top to bottom: **document strip → surface strip → body.** Search
+is not a fourth surface and not a separate mode; it is the **leftmost, permanent
+document tab**. Selecting it shows the search/results view in the body and hides the
+surface strip (search has no Content/Links/Diff). Selecting any document tab shows
+that document and reveals the surface strip. This keeps one mental model — "tabs are
+the things this panel holds, and Search is always the first one" — and means the
+return to search costs exactly one click, with every open doc still sitting beside it.
+
+This replaces the old rule where the Content surface-tab *was* either search or the
+doc. Content is now always a document surface; search has graduated to its own pinned
+tab. Links and Diff are unchanged in meaning, they now simply scope to the active
+document tab.
+
+**Tab-strip anatomy** (the new top row of each panel, height 36, `--hair-soft`
+bottom border, `--bg-app`, horizontal, `--sp-1` gap):
+
+```
+┌ left panel ──────────────────────────────────────────────┐
+│ ⌕ Search │ eas-build-gate │ launcher-spec ✕ │  + │      ✕ │
+│ ───────── │  ▔▔▔▔▔▔▔▔▔▔▔▔▔ active                          │
+├───────────────────────────────────────────────────────────┤
+│ Content   Links   Diff                  ← surface strip    │
+├───────────────────────────────────────────────────────────┤
+│ … document body …                                          │
+```
+
+- **Order:** `[ ⌕ Search ] [ doc-a ] [ doc-b ] … [ + ]`, then the panel-close `✕`
+  pushed to the far right (right panel only, unchanged behaviour).
+- **Search tab:** leftmost, permanent, cannot be closed. A `⌕` glyph plus the word
+  `Search` at the first open and whenever the panel is narrow it may collapse to the
+  glyph alone (the tooltip carries `Search`). Active when no document is focused.
+- **Document tab:** the file's `name` (frontmatter, falling back to the filename
+  without `.md`), `--t-body`, truncated with ellipsis at ~140px, full name in the
+  `title`. A close `✕` appears on hover and when active (see below). Click selects;
+  it never opens search.
+- **`+` new-doc affordance:** a single `+` ghost button after the last document tab.
+  It selects the Search tab and focuses the search field — "add a document" means
+  "go find one." (It does not open the New-file modal; that stays on `⌘N`. The `+`
+  is about *opening*, not *creating*, matching what the row holds.)
+- **Active / inactive / hover:**
+  - *Active* — `--ink` text weight 600, a 2px `--forest` bottom rule (reuses the
+    existing surface-tab active treatment, lifted to this row), background transparent.
+  - *Inactive* — `--ink-soft` weight 400, transparent, no rule.
+  - *Hover (inactive)* — background `--bg-field-strong`, text `--ink`. 0.1s ease,
+    matching `ResultCard`.
+  - The Search tab uses the same three states; it simply can't show a close `✕`.
+- **Close `✕`:** `--ink-faint`, 12px, reusing the panel-close glyph. Shown on the
+  active tab always and on any tab while hovered (so closing is discoverable without
+  cluttering the resting row). Closing the active tab selects its **right neighbour**,
+  or its left if it was last, falling back to the Search tab when no documents remain.
+  Never red, never a confirm — the editor autosaves, so closing a tab loses nothing.
+- **Overflow (many tabs):** the strip **scrolls horizontally**, it does not wrap and
+  does not collapse into a menu. The Search tab and the `+` are *pinned* (Search left,
+  `+` and panel-`✕` right) while the document tabs between them scroll under them.
+  Selecting a tab off-screen (via `⌃Tab` or a click in another surface) scrolls it
+  into view. No scrollbar chrome; a 12px `--bg-app` fade mask on each scrolling edge
+  signals more. We choose scroll over an overflow menu because tab count per panel is
+  expected in the low single digits and a menu would hide the very thing the row
+  exists to show. (Revisit only if real use regularly exceeds ~8 per panel.)
+- **At one document:** strip reads `⌕ Search │ note-name`. Calm, two items, the doc
+  active. No `✕` until hover. This is barely louder than today's single-doc panel.
+- **At zero documents (fresh panel):** strip reads `⌕ Search` plus a faint `+`.
+  Search is active, the body is the search view. This is the default and the empty
+  state in one — identical in feel to today's clean search-first panel. No regression.
+
+**Surface strip (Content / Links / Diff).** Unchanged visually — same 36px row, same
+forest underline — but it now renders **only when a document tab is active**, directly
+beneath the document strip, and it scopes to that document. When Search is active the
+surface strip is absent (search has no surfaces), so a fresh panel shows exactly one
+strip, as today. Each document tab remembers its own active surface, so a doc opened
+to its Diff stays on Diff when you tab away and back.
+
+**Per-panel independence.** Each panel owns its own `tabs` list and its own
+`activeTabId`. Opening, closing, reordering (future), and surface selection in the
+left panel never touch the right. The shared `files` cache (keyed by path) is
+unchanged: a document open in both panels still shares one set of contents and edits,
+so autosave stays correct.
+
+**⌘-click to the other panel.** Unchanged intent, new target. ⌘-clicking a search
+result (or a future cross-link) opens that document as a **tab in the other panel**
+and selects it there, revealing the right panel if it was closed — exactly the current
+`makeOpenResult` routing, except it *appends a tab* instead of replacing the panel's
+single doc. A plain click opens (or re-selects, if already open) the document as a tab
+in the **same** panel. Opening a path already present in a panel selects its existing
+tab rather than duplicating it.
+
+**States.**
+- *Empty* (no docs) → Search tab active, search view in the body. The resting state.
+- *Dirty / unsaved* → **none.** The editor autosaves on a 300ms debounce
+  (`makeEditorChange`), so there is no unsaved state to indicate and therefore no dot
+  on a tab. We confirm this deliberately: adding a dirty dot would imply a save action
+  the app doesn't have, and a `✕`-becomes-dot swap is exactly the kind of cleverness
+  §D forbids. The `isSaving` word in the top bar remains the only save signal, and
+  that is enough.
+- *Loading a tab's document* → the body shows the existing `Loading…` line; the tab
+  itself shows its name immediately (we have it from the search result / recents).
+
+**Keyboard** (minimal, additive, consistent with §B's map — no new global chords that
+collide):
+- `⌘W` — **close the active document tab** in the focused panel. If Search is the
+  active tab, `⌘W` is a no-op (Search is unclosable; we do not repurpose it to close
+  the panel — `⌘\` already owns that). This is the one genuinely new binding and it
+  earns its place: closing tabs is the new frequent act.
+- `⌃Tab` / `⌃⇧Tab` — cycle to the next / previous tab in the focused panel, wrapping,
+  Search included in the cycle. Non-`⌘` so it never fights the OS or the existing
+  `⌘`-letter family.
+- `⌘F` — unchanged, now means "select this panel's Search tab and focus the field"
+  (previously it cleared the panel; same felt result, no doc is closed).
+- No tab-numbering chords (`⌘1..9`). They would be a fourth way to do what click and
+  `⌃Tab` already do, and the row is short. Restraint over completeness.
+
+**Persistence.** Extends `agent-studio-layout` only; no new key. `PanelState` grows
+from one path to a tab list:
+
+```ts
+type PanelTab = 'content' | 'links' | 'diff'        // unchanged: surface ids
+interface OpenDoc { path: string; surface: PanelTab } // one open document tab
+interface PanelState {
+  tabs: OpenDoc[]            // open documents, left→right strip order
+  activeTabId: string | null // a path, or null = Search tab is active
+}
+```
+
+The Search tab is implicit (always present, leftmost) and so is *not* stored in
+`tabs`; `activeTabId: null` is its selected state. On hydrate, restore every tab's
+document into the `files` cache (today we restore one `activePath` per panel; now we
+restore the union of both panels' `tabs`). A one-time migration reads any legacy
+`{ activePath, activeTab }`: if `activePath` is set it becomes
+`tabs: [{ path: activePath, surface: activeTab }], activeTabId: activePath`; if null it
+becomes `tabs: [], activeTabId: null`. `rightOpen` and `leftWidth` are unchanged.
+
+This keeps the whole feature inside the existing layout object, so a user who reopens
+the app finds both panels with the same documents open, the same tab active, and the
+same surface showing — the panel finally remembers where you were.
+
+---
+
 ## D. House rules (enforce in review)
 
 1. **Calm and present.** No alarm states, no red, no `⚠`, no exclamation marks in UI
