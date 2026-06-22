@@ -539,6 +539,36 @@ pub fn import_markdown(
     Ok(path.to_string_lossy().to_string())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInput {
+    /// Absolute path of an existing memory file to repair.
+    pub path: String,
+    /// The reviewed frontmatter to write in place (body preserved).
+    pub frontmatter: Suggestion,
+}
+
+/// Rewrite an existing file's frontmatter in place (the audit "fix" path). The
+/// body after the block is preserved exactly; the index is rebuilt after.
+#[tauri::command]
+pub fn update_frontmatter(
+    payload: UpdateInput,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<(), String> {
+    let s = &payload.frontmatter;
+    if s.type_.trim().is_empty() || s.projects.is_empty() {
+        return Err("type and at least one project are required".to_string());
+    }
+    let raw = fs::read_to_string(&payload.path).map_err(|e| e.to_string())?;
+    fs::write(&payload.path, apply_frontmatter(&raw, s)).map_err(|e| e.to_string())?;
+
+    let root = memory.0.lock().map_err(|e| e.to_string())?.clone();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::search::build_index(&root, &conn).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

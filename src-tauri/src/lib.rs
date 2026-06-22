@@ -97,6 +97,7 @@ pub fn run() {
       frontmatter::suggest_frontmatter,
       frontmatter::audit_frontmatter,
       frontmatter::import_markdown,
+      frontmatter::update_frontmatter,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
