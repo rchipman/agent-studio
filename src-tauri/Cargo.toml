@@ -36,6 +36,11 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1.9"
 gray_matter = "0.3.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# TIN-1631: embedding client — HTTP (rustls, no native-tls) + SHA-256.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 # E2E only (TIN-1645): embeds a W3C WebDriver server (port 4445) so WebdriverIO
 # can drive the real app. Behind the `webdriver` feature so it is entirely
 # excluded from normal dev/release builds — build E2E with `--features webdriver`.
