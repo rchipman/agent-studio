@@ -133,7 +133,8 @@ const SCHEMA: &str = "
       chunk_idx INTEGER NOT NULL,
       content   TEXT NOT NULL,
       sha256    TEXT NOT NULL,
-      embedding F32_BLOB(1536)
+      embedding F32_BLOB(1536),
+      UNIQUE(file_path, chunk_idx)
     );
     CREATE INDEX IF NOT EXISTS chunks_path ON chunks(file_path);
 ";

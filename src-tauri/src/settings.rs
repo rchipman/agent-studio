@@ -27,8 +27,10 @@ pub const STORE_FILE: &str = "settings.json";
 const SETTINGS_KEY: &str = "settings";
 
 /// Keychain identifiers for the embedding API key.
-const KEYCHAIN_SERVICE: &str = "com.agent-studio.embedding";
-const KEYCHAIN_ACCOUNT: &str = "embedding-api-key";
+/// Exposed `pub` so `embeddings::resolve_api_key` can access them without
+/// duplicating the constants.
+pub const KEYCHAIN_SERVICE: &str = "com.agent-studio.embedding";
+pub const KEYCHAIN_ACCOUNT: &str = "embedding-api-key";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
