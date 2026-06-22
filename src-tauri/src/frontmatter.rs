@@ -1,0 +1,719 @@
+//! frontmatter.rs
+//!
+//! Rule-based frontmatter manager for TIN-1638. Three jobs, all local and
+//! instant (no LLM):
+//!
+//!   1. `generate` — analyse a markdown body and suggest a full frontmatter set
+//!      (name, type, projects, tags, created, status). Drives smart generation
+//!      on create (Surface 1) and the import flow (Surface 2).
+//!   2. `audit` — scan every memory file and report its frontmatter health
+//!      (complete / partial / missing). Drives the audit view (Surface 3).
+//!   3. `import_markdown` — write an existing markdown body into the memory root
+//!      with a generated/edited frontmatter block prepended, body preserved.
+//!
+//! The classifier is pure and table-driven so each rule is unit-testable in
+//! isolation (it is an evaluator + resolver, not CRUD — see the tests).
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use chrono::Local;
+use gray_matter::engine::YAML;
+use gray_matter::{Matter, Pod};
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::search::Db;
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+/// A suggested frontmatter set, all fields user-editable before save.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    /// Slugified identifier (the frontmatter `name` and the filename stem).
+    pub name: String,
+    /// Human-readable title (first heading / sentence), shown in the preview.
+    pub title: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub projects: Vec<String>,
+    pub tags: Vec<String>,
+    pub created: String,
+    pub status: String,
+}
+
+/// One row of the frontmatter audit.
+#[derive(Serialize, Clone, Default, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditEntry {
+    pub path: String,
+    /// `"complete"` | `"partial"` | `"missing"`.
+    pub status: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub projects: Vec<String>,
+    pub created: String,
+    /// The file's frontmatter `status` field (not the audit status above).
+    pub doc_status: String,
+    /// Which required fields are absent (`type` / `projects` / `created`).
+    pub missing: Vec<String>,
+}
+
+// ── Title extraction ──────────────────────────────────────────────────────────
+
+/// The document title: the first `#` heading, else the first sentence, else "".
+/// Frontmatter (a leading `---` block) is skipped so we read the prose.
+pub fn extract_title(body: &str) -> String {
+    let body = strip_frontmatter(body);
+    // First ATX heading.
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("# ") {
+            let h = rest.trim();
+            if !h.is_empty() {
+                return h.to_string();
+            }
+        }
+    }
+    // First non-empty sentence (up to a sentence terminator).
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with("---") {
+            continue;
+        }
+        let end = t
+            .find(['.', '!', '?'])
+            .map(|i| i + 1)
+            .unwrap_or(t.len());
+        let sentence = t[..end].trim_end_matches(['.', '!', '?']).trim();
+        return sentence.chars().take(80).collect();
+    }
+    String::new()
+}
+
+/// Strip a leading YAML frontmatter block, returning the body after it.
+fn strip_frontmatter(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        return raw;
+    }
+    // Find the closing fence after the opening one.
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            let after = &rest[end + 4..];
+            return after.trim_start_matches(['\r', '\n']);
+        }
+    }
+    raw
+}
+
+// ── Slugify ───────────────────────────────────────────────────────────────────
+
+/// Lowercase, hyphenate, strip non-alphanumerics; collapse runs and trim. Caps
+/// at ~60 chars on a word boundary. Mirrors the frontend `slugify`.
+pub fn slugify(title: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = out.trim_matches('-').to_string();
+    if slug.len() <= 60 {
+        return slug;
+    }
+    // Trim to the last hyphen within 60 chars so we don't cut a word.
+    let cut = slug[..60].rfind('-').unwrap_or(60);
+    slug[..cut].trim_matches('-').to_string()
+}
+
+// ── Type inference ─────────────────────────────────────────────────────────────
+
+/// Classify the document type from content patterns. Ordered: the first rule
+/// that matches wins (feedback is the most specific signal, project the default).
+pub fn infer_type(body: &str) -> String {
+    let lower = body.to_lowercase();
+
+    // Feedback memories carry the canonical "Why:" + "How to apply:" scaffold.
+    if lower.contains("why:") && lower.contains("how to apply:") {
+        return "feedback".to_string();
+    }
+    // A pointer to an external resource, when that's the dominant content.
+    if is_reference(body, &lower) {
+        return "reference".to_string();
+    }
+    // About Rob personally (preferences / identity), without a product/ticket.
+    if is_user(&lower) {
+        return "user".to_string();
+    }
+    // Default: project work (decisions, tickets, product context).
+    "project".to_string()
+}
+
+/// A reference is short and dominated by an external link.
+fn is_reference(body: &str, lower: &str) -> bool {
+    let has_url = lower.contains("http://") || lower.contains("https://");
+    if !has_url {
+        return false;
+    }
+    // "dominant" = short doc, or an explicit pointer phrase.
+    let words = body.split_whitespace().count();
+    lower.contains("see http")
+        || lower.contains("link:")
+        || lower.contains("url:")
+        || words < 40
+}
+
+/// A user memory is about Rob's preferences/identity and names no product/ticket.
+fn is_user(lower: &str) -> bool {
+    if lower.contains("tin-") {
+        return false;
+    }
+    let mentions_rob = lower.contains("rob");
+    let preference = lower.contains("prefer")
+        || lower.contains("likes")
+        || lower.contains("dislikes")
+        || lower.contains("wants")
+        || lower.contains("always")
+        || lower.contains("never");
+    mentions_rob && preference
+}
+
+// ── Project inference ──────────────────────────────────────────────────────────
+
+/// Detect which known projects the body mentions (case-insensitive, whole word),
+/// preserving the order of `known`. Used so a note lands in the right folder.
+pub fn infer_projects(body: &str, known: &[String]) -> Vec<String> {
+    let lower = body.to_lowercase();
+    let mut hits = Vec::new();
+    for p in known {
+        let needle = p.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        if contains_word(&lower, &needle) {
+            hits.push(p.clone());
+        }
+    }
+    hits
+}
+
+/// Whole-word containment: `needle` appears in `haystack` bounded by non-alnum.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+// ── Tag extraction ─────────────────────────────────────────────────────────────
+
+/// Top keywords by frequency over a stopword list. Returns up to 5, longest-ties
+/// broken by first appearance. Words shorter than 3 chars and pure numbers drop.
+pub fn extract_tags(body: &str) -> Vec<String> {
+    let body = strip_frontmatter(body);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for raw in body.split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() < 3 {
+            continue;
+        }
+        let w = raw.to_lowercase();
+        if w.chars().all(|c| c.is_ascii_digit()) || STOPWORDS.contains(&w.as_str()) {
+            continue;
+        }
+        if !counts.contains_key(&w) {
+            order.push(w.clone());
+        }
+        *counts.entry(w).or_insert(0) += 1;
+    }
+
+    // Sort by (count desc, first-seen asc) for stable, sensible output.
+    let mut idx: HashMap<&str, usize> = HashMap::new();
+    for (i, w) in order.iter().enumerate() {
+        idx.insert(w.as_str(), i);
+    }
+    let mut words: Vec<String> = counts.keys().cloned().collect();
+    words.sort_by(|a, b| {
+        counts[b]
+            .cmp(&counts[a])
+            .then_with(|| idx[a.as_str()].cmp(&idx[b.as_str()]))
+    });
+    words.into_iter().take(5).collect()
+}
+
+/// A compact stopword list — enough to keep tags meaningful without a corpus.
+const STOPWORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
+    "one", "our", "out", "day", "get", "has", "him", "his", "how", "man", "new", "now", "old",
+    "see", "two", "way", "who", "boy", "did", "its", "let", "put", "say", "she", "too", "use",
+    "this", "that", "with", "from", "they", "have", "what", "when", "your", "will", "would",
+    "there", "their", "which", "about", "into", "than", "then", "them", "these", "some", "more",
+    "could", "should", "because", "been", "were", "also", "just", "like", "over", "such", "only",
+    "very", "much", "many", "most", "each", "other", "thing", "things", "where", "while", "here",
+];
+
+// ── Generate ───────────────────────────────────────────────────────────────────
+
+/// Produce a full suggestion from a markdown body. `today` is injected for
+/// determinism; `known_projects` is the set to match against.
+pub fn generate(body: &str, today: &str, known_projects: &[String]) -> Suggestion {
+    let title = extract_title(body);
+    Suggestion {
+        name: slugify(&title),
+        title,
+        type_: infer_type(body),
+        projects: infer_projects(body, known_projects),
+        tags: extract_tags(body),
+        created: today.to_string(),
+        status: "active".to_string(),
+    }
+}
+
+// ── Audit ──────────────────────────────────────────────────────────────────────
+
+/// Classify a single file's frontmatter health from its raw content.
+pub fn audit_one(path: &str, raw: &str) -> AuditEntry {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        return AuditEntry {
+            path: path.to_string(),
+            status: "missing".to_string(),
+            missing: vec!["type".into(), "projects".into(), "created".into()],
+            ..Default::default()
+        };
+    }
+
+    let matter = Matter::<YAML>::new();
+    let parsed = matter.parse(raw).ok();
+    let map = parsed
+        .as_ref()
+        .and_then(|p| p.data.as_ref())
+        .and_then(|d: &Pod| d.as_hashmap().ok())
+        .unwrap_or_default();
+
+    let type_ = pod_str(&map, "type");
+    let projects = pod_str_list(&map, "projects");
+    let created = pod_str(&map, "created");
+    let doc_status = pod_str(&map, "status");
+
+    let mut missing = Vec::new();
+    if type_.is_empty() {
+        missing.push("type".to_string());
+    }
+    if projects.is_empty() {
+        missing.push("projects".to_string());
+    }
+    if created.is_empty() {
+        missing.push("created".to_string());
+    }
+
+    let status = if missing.is_empty() { "complete" } else { "partial" };
+    AuditEntry {
+        path: path.to_string(),
+        status: status.to_string(),
+        type_,
+        projects,
+        created,
+        doc_status,
+        missing,
+    }
+}
+
+fn pod_str(map: &HashMap<String, Pod>, key: &str) -> String {
+    map.get(key).and_then(|p| p.as_string().ok()).unwrap_or_default()
+}
+
+fn pod_str_list(map: &HashMap<String, Pod>, key: &str) -> Vec<String> {
+    match map.get(key) {
+        Some(p) => {
+            if let Ok(items) = p.as_vec() {
+                items.iter().filter_map(|x| x.as_string().ok()).filter(|s| !s.is_empty()).collect()
+            } else if let Ok(s) = p.as_string() {
+                if s.is_empty() { Vec::new() } else { vec![s] }
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Recursively collect `.md` files (skipping hidden + `MEMORY.md`).
+fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let full = entry.path();
+        if full.is_dir() {
+            collect_md(&full, out);
+        } else if name.ends_with(".md") && name != "MEMORY.md" {
+            out.push(full);
+        }
+    }
+}
+
+// ── Frontmatter rendering / import ─────────────────────────────────────────────
+
+/// Render a YAML frontmatter block from a suggestion (no body).
+fn render_frontmatter(s: &Suggestion) -> String {
+    let mut out = String::from("---\n");
+    out.push_str(&format!("name: {}\n", s.name));
+    out.push_str(&format!("type: {}\n", s.type_));
+    out.push_str(&format!("projects: {}\n", yaml_list(&s.projects)));
+    out.push_str(&format!("created: {}\n", s.created));
+    out.push_str(&format!("updated: {}\n", s.created));
+    out.push_str(&format!("tags: {}\n", yaml_list(&s.tags)));
+    let status = if s.status.is_empty() { "active" } else { &s.status };
+    out.push_str(&format!("status: {status}\n"));
+    out.push_str("---\n");
+    out
+}
+
+/// YAML for a string list: `[]`, a scalar, or a block sequence.
+fn yaml_list(values: &[String]) -> String {
+    match values.len() {
+        0 => "[]".to_string(),
+        1 => values[0].clone(),
+        _ => {
+            let mut out = String::from("\n");
+            for v in values {
+                out.push_str(&format!("  - {v}\n"));
+            }
+            out.pop();
+            out
+        }
+    }
+}
+
+/// Prepend `frontmatter` to `body`, replacing any existing leading block. The
+/// body content after the closing `---` is preserved exactly.
+pub fn apply_frontmatter(body: &str, suggestion: &Suggestion) -> String {
+    let content = strip_frontmatter(body).trim_start();
+    format!("{}\n{}", render_frontmatter(suggestion), content)
+}
+
+// ── Commands ───────────────────────────────────────────────────────────────────
+
+/// Known project names from the index, used to seed project inference. Falls
+/// back to the default domains if the query fails / the index is empty.
+fn known_projects(db: &State<'_, Db>) -> Vec<String> {
+    const DEFAULTS: &[&str] = &["attic", "understory", "rearview", "website", "studio", "shared"];
+    let from_db = db.0.lock().ok().and_then(|conn| {
+        conn.prepare("SELECT DISTINCT projects FROM memory_files WHERE projects != ''")
+            .ok()
+            .and_then(|mut stmt| {
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .ok()?
+                    .filter_map(Result::ok)
+                    .collect::<Vec<_>>();
+                Some(rows)
+            })
+    });
+
+    let mut set: Vec<String> = DEFAULTS.iter().map(|s| s.to_string()).collect();
+    if let Some(rows) = from_db {
+        for joined in rows {
+            for p in joined.split(',').filter(|s| !s.is_empty()) {
+                if !set.iter().any(|x| x == p) {
+                    set.push(p.to_string());
+                }
+            }
+        }
+    }
+    set
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestInput {
+    pub content: String,
+}
+
+#[tauri::command]
+pub fn suggest_frontmatter(payload: SuggestInput, db: State<'_, Db>) -> Result<Suggestion, String> {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    Ok(generate(&payload.content, &today, &known_projects(&db)))
+}
+
+#[tauri::command]
+pub fn audit_frontmatter(
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<Vec<AuditEntry>, String> {
+    let _ = &db; // kept for signature symmetry / future per-file DB lookups
+    let root = memory
+        .0
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| crate::settings::default_memory_root());
+
+    let mut files = Vec::new();
+    collect_md(&root, &mut files);
+    let mut entries = Vec::new();
+    for path in files {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let mut entry = audit_one(&path.to_string_lossy(), &raw);
+        // Attach the file's last-modified date as the created fallback display.
+        if entry.created.is_empty() {
+            if let Ok(meta) = fs::metadata(&path) {
+                if let Ok(modified) = meta.modified() {
+                    let dt: chrono::DateTime<Local> = modified.into();
+                    entry.created = dt.format("%Y-%m-%d").to_string();
+                    // Don't clear `missing` — created is still absent in the file.
+                }
+            }
+        }
+        entries.push(entry);
+    }
+    // Unhealthy first (missing, then partial, then complete), then by path.
+    let rank = |s: &str| match s {
+        "missing" => 0,
+        "partial" => 1,
+        _ => 2,
+    };
+    entries.sort_by(|a, b| rank(&a.status).cmp(&rank(&b.status)).then_with(|| a.path.cmp(&b.path)));
+    Ok(entries)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportInput {
+    /// The markdown body to import (may or may not already have frontmatter).
+    pub content: String,
+    /// The frontmatter to write (user-reviewed).
+    pub frontmatter: Suggestion,
+}
+
+#[tauri::command]
+pub fn import_markdown(
+    payload: ImportInput,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<String, String> {
+    let s = &payload.frontmatter;
+    if s.name.trim().is_empty() || s.type_.trim().is_empty() || s.projects.is_empty() {
+        return Err("name, type, and at least one project are required".to_string());
+    }
+    let root = memory.0.lock().map_err(|e| e.to_string())?.clone();
+    let dir = root.join(&s.projects[0]);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.md", s.name));
+    if path.exists() {
+        return Err("File already exists".to_string());
+    }
+    fs::write(&path, apply_frontmatter(&payload.content, s)).map_err(|e| e.to_string())?;
+
+    // Rebuild the index so the imported file is searchable immediately.
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::search::build_index(&root, &conn).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known() -> Vec<String> {
+        ["attic", "understory", "rearview", "website", "studio", "shared"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    // ── extract_title (resolver) ─────────────────────────────────────────────
+
+    #[test]
+    fn title_from_first_heading() {
+        assert_eq!(extract_title("intro line\n# The Real Title\nmore"), "The Real Title");
+    }
+
+    #[test]
+    fn title_from_first_sentence_when_no_heading() {
+        assert_eq!(extract_title("This is the lead sentence. And another."), "This is the lead sentence");
+    }
+
+    #[test]
+    fn title_skips_frontmatter() {
+        let body = "---\nname: x\n---\n# Heading After Frontmatter\nbody";
+        assert_eq!(extract_title(body), "Heading After Frontmatter");
+    }
+
+    // ── slugify ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slugify_basic_and_punctuation() {
+        assert_eq!(slugify("The Real Title!"), "the-real-title");
+        assert_eq!(slugify("  Spaces & Symbols -- here  "), "spaces-symbols-here");
+        assert_eq!(slugify(""), "");
+    }
+
+    // ── infer_type (evaluator — each branch fires) ───────────────────────────
+
+    #[test]
+    fn type_feedback_on_why_and_how() {
+        let body = "Rob prefers tabs.\n\nWhy: consistency.\nHow to apply: use tabs everywhere.";
+        assert_eq!(infer_type(body), "feedback");
+    }
+
+    #[test]
+    fn type_reference_on_short_link_doc() {
+        assert_eq!(infer_type("See https://example.com/spec for details."), "reference");
+    }
+
+    #[test]
+    fn type_user_on_personal_preference() {
+        assert_eq!(infer_type("Rob prefers dark mode and always uses vim."), "user");
+    }
+
+    #[test]
+    fn type_project_is_the_default() {
+        let body = "The TIN-1638 frontmatter manager will ship in the studio app this sprint.";
+        assert_eq!(infer_type(body), "project");
+    }
+
+    #[test]
+    fn type_user_not_fired_when_ticket_present() {
+        // Mentions Rob + preference, but also a ticket → project, not user.
+        let body = "Rob prefers we close TIN-1000 first.";
+        assert_eq!(infer_type(body), "project");
+    }
+
+    // ── infer_projects (resolver — fires + doesn't over-fire) ────────────────
+
+    #[test]
+    fn projects_detected_whole_word_only() {
+        let body = "Work on the studio app touches the shared design tokens.";
+        assert_eq!(infer_projects(body, &known()), vec!["studio".to_string(), "shared".to_string()]);
+    }
+
+    #[test]
+    fn projects_no_substring_false_positive() {
+        // "understory" must NOT match inside "misunderstory" or "story".
+        assert!(infer_projects("a short story about nothing", &known()).is_empty());
+    }
+
+    // ── extract_tags (combiner) ──────────────────────────────────────────────
+
+    #[test]
+    fn tags_rank_by_frequency_drop_stopwords() {
+        let body = "Embeddings embeddings embeddings power search search. The the the and and.";
+        let tags = extract_tags(body);
+        assert_eq!(tags.first().map(|s| s.as_str()), Some("embeddings"), "most frequent content word first");
+        assert!(!tags.iter().any(|t| t == "the" || t == "and"), "stopwords excluded");
+        assert!(tags.len() <= 5);
+    }
+
+    // ── generate (integration of the rules) ──────────────────────────────────
+
+    #[test]
+    fn generate_full_suggestion() {
+        let body = "# Hybrid Search Notes\n\nThe studio search blends embeddings and ranking. Why: recall. How to apply: enable the key.";
+        let s = generate(body, "2026-06-22", &known());
+        assert_eq!(s.title, "Hybrid Search Notes");
+        assert_eq!(s.name, "hybrid-search-notes");
+        assert_eq!(s.type_, "feedback"); // has Why: + How to apply:
+        assert_eq!(s.projects, vec!["studio".to_string()]);
+        assert_eq!(s.created, "2026-06-22");
+        assert_eq!(s.status, "active");
+        assert!(!s.tags.is_empty());
+    }
+
+    // ── audit_one (state projector — all three states) ───────────────────────
+
+    #[test]
+    fn audit_missing_when_no_frontmatter() {
+        let e = audit_one("/m/a.md", "Just a body, no frontmatter.");
+        assert_eq!(e.status, "missing");
+        assert_eq!(e.missing, vec!["type", "projects", "created"]);
+    }
+
+    #[test]
+    fn audit_partial_when_fields_absent() {
+        let raw = "---\nname: a\ntype: feedback\n---\nbody";
+        let e = audit_one("/m/a.md", raw);
+        assert_eq!(e.status, "partial");
+        assert_eq!(e.type_, "feedback");
+        assert!(e.missing.contains(&"projects".to_string()));
+        assert!(e.missing.contains(&"created".to_string()));
+        assert!(!e.missing.contains(&"type".to_string()));
+    }
+
+    #[test]
+    fn audit_complete_when_all_required_present() {
+        let raw = "---\nname: a\ntype: feedback\nprojects: studio\ncreated: 2026-06-22\nstatus: active\n---\nbody";
+        let e = audit_one("/m/a.md", raw);
+        assert_eq!(e.status, "complete");
+        assert!(e.missing.is_empty());
+        assert_eq!(e.projects, vec!["studio".to_string()]);
+    }
+
+    // ── apply_frontmatter (cascade — body preserved) ─────────────────────────
+
+    #[test]
+    fn apply_prepends_and_preserves_body() {
+        let s = Suggestion {
+            name: "note".into(),
+            title: "Note".into(),
+            type_: "project".into(),
+            projects: vec!["studio".into()],
+            tags: vec!["a".into(), "b".into()],
+            created: "2026-06-22".into(),
+            status: "active".into(),
+        };
+        let out = apply_frontmatter("# Note\n\nThe body stays.", &s);
+        assert!(out.starts_with("---\nname: note\n"));
+        assert!(out.contains("type: project"));
+        assert!(out.trim_end().ends_with("The body stays."), "body content preserved");
+    }
+
+    #[test]
+    fn apply_replaces_existing_frontmatter() {
+        let s = Suggestion {
+            name: "note".into(),
+            title: "Note".into(),
+            type_: "feedback".into(),
+            projects: vec!["studio".into()],
+            tags: vec![],
+            created: "2026-06-22".into(),
+            status: "active".into(),
+        };
+        let existing = "---\nname: old\ntype: project\n---\nThe real body.";
+        let out = apply_frontmatter(existing, &s);
+        assert_eq!(out.matches("---").count(), 2, "exactly one frontmatter block");
+        assert!(out.contains("type: feedback"), "new frontmatter wins");
+        assert!(out.contains("The real body."));
+        assert!(!out.contains("name: old"));
+    }
+}

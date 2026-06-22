@@ -1,4 +1,5 @@
 mod embeddings;
+mod frontmatter;
 mod git;
 mod hybrid;
 mod launcher;
@@ -93,6 +94,9 @@ pub fn run() {
       links::link_suggest,
       links::graph_data,
       links::set_ticket_titles,
+      frontmatter::suggest_frontmatter,
+      frontmatter::audit_frontmatter,
+      frontmatter::import_markdown,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
