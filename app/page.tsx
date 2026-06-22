@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
@@ -14,7 +15,12 @@ import TypeChip from '@/components/TypeChip'
 import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
+import { linkSuggest } from '@/lib/links'
 import { getSettings } from '@/lib/settings'
+
+// The graph view pulls in d3-force; load it lazily and client-only so it stays
+// out of the initial bundle and the static-export SSR pass.
+const GraphView = dynamic(() => import('@/components/GraphView'), { ssr: false })
 import { slugify } from '@/lib/slug'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
@@ -427,6 +433,7 @@ export default function Home() {
   const [activeWorkingDir, setActiveWorkingDir] = useState('')
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [graphOpen, setGraphOpen] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [showLauncher, setShowLauncher] = useState(false)
   const [showTranscripts, setShowTranscripts] = useState(false)
@@ -729,6 +736,23 @@ export default function Home() {
     [openInSide]
   )
 
+  // ── Wiki-link open (resolve [[slug]] → path, open in the same panel) ──
+  // The editor only knows the slug text; resolve it to a file via link_suggest
+  // (exact slug match preferred, else the closest name match), then open.
+  const makeOpenWikiLink = useCallback(
+    (side: PanelSide) => async (slug: string) => {
+      try {
+        const matches = await linkSuggest(slug, 8)
+        const lower = slug.trim().toLowerCase()
+        const hit = matches.find((m) => m.slug.toLowerCase() === lower) ?? matches[0]
+        if (hit) openInSide(hit.path, side)
+      } catch {
+        /* unresolved link: no-op (the editor renders it as a calm dangling link) */
+      }
+    },
+    [openInSide]
+  )
+
   // ── New file modal ──
 
   const handleFileCreated = useCallback((filePath: string) => {
@@ -856,6 +880,12 @@ export default function Home() {
       if (mod && (e.key === 't' || e.key === 'T')) {
         e.preventDefault()
         setShowTranscripts(true)
+        return
+      }
+      if (mod && (e.key === 'g' || e.key === 'G')) {
+        // Toggle the knowledge graph view (TIN-1639).
+        e.preventDefault()
+        setGraphOpen((open) => !open)
         return
       }
     }
@@ -1074,6 +1104,8 @@ export default function Home() {
             onProjectFilter={handleProjectFilter}
             searchInputRef={searchRef}
             onOpenResult={makeOpenResult('left')}
+            onOpenTicket={setActiveTicket}
+            onOpenWikiLink={makeOpenWikiLink('left')}
             onEditorChange={makeEditorChange(leftActiveDoc?.path ?? null)}
             onEditorSave={makeEditorSave(leftActiveDoc?.path ?? null)}
           />
@@ -1128,6 +1160,8 @@ export default function Home() {
             onTypeFilter={handleTypeFilter}
             onProjectFilter={handleProjectFilter}
             onOpenResult={makeOpenResult('right')}
+            onOpenTicket={setActiveTicket}
+            onOpenWikiLink={makeOpenWikiLink('right')}
             onEditorChange={makeEditorChange(rightActiveDoc?.path ?? null)}
             onEditorSave={makeEditorSave(rightActiveDoc?.path ?? null)}
           />
@@ -1162,6 +1196,15 @@ export default function Home() {
         ticketId={activeTicket}
         onClose={() => setActiveTicket(null)}
       />
+
+      {/* Knowledge graph (⌘G) — TIN-1639 */}
+      {graphOpen && (
+        <GraphView
+          onOpenFile={(path) => { setGraphOpen(false); openInSide(path, focusedSideRef.current) }}
+          onOpenTicket={(id) => { setActiveTicket(id) }}
+          onClose={() => setGraphOpen(false)}
+        />
+      )}
 
       {showSettings && (
         <SettingsModal open onClose={() => setShowSettings(false)} />

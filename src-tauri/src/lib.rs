@@ -2,6 +2,7 @@ mod embeddings;
 mod git;
 mod hybrid;
 mod launcher;
+mod links;
 mod search;
 mod settings;
 mod terminal;
@@ -88,6 +89,10 @@ pub fn run() {
       launcher::list_prompts,
       launcher::list_skills,
       launcher::read_prompt,
+      links::file_links,
+      links::link_suggest,
+      links::graph_data,
+      links::set_ticket_titles,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,

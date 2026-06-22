@@ -134,7 +134,29 @@ window, and reopening the same ticket focuses the existing one.
 
 ---
 
-## 9. Settings
+## 9. Connecting notes — wiki-links and the graph
+
+Notes are not a flat folder; they form a graph. Three ways to use it:
+
+- **Link to another note** by typing `[[` in the editor. A picker opens; keep
+  typing to filter by name, then press Return to insert the link. Resolved links
+  show the note's name in forest green; click one to open that note. A link to a
+  note that does not exist yet stays calm and grey, never a broken-red link.
+- **The Links tab** (on any open note) shows three things: the tickets the note
+  mentions, the notes it links out to, and the notes that link back to it ("who
+  talks about this?"). Click a card to open that note; ⌘-click opens it in the
+  other panel.
+- **The graph view** opens with **⌘G**: every note is a dot, coloured by project
+  and sized by how connected it is; tickets are small rings. Drag to pan, scroll
+  to zoom, click a dot to open it. Filter with the chips along the top, and find
+  notes with no links yet on the "not yet linked" shelf.
+
+Links rebuild automatically whenever the index does, so they stay in sync as you
+write.
+
+---
+
+## 10. Settings
 
 Press **⌘,** (or the gear). Settings is one calm panel:
 
@@ -151,7 +173,7 @@ Settings persist across restarts.
 
 ---
 
-## 10. Your memory files
+## 11. Your memory files
 
 A memory file is just markdown with a small YAML frontmatter block:
 
@@ -173,7 +195,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 
 ---
 
-## 11. Keyboard shortcuts
+## 12. Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
@@ -185,6 +207,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘`-click | Open in the other panel |
 | `⌘D` | Diff tab |
 | `⌘T` | Transcripts |
+| `⌘G` | Knowledge graph |
 | `⌘R` | Launcher |
 | `⌘,` | Settings |
 | `⌘Return` | Save / Run (in modals and the launcher) |
@@ -192,7 +215,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 
 ---
 
-## 12. Tips
+## 13. Tips
 
 - **Quick capture is for speed.** Don't reach for the full editor mid-thought;
   ⌘⇧N, type, ⌘Return, done. Structure can come later.

@@ -140,6 +140,24 @@ const SCHEMA: &str = "
       UNIQUE(file_path, chunk_idx)
     );
     CREATE INDEX IF NOT EXISTS chunks_path ON chunks(file_path);
+
+    -- Wiki-linking layer (TIN-1639). `links` is rebuilt from scratch on every
+    -- index build (see links::rebuild_links); `ticket_cache` persists resolved
+    -- Linear titles across rebuilds.
+    CREATE TABLE IF NOT EXISTS links (
+      from_path     TEXT NOT NULL,
+      to_path       TEXT,
+      to_ticket_id  TEXT,
+      link_type     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS links_from ON links(from_path);
+    CREATE INDEX IF NOT EXISTS links_to   ON links(to_path);
+
+    CREATE TABLE IF NOT EXISTS ticket_cache (
+      ticket_id  TEXT PRIMARY KEY,
+      title      TEXT NOT NULL DEFAULT '',
+      fetched_at TEXT NOT NULL DEFAULT ''
+    );
 ";
 
 /// Dimensionality of stored embeddings (OpenAI text-embedding-3-small).
@@ -364,6 +382,9 @@ pub fn build_index(root: &Path, conn: &Connection) -> rusqlite::Result<usize> {
     collect_md_files(root, &mut files);
 
     let matter = Matter::<YAML>::new();
+    // (path, name, body) for each indexed file — handed to the wiki-link scanner
+    // after the FTS rows are committed.
+    let mut link_inputs: Vec<(String, String, String)> = Vec::new();
     let tx = conn.unchecked_transaction()?;
     {
         let mut insert_file = tx.prepare(
@@ -398,10 +419,14 @@ pub fn build_index(root: &Path, conn: &Connection) -> rusqlite::Result<usize> {
                     rec.tags,
                     rec.body,
                 ])?;
+                link_inputs.push((rec.path, rec.name, rec.body));
             }
         }
     }
     tx.commit()?;
+
+    // Rebuild the wiki-link graph from the freshly-indexed content (TIN-1639).
+    crate::links::rebuild_links(conn, &link_inputs)?;
 
     Ok(files.len())
 }

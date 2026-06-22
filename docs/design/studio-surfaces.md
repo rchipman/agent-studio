@@ -653,3 +653,331 @@ skills, two memory notes, the repo you're in. You glance, you adjust one chip, y
 press `⌘↩`. The terminal rises and the agent is already working, fully briefed. You
 never typed a path, never pasted a file, never explained yourself twice. That is the
 moment: *this is how I want to start every session.*
+
+---
+
+## Wiki-linking (TIN-1639)
+
+Three surfaces that make a memory file a node in a graph, not a file in a folder:
+the **Links tab** (who this note talks to, and who talks about it), the editor's
+**`[[wiki-link]]`** rendering and autocomplete, and the full-canvas **Graph view**
+(`⌘G`). They share the house voice exactly: forest on cream, serif for reading,
+sans for chrome, mono for paths, calm and present, no alarm. Every value below is
+a named token from §A. There is no new mood and no new primitive that an existing
+one could carry.
+
+The backend is built. A `file_links` command returns
+`{ outbound: LinkedFile[], backlinks: LinkedFile[], tickets: { id, title }[] }`
+where `LinkedFile = { path, name, type, projects[], excerpt }` — note this is the
+same shape the link cards render, and a near-superset of `MemorySearchResult`, so
+**link cards reuse `ResultCard`** verbatim. A `link_suggest` command returns
+`{ name, path, slug }[]` for `[[` autocomplete. A `graph_data` command returns
+`{ nodes: { id, label, kind: 'file' | 'ticket', domain, degree }[], edges: { from, to }[] }`.
+Ticket titles may be empty; when a title is empty, show the bare ID.
+
+One cross-surface rule, stated once: **a domain has one hue, everywhere.** The five
+project domains map to tokens as follows, and this mapping is used identically by
+the Links tab project chips, the editor link colour is domain-agnostic, and the
+graph node fills:
+
+| Domain | Fill token | Text/stroke token | Notes |
+| --- | --- | --- | --- |
+| `studio` | `--forest-tint` | `--forest` | The house accent. |
+| `shared` | `--tan-tint` | `--tan` | The second accent. |
+| `attic` | `--neutral-tint` | `--ink-soft` | Warm neutral. |
+| `understory` | `--forest-wash` | `--forest` | Lighter forest, distinct from `studio`. |
+| `website` | `--remove-wash` | `--remove` | Muted heather. The only place heather reads as identity, not removal; it is calm, never alarm, and there is still no red. |
+
+This is the full palette for domains. No new colour is introduced. Tickets are not
+a domain; they get their own treatment (below), never a domain hue.
+
+---
+
+### 1. Links tab (per open file)
+
+Replaces the `links` stub in `WorkspacePanel.tsx` (`activeSurface === 'links'`,
+~line 600). It renders inside the existing scroll body, under the surface strip,
+scoped to the active document tab. It reuses the search column's geometry and the
+`ResultCard` / `MetaBar` rhythm so it reads as the same app turned to look sideways.
+
+**Container.** The same centered reading column the editor and search use:
+`maxWidth: 680`, `width: 100%`, `margin: 0 auto`, `padding: 32px 24px 80px`
+(literal values already established for `SearchView`; expressed in tokens this is
+`padding: '${space[8]}px ${space[7]}px 80px'`, the trailing `80px` matching the
+existing search/editor bottom gutter).
+
+**Section order (top to bottom), each a labeled group:**
+
+1. **Mentions** — Linear ticket mentions. First because they are the smallest,
+   highest-signal payload and they answer "what work is this tied to?"
+2. **Links out** — outbound links (this note points at these).
+3. **Linked from** — backlinks ("who talks about this?").
+
+This order goes near to far: the tickets this note names, then the notes it names,
+then the notes that name it. A section with zero items is **omitted entirely** (no
+empty headers); the all-empty case is the single calm empty state below.
+
+**Section header.** Reuse the `--t-label` treatment (11 / 600 / sans, uppercase,
+`0.04em`), colour `--ink-soft`, with a trailing count in `--ink-faint` at the same
+size, e.g. `LINKS OUT  3`. Header sits on its own line, `marginBottom: space[3]`,
+and each section after the first gets `marginTop: space[7]` for the established
+section rhythm. No rule line between sections; the label and spacing carry it.
+
+**1. Mentions (tickets).** A wrapped row of ticket chips, `gap: space[2]`,
+`marginBottom` per the rhythm above. Each chip is a button:
+
+- Layout: `padding: '3px 10px'`, `borderRadius: radius.chip`, `border:
+  1px solid ${color.line}`, `background: transparent`, `color: color.inkSoft`,
+  `fontFamily: font.mono`, `fontSize: 11`. Mono because a ticket ID (`TIN-1639`)
+  is machinery, and this visually separates a ticket chip from a `TypeChip`.
+- Content: the bare ID always, then, when `title` is non-empty, the title after a
+  middot in `--ink-soft` sans at `--t-meta`: `TIN-1639 · Wiki-linking`. When
+  `title` is empty, the chip is just `TIN-1639` and nothing else (never a dangling
+  middot, never a placeholder like "Untitled").
+- Hover: `background: color.forestWash`, `borderColor: color.forestLine`,
+  `color: color.ink`, `transition: 'all 0.12s ease'` (matches `TypeChip`).
+- Click: opens that ticket in the in-app Linear browser (the existing `LinearPanel`
+  route). Title hint: `Open in Linear`.
+
+**2 & 3. Links out / Linked from (cards).** Each item renders as a `ResultCard`,
+unchanged: `padding: '12px 16px'`, `background: color.bgCard` resting /
+`color.bgFieldStrong` on hover, `border: 1px solid ${color.hairSoft}` resting /
+`color.line` on hover, `borderRadius: radius.card`, `marginBottom: space[2]`. The
+card's `MetaBar` shows the type chip (`--forest-tint`/`--forest`) and project
+chips (`--tan-tint`/`--tan`) exactly as in search; the title is `LinkedFile.name`
+at 13 / 600 / `--ink`; the `LinkedFile.excerpt` is the one-line `--ink-soft`
+preview. Because `LinkedFile` carries no `updated`/`created`, the `MetaBar` date
+slot is simply absent (it already guards on an empty date string).
+
+- **Active/selected state:** none persists in this tab — a link card is a
+  navigation affordance, not a selection. Resting and hover only.
+- **Click:** opens that file. Plain click opens it as a tab in **this** panel
+  (re-selecting if already open); `⌘`-click opens it in the **other** panel,
+  reusing the exact `onOpenResult` routing the search cards already use. Title
+  hint reuses the card's existing string:
+  `Click to open here · ⌘-click to open in the other panel`.
+
+**Empty state (file has zero links of any kind).** The single existing `CalmEmpty`
+primitive, replacing the current stub copy. Verbatim:
+
+> Nothing links here yet. Mention a note with `[[` or a ticket like `TIN-1639`, and it shows up here.
+
+(One calm line plus the next step. The `[[` and `TIN-1639` render in the line as
+plain text; do not style them as live links inside the empty state.)
+
+**Loading state.** While `file_links` is in flight, the shared loading voice:
+a centered `--ink-soft` `--t-body` line, `paddingTop: 60`, copy `Reading links…`.
+
+**Error state.** If `file_links` fails, the recessive notice block from §C:
+`--notice` text on `rgba(155,123,90,0.08)`, `radius.md`, no icon, copy
+`Could not read links for this note.` No retry button is required (re-selecting
+the tab re-runs the query); if one is added it is a `Refresh` text button in
+`--ink-soft`, never styled as alarm.
+
+---
+
+### 2. `[[wiki-link]]` in the editor
+
+Three behaviours inside the Milkdown (Crepe) editor in `MarkdownEditor.tsx`:
+inline rendering of resolved links, inline `TIN-XXXX` auto-linking, and the `[[`
+autocomplete dropdown. All three stay inside the editor's serif reading frame and
+borrow the existing `.ProseMirror a` colour so links never shout.
+
+**Inline `[[slug]]` rendering (rendered/preview mode).** A resolved wiki-link
+renders as inline text, not a button:
+
+- Colour `--forest` (`#3E5641`), the same as `.ProseMirror a` already uses, so it
+  sits in the forest-link family.
+- **No underline at rest.** Instead a 1px bottom border in `--forest-line`
+  (`rgba(62,86,65,0.30)`) — a quiet dotted-feel underline that reads as "linked"
+  without the loud web-link underline. `text-decoration: none`,
+  `border-bottom: 1px solid var(--forest-line)`, `cursor: pointer`.
+- **Hover:** border strengthens to `--forest` (full strength) and `background:
+  --forest-wash` with a `2px` horizontal padding and `--r-sm` so it reads as a
+  soft chip on hover only. `transition: background 0.12s ease, border-color 0.12s ease`.
+- The link displays the target's **name** (resolved via the slug), not the raw
+  slug, when resolvable; an **unresolved** `[[slug]]` (no matching file) renders in
+  `--ink-faint` with a `--hair` bottom border and `cursor: default` — present and
+  legible, never a red "broken link." Title hint on unresolved: `No note named "slug" yet.`
+- Click (resolved): opens that file as a tab in this panel (same routing as a link
+  card, plain vs `⌘`-click).
+
+**Inline `TIN-XXXX` auto-linking.** Any bare `TIN-` followed by digits in rendered
+text becomes a link with the **same forest treatment as `[[ ]]`**, except the glyph
+is mono (it is an ID): wrap the matched text in `font.mono` at the surrounding size,
+`--forest`, `--forest-line` bottom border, same hover. Click opens the ticket in the
+in-app Linear browser. This is the inline twin of the Mentions chip; one ID, two
+calm presentations. Do not auto-link inside code spans or code blocks.
+
+**The `[[` autocomplete dropdown.** Typing `[[` opens a picker driven by
+`link_suggest`. It is a small floating menu, the calmest possible:
+
+- **Surface:** `background: --bg-raised`, `border: 1px solid --hair`,
+  `borderRadius: --r-lg`, `boxShadow: --shadow-toast` (the smallest house shadow,
+  `0 4px 20px rgba(38,35,32,0.16)`), `padding: space[1]` around the rows,
+  `overflow: hidden`.
+- **Position:** anchored to the caret, opening **below** the `[[` by `space[2]`;
+  if it would clip the viewport bottom, flip to open above. Left edge aligns to the
+  `[` of `[[`. Width: `min(320px, …)` — wide enough for a name plus a type tag,
+  capped at `320`.
+- **Row:** `height: 32`, `padding: '0 ${space[3]}px'`, `borderRadius: --r-md`,
+  `display: flex`, `alignItems: center`, `gap: space[3]`,
+  `cursor: pointer`. Left: the suggestion **name** in `--t-body` (13/sans) `--ink`,
+  truncated with ellipsis. Right (pushed with `marginLeft: auto`): a quiet type
+  tag — reuse the `MetaBar` type-chip style (`--forest-tint` fill, `--forest` text,
+  `1px 7px`, `--r-chip`, fontSize 10). The `slug`/`path` is **not** shown on the
+  row (it is machinery the user does not pick by); the name and type are enough.
+- **Selected / keyboard-focused row:** `background: --forest-wash`, text stays
+  `--ink`. This is the established selected-row treatment (minus the 2px left
+  border, which a floating menu doesn't need). Mouse hover sets the same state and
+  moves the keyboard selection to that row, so mouse and keys never disagree.
+- **Keyboard nav:** `↑`/`↓` move selection (wrapping), `↩` or `Tab` inserts the
+  selected link and closes, `Esc` closes and leaves the literal `[[` typed text
+  untouched. The first row is selected by default so `[[ + ↩` is a two-key insert.
+- **Max rows:** **7** visible; beyond that the list scrolls (no count footer, no
+  "more" affordance — 7 calm rows, the rest on scroll). Match against the typed
+  query is the backend's job; the dropdown just renders what `link_suggest` returns.
+- **Empty:** if `link_suggest` returns nothing for the current fragment, show a
+  single non-interactive row, `--ink-faint` `--t-meta`, copy
+  `No matches. Keep typing to name a new note.` (Naming a not-yet-existing note is
+  valid; the link resolves once that note exists.)
+- **Loading:** if suggestions lag, the menu shows one `--ink-faint` `--t-meta` row,
+  `Searching…`, rather than flashing empty.
+
+No animation beyond the 0.12s row transition; the menu appears and dismisses
+instantly, like the command palette.
+
+---
+
+### 3. Graph view (`⌘G`) — full-canvas knowledge graph
+
+A **full view** (per §B), in the same family as the transcript browser: it replaces
+the main content column, the top bar persists with `← Agent Studio`, and the centre
+reads `Graph`. It is the map of the whole memory: every file a node, every `[[ ]]`
+or `TIN-` mention an edge. Add `⌘G` to the shortcut map (Graph, full view); it gets
+a visible top-bar affordance like every other surface.
+
+**Canvas.** Fills the content column. `background: --bg-app` (the app cream, so the
+graph feels embedded, not in a dark "graph app" box). Pan by drag on empty canvas,
+zoom by scroll/pinch, both with the standard 0.2s feel at most; a small `Reset view`
+text button (`--ink-soft`, top-right of the canvas) returns to fit-all. No grid, no
+axes, no minimap — calm, empty space.
+
+**File nodes.** A filled circle per file:
+
+- **Fill/stroke by domain** per the cross-surface table above (`studio` forest-tint
+  fill + forest stroke, `shared` tan, `attic` neutral, `understory` forest-wash,
+  `website` heather). Stroke is `1px` in the domain's text/stroke token. A node
+  whose file spans multiple projects takes its **first** project's domain (one node,
+  one hue); a tiny detail, but it keeps the field readable.
+- **Size by degree.** Radius scales with `degree`: `r = 6 + 3 * sqrt(degree)`,
+  clamped to `[6, 22]` px (at zoom 1). Degree 0 (orphan) is the floor, 6px. These
+  are layout constants, not design tokens, and may live as named constants in the
+  graph module; the **visible** sizes read as "bigger = more connected."
+- **Label:** the node `label` in `--t-meta` (11/sans) `--ink-soft`, placed below the
+  node, shown only when the node is large enough or zoomed in (hide labels below a
+  zoom threshold to avoid clutter); the active/hovered node always shows its label
+  in `--ink`.
+- **Hover:** node stroke goes to full-strength domain colour, label brightens to
+  `--ink`, and incident edges lift to `--forest-line`. Cursor pointer.
+- **Click:** opens that file (same panel routing as a link card).
+
+**Ticket nodes (distinct treatment).** Smaller, and clearly not a file: a small
+**ring** (hollow circle), `r = 5` fixed, `stroke: --ink-faint` `1.5px`, `fill:
+--bg-raised` (so it reads as an outlined token on the cream). Label is the ticket ID
+in `--t-mono` (10–11/mono) `--ink-soft`. Tickets carry **no domain hue** — the
+hollow-mono treatment is their identity. Click opens the ticket in the in-app Linear
+browser. This keeps "file vs ticket" legible at a glance without a legend: filled +
+serif-domain-hue = a note, hollow + mono = a ticket.
+
+**Edges.** Thin lines, `stroke: --hair` (`rgba(38,35,32,0.10)`), `1px`, no
+arrowheads (links are browsable both ways via the Links tab; the graph shows
+relatedness, not direction — arrowheads would add alarming visual noise). On node
+hover, that node's incident edges lift to `--forest-line`. Edges render beneath
+nodes.
+
+**Orphan nodes (degree 0).** Never hidden. They are laid out in a calm **shelf
+along the bottom of the canvas**: a single horizontal band, left-aligned, wrapping,
+under a faint `--t-label` `--ink-faint` divider labelled `NOT YET LINKED`. They use
+the normal file-node treatment at floor size (6px) so they are discoverable and one
+click from being opened and linked. This makes orphans a gentle to-do ("these notes
+are waiting to be connected"), not an error. The shelf is omitted when there are no
+orphans.
+
+**Filter chips.** Reuse the search view's chip row exactly: a wrapped
+`gap: space[2]` row pinned to the top-left of the canvas (in a `--bg-field` pill
+strip so it floats legibly over nodes), using `TypeChip`. Two groups separated by
+the same 1px `--hair` divider the search view uses:
+
+- **Type** chips (`feedback` `project` `user` `reference`, from `knownTypes`) — dim
+  nodes whose file type is deselected.
+- **Project** chips (`attic` `understory` `website` `studio` `shared`) — dim nodes
+  outside the selected project.
+
+Filtering **dims** (drops to ~18% opacity) rather than removes, so the graph's shape
+stays stable and you see what you're excluding; their edges dim with them. A `Tickets`
+toggle chip at the end of the row shows/hides ticket nodes (default on). All
+multi-select, all-off = all-shown (matches search filter behaviour).
+
+**Layout: recommendation.** Use **d3-force** (MIT licensed). A knowledge graph's
+whole value is legible clustering, neighbours near neighbours, and a hand-rolled
+deterministic layout (radial/grid) cannot surface the community structure that makes
+this view worth opening; it would look tidy and say nothing. d3-force gives that for
+~a few hundred nodes with no perf concern, it is a tiny, well-trodden, permissively
+licensed dependency, and it pairs cleanly with a plain `<canvas>` or `<svg>` render
+(we draw the nodes ourselves with tokens; d3-force only computes positions). **Add
+the `d3-force` dependency** (just `d3-force`, not all of `d3`). Pin the simulation
+after it settles (stop ticking once `alpha` decays) so the graph is calm and still,
+not perpetually jittering, and seed positions from the previous layout when
+re-opening so the map feels stable run to run. Orphans are excluded from the force
+sim and placed on the shelf deterministically.
+
+**Empty state (no links anywhere yet).** The shared calm full-view empty: a single
+centered `--ink-faint` `--t-body` line plus one next step, no illustration. Verbatim:
+
+> No connections yet. Link notes with `[[` or mention a ticket, and your graph grows here.
+
+If there are nodes but **no edges** (all orphans), skip the empty state and show the
+`NOT YET LINKED` shelf as the whole canvas — the orphans are the content, and the
+shelf's own label already says what's going on.
+
+**Loading.** Centered `--ink-soft` `--t-body` `Drawing your graph…` while
+`graph_data` loads. **Error:** the recessive notice block, `Could not load the graph.`
+
+**States summary (graph):** default (settled force layout) · hover (node + incident
+edges lift) · selected (none persists; click navigates) · filtered (deselected nodes
+dim to ~18%) · orphan-shelf · empty · loading · error. No state uses red, an icon
+alarm, or motion longer than 0.2s.
+
+---
+
+### Wiki-linking copy (verbatim, collected)
+
+Curly apostrophes in prose; no em-dashes; mono for IDs and the `[[` token where shown.
+
+**Links tab**
+- Section headers: `MENTIONS` · `LINKS OUT` · `LINKED FROM` (each with a trailing count)
+- Ticket chip (with title): `TIN-1639 · Wiki-linking` · (no title): `TIN-1639`
+- Ticket chip hint: `Open in Linear`
+- Card hint (reused): `Click to open here · ⌘-click to open in the other panel`
+- Empty: `Nothing links here yet. Mention a note with [[ or a ticket like TIN-1639, and it shows up here.`
+- Loading: `Reading links…`
+- Error: `Could not read links for this note.`
+
+**Editor**
+- Unresolved link hint: `No note named “slug” yet.`
+- Autocomplete empty: `No matches. Keep typing to name a new note.`
+- Autocomplete loading: `Searching…`
+
+**Graph**
+- Top-bar centre title: `Graph`
+- Orphan shelf label: `NOT YET LINKED`
+- Tickets toggle chip: `Tickets`
+- Reset button: `Reset view`
+- Empty: `No connections yet. Link notes with [[ or mention a ticket, and your graph grows here.`
+- Loading: `Drawing your graph…`
+- Error: `Could not load the graph.`
+
+---
+
+SELF-REPORT: confidence: high; model-fit: right (design judgment + token discipline + reuse mapping across a large existing spec; a cheaper model would likely have invented primitives or missed the no-red / no-em-dash-in-copy nuance).
