@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { color, space, radius, font, shadow, type } from '@/lib/tokens'
+import { getThemePref, setThemePref, type ThemePref } from '@/lib/theme'
 import {
   getSettings,
   setSettings,
@@ -261,6 +262,14 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
           </div>
         ) : (
           <div style={{ padding: `0 ${space[7]}px` }}>
+            {/* ── Appearance ── */}
+            <Section label="Appearance">
+              <label style={{ ...type.label, color: color.inkSoft }}>Theme</label>
+              <div style={{ marginTop: space[2] }}>
+                <ThemeControl />
+              </div>
+            </Section>
+
             {/* ── Roots ── */}
             <Section label="Roots">
               <RootField
@@ -433,6 +442,65 @@ function Section({ label, children }: { label: string; children: React.ReactNode
     <div style={{ padding: `${space[5]}px 0`, borderTop: `1px solid ${color.hair}` }}>
       <div style={{ ...type.label, color: color.inkSoft, marginBottom: space[4] }}>{label}</div>
       {children}
+    </div>
+  )
+}
+
+// ── Theme control (TIN-1673) ─────────────────────────────────────────────────
+
+/** A calm Light / Dark / System segmented control. */
+function ThemeControl() {
+  const [pref, setPref] = useState<ThemePref>('system')
+  useEffect(() => { setPref(getThemePref()) }, [])
+
+  const choose = (p: ThemePref) => {
+    setPref(p)
+    setThemePref(p)
+  }
+
+  const options: { value: ThemePref; label: string }[] = [
+    { value: 'light', label: 'Light' },
+    { value: 'dark', label: 'Dark' },
+    { value: 'system', label: 'System' },
+  ]
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Theme"
+      style={{
+        display: 'inline-flex',
+        gap: 2,
+        padding: 2,
+        borderRadius: radius.field,
+        border: `1px solid ${color.line}`,
+        background: color.bgField,
+      }}
+    >
+      {options.map((o) => {
+        const active = pref === o.value
+        return (
+          <button
+            key={o.value}
+            role="radio"
+            aria-checked={active}
+            onClick={() => choose(o.value)}
+            style={{
+              padding: `${space[2]}px ${space[4]}px`,
+              borderRadius: radius.md,
+              border: 'none',
+              background: active ? color.forestWash : 'transparent',
+              color: active ? color.forest : color.inkSoft,
+              fontFamily: font.sans,
+              fontSize: 12,
+              fontWeight: active ? 600 : 400,
+              transition: 'all 0.12s ease',
+            }}
+          >
+            {o.label}
+          </button>
+        )
+      })}
     </div>
   )
 }

@@ -181,6 +181,9 @@ write.
 
 Press **⌘,** (or the gear). Settings is one calm panel:
 
+- **Appearance** — Light, Dark, or System theme. System follows your operating
+  system and switches live when it does. Your choice is remembered across
+  restarts.
 - **Roots** — where Studio looks for your memory, prompts, skills, and transcripts.
   Each has a "Choose…" folder picker. Changing the memory root offers to rebuild
   the index right there.

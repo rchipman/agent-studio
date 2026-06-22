@@ -9,34 +9,43 @@
  * states (heather `remove`, tan `notice`), never as alarm.
  */
 
+// Each color resolves to a CSS custom property defined in app/globals.css. The
+// values themselves live there, once per theme (`:root` = light,
+// `:root[data-theme="dark"]` = dark), so the whole app re-themes by flipping the
+// `data-theme` attribute — no JS re-render, no parallel token set. The literal
+// light values are documented inline for reference (TIN-1673).
 export const color = {
-  bgApp: '#F2F0ED',
-  bgRaised: '#FCFAF4',
-  bgField: 'rgba(255,255,255,0.70)',
-  bgFieldStrong: 'rgba(255,255,255,0.85)',
-  bgCard: 'rgba(255,255,255,0.55)',
-  ink: '#262320',
-  inkSoft: '#6B6760',
-  inkFaint: '#9B9490',
-  forest: '#3E5641',
-  forestTint: 'rgba(62,86,65,0.10)',
-  forestLine: 'rgba(62,86,65,0.30)',
-  forestWash: 'rgba(62,86,65,0.06)',
-  tan: '#9B7B5A',
-  tanTint: 'rgba(155,123,90,0.10)',
-  hair: 'rgba(38,35,32,0.10)',
-  hairSoft: 'rgba(38,35,32,0.08)',
-  neutralTint: 'rgba(38,35,32,0.06)',
-  line: 'rgba(38,35,32,0.18)',
-  scrim: 'rgba(38,35,32,0.45)',
-  termBg: '#1a1917',
-  termFg: '#d4d0cb',
+  bgApp: 'var(--bg-app)', // #F2F0ED
+  bgRaised: 'var(--bg-raised)', // #FCFAF4
+  bgField: 'var(--bg-field)', // rgba(255,255,255,0.70)
+  bgFieldStrong: 'var(--bg-field-strong)', // rgba(255,255,255,0.85)
+  bgCard: 'var(--bg-card)', // rgba(255,255,255,0.55)
+  ink: 'var(--ink)', // #262320
+  inkSoft: 'var(--ink-soft)', // #6B6760
+  inkFaint: 'var(--ink-faint)', // #9B9490
+  forest: 'var(--forest)', // #3E5641
+  forestTint: 'var(--forest-tint)', // rgba(62,86,65,0.10)
+  forestLine: 'var(--forest-line)', // rgba(62,86,65,0.30)
+  forestWash: 'var(--forest-wash)', // rgba(62,86,65,0.06)
+  tan: 'var(--tan)', // #9B7B5A
+  tanTint: 'var(--tan-tint)', // rgba(155,123,90,0.10)
+  hair: 'var(--hair)', // rgba(38,35,32,0.10)
+  hairSoft: 'var(--hair-soft)', // rgba(38,35,32,0.08)
+  neutralTint: 'var(--neutral-tint)', // rgba(38,35,32,0.06)
+  line: 'var(--line)', // rgba(38,35,32,0.18)
+  scrim: 'var(--scrim)', // rgba(38,35,32,0.45)
+  termBg: 'var(--term-bg)', // #1a1917
+  termFg: 'var(--term-fg)', // #d4d0cb
   // Semantic accents — sparingly, never alarm
-  add: '#3E5641',
-  addWash: 'rgba(62,86,65,0.08)',
-  remove: '#7C6A86',
-  removeWash: 'rgba(124,106,134,0.08)',
-  notice: '#9B7B5A',
+  add: 'var(--add)', // #3E5641
+  addWash: 'var(--add-wash)', // rgba(62,86,65,0.08)
+  remove: 'var(--remove)', // #7C6A86
+  removeWash: 'var(--remove-wash)', // rgba(124,106,134,0.08)
+  notice: 'var(--notice)', // #9B7B5A
+  // Text/glyph color on a forest-filled accent (primary buttons). White on the
+  // dark-green light-theme forest; the warm near-black on the light sage forest
+  // in dark, so it always clears contrast.
+  onAccent: 'var(--on-accent)', // #FFFFFF light / #1A1815 dark
 } as const
 
 /** 4px base scale. Values are pixels. */

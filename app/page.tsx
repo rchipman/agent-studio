@@ -17,6 +17,7 @@ import Toast from '@/components/Toast'
 import FrontmatterForm from '@/components/FrontmatterForm'
 import { linkSuggest } from '@/lib/links'
 import { suggestFrontmatter, importMarkdown, type Suggestion } from '@/lib/frontmatter'
+import { initTheme } from '@/lib/theme'
 import { getSettings } from '@/lib/settings'
 
 // Import flow + audit view (TIN-1638), loaded lazily / client-only.
@@ -512,6 +513,12 @@ export default function Home() {
   useEffect(() => {
     runSearch('', '', '', true)
   }, [runSearch])
+
+  // Apply the saved theme and follow OS changes while in 'system' (TIN-1673).
+  // The early <head> script set the initial value; this wires the live listener.
+  useEffect(() => {
+    initTheme()
+  }, [])
 
   const handleSearchChange = useCallback(
     (q: string) => {
