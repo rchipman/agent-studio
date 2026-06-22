@@ -29,13 +29,29 @@ export interface MemoryFileMeta {
 /** Which side of the split a panel is. */
 export type PanelSide = 'left' | 'right'
 
-/** The per-panel tabs. Content is always available; Links/Diff are stubs that
- *  TIN-1639 (backlinks) and TIN-1635 (git diff) will fill in later. */
+/** The per-document surface tabs (Content / Links / Diff). Scoped to the active
+ *  document tab; Content is always available, Links/Diff scope to that doc. */
 export type PanelTab = 'content' | 'links' | 'diff'
 
-/** Independent state for a single panel: what file it's showing and which tab
- *  is active. Persisted per side in localStorage. */
+/** One open document tab in a panel. Carries its own active surface so a doc
+ *  opened to its Diff stays on Diff when you tab away and back. */
+export interface OpenDoc {
+  path: string
+  surface: PanelTab
+}
+
+/** Independent state for a single panel: the open document tabs (left→right
+ *  strip order) and which one is active. The Search tab is implicit and always
+ *  leftmost; `activeTabId === null` means Search is active. Persisted per side
+ *  in localStorage. */
 export interface PanelState {
+  tabs: OpenDoc[]
+  activeTabId: string | null
+}
+
+/** Legacy per-panel state shape (TIN-1640), kept only for one-time migration of
+ *  the persisted layout into the new {@link PanelState}. */
+export interface LegacyPanelState {
   activePath: string | null
   activeTab: PanelTab
 }

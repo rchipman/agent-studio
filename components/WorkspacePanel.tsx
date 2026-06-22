@@ -1,9 +1,9 @@
 'use client'
 
-import { useRef } from 'react'
+import { useRef, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
-import { MemorySearchResult, PanelSide, PanelTab, LoadedFile } from '@/lib/types'
+import { MemorySearchResult, OpenDoc, PanelSide, PanelTab, LoadedFile } from '@/lib/types'
 import TypeChip from '@/components/TypeChip'
 import DiffView from '@/components/DiffView'
 
@@ -19,6 +19,13 @@ function formatDate(iso: string): string {
   } catch {
     return iso
   }
+}
+
+/** A document tab's label: frontmatter name, falling back to the filename. */
+function docLabel(path: string, loaded: LoadedFile | null): string {
+  const name = loaded?.meta?.name
+  if (name) return name
+  return path.split('/').pop()?.replace(/\.md$/, '') ?? path
 }
 
 // ── Presentational primitives (search + editor content) ─────────────────────
@@ -129,24 +136,274 @@ function CalmEmpty({ children }: { children: React.ReactNode }) {
   )
 }
 
-// ── Per-panel tab row ───────────────────────────────────────────────────────
+// ── Shared close glyph (panel-close ✕, reused on doc tabs) ───────────────────
 
-const TABS: { id: PanelTab; label: string }[] = [
+function CloseGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+// ── Document tab strip ───────────────────────────────────────────────────────
+//
+//   [ ⌕ Search ] [ doc-a ] [ doc-b … ] [ + ]                          [ ✕ ]
+//
+// Search is leftmost, permanent, unclosable. Each doc tab carries a hover/active
+// close. `+` selects Search and focuses the field. The panel-close ✕ (right
+// panel only) is pinned to the far right. Document tabs scroll horizontally
+// while Search / + / ✕ stay pinned, with edge fades signalling overflow.
+
+const DOC_TAB_MAX = 140 // px — truncate the doc name with ellipsis past this
+
+function DocTab({
+  label,
+  title,
+  active,
+  closable,
+  onSelect,
+  onClose,
+}: {
+  label: React.ReactNode
+  title?: string
+  active: boolean
+  closable: boolean
+  onSelect: () => void
+  onClose?: () => void
+}) {
+  return (
+    <div
+      role="tab"
+      aria-selected={active}
+      title={title}
+      onClick={onSelect}
+      style={{
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: space[1],
+        height: 28,
+        padding: `0 ${space[3]}px`,
+        borderRadius: radius.md,
+        cursor: 'pointer',
+        background: 'transparent',
+        borderBottom: active ? `2px solid ${color.forest}` : '2px solid transparent',
+        color: active ? color.ink : color.inkSoft,
+        fontFamily: font.sans,
+        fontSize: 12,
+        fontWeight: active ? 600 : 400,
+        transition: 'background 0.1s ease, color 0.1s ease',
+      }}
+      onMouseEnter={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = color.bgFieldStrong
+          e.currentTarget.style.color = color.ink
+        }
+        const x = e.currentTarget.querySelector<HTMLElement>('[data-close]')
+        if (x && closable) x.style.visibility = 'visible'
+      }}
+      onMouseLeave={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = 'transparent'
+          e.currentTarget.style.color = color.inkSoft
+        }
+        const x = e.currentTarget.querySelector<HTMLElement>('[data-close]')
+        if (x && !active) x.style.visibility = 'hidden'
+      }}
+    >
+      <span style={{ maxWidth: DOC_TAB_MAX, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+      {closable && (
+        <span
+          data-close
+          role="button"
+          aria-label="Close tab"
+          onClick={(e) => { e.stopPropagation(); onClose?.() }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            color: color.inkFaint,
+            // Active tab always shows the ✕; inactive reveals it on hover.
+            visibility: active ? 'visible' : 'hidden',
+          }}
+        >
+          <CloseGlyph />
+        </span>
+      )}
+    </div>
+  )
+}
+
+function DocStrip({
+  tabs,
+  activeTabId,
+  loadedByPath,
+  onSelectSearch,
+  onSelectDoc,
+  onCloseDoc,
+  onAddDoc,
+  showClose,
+  onClosePanel,
+}: {
+  tabs: OpenDoc[]
+  activeTabId: string | null
+  loadedByPath: (path: string) => LoadedFile | null
+  onSelectSearch: () => void
+  onSelectDoc: (path: string) => void
+  onCloseDoc: (path: string) => void
+  onAddDoc: () => void
+  showClose: boolean
+  onClosePanel?: () => void
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const activeRef = useRef<HTMLDivElement>(null)
+
+  // Scroll the active doc tab into view when it changes (e.g. ⌃Tab cycling).
+  useEffect(() => {
+    if (activeTabId && activeRef.current) {
+      activeRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    }
+  }, [activeTabId])
+
+  const searchActive = activeTabId === null
+
+  return (
+    <div
+      role="tablist"
+      aria-label="Open documents"
+      style={{
+        height: 36,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: space[1],
+        padding: `0 ${space[4]}px`,
+        borderBottom: `1px solid ${color.hairSoft}`,
+        background: color.bgApp,
+      }}
+    >
+      {/* Search tab — pinned left, permanent, unclosable */}
+      <DocTab
+        label={
+          <span style={{ display: 'flex', alignItems: 'center', gap: space[1] }}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={{ opacity: 0.6 }}>
+              <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" strokeWidth="1.5" />
+              <line x1="11" y1="11" x2="14.5" y2="14.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            Search
+          </span>
+        }
+        title="Search"
+        active={searchActive}
+        closable={false}
+        onSelect={onSelectSearch}
+      />
+
+      {/* Document tabs — scroll horizontally under the pinned ends, edge fades */}
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: space[1],
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          scrollbarWidth: 'none',
+          WebkitMaskImage: `linear-gradient(to right, transparent 0, ${color.bgApp} 12px, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
+          maskImage: `linear-gradient(to right, transparent 0, ${color.bgApp} 12px, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
+        }}
+      >
+        {tabs.map((doc) => {
+          const isActive = activeTabId === doc.path
+          const loaded = loadedByPath(doc.path)
+          const name = docLabel(doc.path, loaded)
+          return (
+            <div key={doc.path} ref={isActive ? activeRef : undefined} style={{ flexShrink: 0 }}>
+              <DocTab
+                label={name}
+                title={name}
+                active={isActive}
+                closable
+                onSelect={() => onSelectDoc(doc.path)}
+                onClose={() => onCloseDoc(doc.path)}
+              />
+            </div>
+          )
+        })}
+      </div>
+
+      {/* + add-doc affordance — pinned right of the scrolling region */}
+      <button
+        onClick={onAddDoc}
+        aria-label="Open a document"
+        title="Open a document"
+        style={{
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: 24,
+          height: 24,
+          background: 'transparent',
+          border: 'none',
+          borderRadius: radius.sm,
+          cursor: 'pointer',
+          color: color.inkFaint,
+          fontSize: 16,
+          lineHeight: 1,
+          fontFamily: font.sans,
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.ink }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkFaint }}
+      >
+        +
+      </button>
+
+      {/* Panel-close ✕ — far right, right panel only (unchanged behaviour) */}
+      {showClose && (
+        <button
+          onClick={onClosePanel}
+          aria-label="Close right panel"
+          title="Close panel (⌘\)"
+          style={{
+            flexShrink: 0,
+            marginLeft: space[1],
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            color: color.inkFaint,
+            display: 'flex',
+            alignItems: 'center',
+            padding: 4,
+            borderRadius: radius.sm,
+          }}
+        >
+          <CloseGlyph />
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Surface strip (Content / Links / Diff) — scoped to the active document ───
+
+const SURFACES: { id: PanelTab; label: string }[] = [
   { id: 'content', label: 'Content' },
   { id: 'links', label: 'Links' },
   { id: 'diff', label: 'Diff' },
 ]
 
-function TabRow({
-  activeTab,
+function SurfaceStrip({
+  surface,
   onSelect,
-  showClose,
-  onClose,
 }: {
-  activeTab: PanelTab
-  onSelect: (tab: PanelTab) => void
-  showClose: boolean
-  onClose?: () => void
+  surface: PanelTab
+  onSelect: (s: PanelTab) => void
 }) {
   return (
     <div
@@ -160,8 +417,8 @@ function TabRow({
         borderBottom: `1px solid ${color.hairSoft}`,
       }}
     >
-      {TABS.map((t) => {
-        const isActive = activeTab === t.id
+      {SURFACES.map((t) => {
+        const isActive = surface === t.id
         return (
           <button
             key={t.id}
@@ -183,30 +440,6 @@ function TabRow({
           </button>
         )
       })}
-      {showClose && (
-        <button
-          onClick={onClose}
-          aria-label="Close right panel"
-          title="Close panel (⌘\)"
-          style={{
-            marginLeft: 'auto',
-            alignSelf: 'center',
-            background: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            color: color.inkFaint,
-            display: 'flex',
-            alignItems: 'center',
-            padding: 4,
-            borderRadius: radius.sm,
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            <line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-        </button>
-      )}
     </div>
   )
 }
@@ -215,15 +448,32 @@ function TabRow({
 
 export interface WorkspacePanelProps {
   side: PanelSide
-  activeTab: PanelTab
-  onSelectTab: (tab: PanelTab) => void
-  /** Right panel shows a close affordance in its tab row. */
+
+  /** The open document tabs (left→right) and which is active (null = Search). */
+  tabs: OpenDoc[]
+  activeTabId: string | null
+
+  /** Select the implicit Search tab (and focus the field). */
+  onSelectSearch: () => void
+  /** Select an already-open document tab by path. */
+  onSelectDoc: (path: string) => void
+  /** Close a document tab by path. */
+  onCloseDoc: (path: string) => void
+  /** The + affordance: go find a document (select Search + focus the field). */
+  onAddDoc: () => void
+  /** Change the active document's surface (Content / Links / Diff). */
+  onSelectSurface: (surface: PanelTab) => void
+
+  /** Right panel shows a close affordance in its tab strip. */
   showClose?: boolean
   onClose?: () => void
 
-  // What this panel is showing
+  // What the active document tab is showing (null when Search is active)
   activePath: string | null
+  activeSurface: PanelTab
   loaded: LoadedFile | null
+  /** Look up any open doc's loaded contents (for tab labels). */
+  loadedByPath: (path: string) => LoadedFile | null
 
   // Search view (driven by global state; identical across panels)
   searchQuery: string
@@ -257,12 +507,19 @@ export interface WorkspacePanelProps {
 
 export default function WorkspacePanel(props: WorkspacePanelProps) {
   const {
-    activeTab,
-    onSelectTab,
+    tabs,
+    activeTabId,
+    onSelectSearch,
+    onSelectDoc,
+    onCloseDoc,
+    onAddDoc,
+    onSelectSurface,
     showClose = false,
     onClose,
     activePath,
+    activeSurface,
     loaded,
+    loadedByPath,
     searchQuery,
     searching,
     searchResults,
@@ -283,7 +540,7 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
   const fallbackSearchRef = useRef<HTMLInputElement>(null)
   const searchRef = searchInputRef ?? fallbackSearchRef
 
-  const inEditor = activePath !== null
+  const inEditor = activeTabId !== null
 
   return (
     <section
@@ -296,14 +553,26 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
         background: color.bgApp,
       }}
     >
-      <TabRow activeTab={activeTab} onSelect={onSelectTab} showClose={showClose} onClose={onClose} />
+      <DocStrip
+        tabs={tabs}
+        activeTabId={activeTabId}
+        loadedByPath={loadedByPath}
+        onSelectSearch={onSelectSearch}
+        onSelectDoc={onSelectDoc}
+        onCloseDoc={onCloseDoc}
+        onAddDoc={onAddDoc}
+        showClose={showClose}
+        onClosePanel={onClose}
+      />
+
+      {/* Surface strip renders only when a document tab is active. */}
+      {inEditor && <SurfaceStrip surface={activeSurface} onSelect={onSelectSurface} />}
 
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {activeTab === 'content' && (
-          <ContentTab
-            inEditor={inEditor}
+        {/* Search view when no doc is active, else the active document's surface. */}
+        {!inEditor && (
+          <SearchView
             activePath={activePath}
-            loaded={loaded}
             searchQuery={searchQuery}
             searching={searching}
             searchResults={searchResults}
@@ -316,18 +585,23 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
             onProjectFilter={onProjectFilter}
             searchRef={searchRef}
             onOpenResult={onOpenResult}
+          />
+        )}
+
+        {inEditor && activeSurface === 'content' && (
+          <EditorView
+            activePath={activePath}
+            loaded={loaded}
             onEditorChange={onEditorChange}
             onEditorSave={onEditorSave}
           />
         )}
 
-        {activeTab === 'links' && (
-          <CalmEmpty>
-            {inEditor ? 'No links yet for this note.' : 'Open a note to see its links.'}
-          </CalmEmpty>
+        {inEditor && activeSurface === 'links' && (
+          <CalmEmpty>No links yet for this note.</CalmEmpty>
         )}
 
-        {activeTab === 'diff' && (
+        {inEditor && activeSurface === 'diff' && (
           <DiffView workingDir={workingDir} />
         )}
       </div>
@@ -335,12 +609,10 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
   )
 }
 
-// ── Content tab (the search view OR the editor view) ────────────────────────
+// ── Search view (visually identical to today's single-panel search) ─────────
 
-function ContentTab(props: {
-  inEditor: boolean
+function SearchView(props: {
   activePath: string | null
-  loaded: LoadedFile | null
   searchQuery: string
   searching: boolean
   searchResults: MemorySearchResult[]
@@ -353,13 +625,9 @@ function ContentTab(props: {
   onProjectFilter: (p: string) => void
   searchRef: React.RefObject<HTMLInputElement | null>
   onOpenResult: (result: MemorySearchResult, e: React.MouseEvent) => void
-  onEditorChange: (markdown: string) => void
-  onEditorSave: () => void
 }) {
   const {
-    inEditor,
     activePath,
-    loaded,
     searchQuery,
     searching,
     searchResults,
@@ -372,86 +640,90 @@ function ContentTab(props: {
     onProjectFilter,
     searchRef,
     onOpenResult,
-    onEditorChange,
-    onEditorSave,
   } = props
 
-  if (!inEditor) {
-    // ── Search view (visually identical to today's single-panel search) ──
-    return (
-      <div style={{ maxWidth: 680, width: '100%', margin: '0 auto', padding: '32px 24px 80px', boxSizing: 'border-box' }}>
-        {/* Search bar */}
-        <div style={{ position: 'relative', marginBottom: space[5] }}>
-          <svg
-            style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', opacity: 0.35, pointerEvents: 'none' }}
-            width="16" height="16" viewBox="0 0 16 16" fill="none"
-          >
-            <circle cx="6.5" cy="6.5" r="5.5" stroke={color.ink} strokeWidth="1.5" />
-            <line x1="11" y1="11" x2="14.5" y2="14.5" stroke={color.ink} strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-          <input
-            ref={searchRef}
-            type="text"
-            placeholder="Search memory…"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            style={{
-              width: '100%',
-              padding: '10px 14px 10px 38px',
-              border: `1.5px solid ${color.line}`,
-              borderRadius: radius.field,
-              background: color.bgField,
-              color: color.ink,
-              fontSize: 14,
-              outline: 'none',
-              boxSizing: 'border-box',
-              fontFamily: font.sans,
-              boxShadow: '0 1px 4px rgba(38,35,32,0.06)',
-            }}
-            onFocus={(e) => { e.currentTarget.style.borderColor = color.forest }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = color.line }}
-          />
-          {searching && (
-            <div style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 11, color: color.inkFaint }}>
-              …
-            </div>
-          )}
-        </div>
-
-        {/* Filter chips */}
-        {(knownTypes.length > 0 || knownProjects.length > 0) && (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2], marginBottom: space[6] }}>
-            {knownTypes.map((t) => (
-              <TypeChip key={t} label={t} active={activeType === t} onClick={() => onTypeFilter(t)} />
-            ))}
-            <div style={{ width: 1, background: color.hair, margin: '0 2px', alignSelf: 'stretch' }} />
-            {knownProjects.map((p) => (
-              <TypeChip key={p} label={p} active={activeProject === p} onClick={() => onProjectFilter(p)} />
-            ))}
+  return (
+    <div style={{ maxWidth: 680, width: '100%', margin: '0 auto', padding: '32px 24px 80px', boxSizing: 'border-box' }}>
+      {/* Search bar */}
+      <div style={{ position: 'relative', marginBottom: space[5] }}>
+        <svg
+          style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', opacity: 0.35, pointerEvents: 'none' }}
+          width="16" height="16" viewBox="0 0 16 16" fill="none"
+        >
+          <circle cx="6.5" cy="6.5" r="5.5" stroke={color.ink} strokeWidth="1.5" />
+          <line x1="11" y1="11" x2="14.5" y2="14.5" stroke={color.ink} strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+        <input
+          ref={searchRef}
+          type="text"
+          placeholder="Search memory…"
+          value={searchQuery}
+          onChange={(e) => onSearchChange(e.target.value)}
+          style={{
+            width: '100%',
+            padding: '10px 14px 10px 38px',
+            border: `1.5px solid ${color.line}`,
+            borderRadius: radius.field,
+            background: color.bgField,
+            color: color.ink,
+            fontSize: 14,
+            outline: 'none',
+            boxSizing: 'border-box',
+            fontFamily: font.sans,
+            boxShadow: '0 1px 4px rgba(38,35,32,0.06)',
+          }}
+          onFocus={(e) => { e.currentTarget.style.borderColor = color.forest }}
+          onBlur={(e) => { e.currentTarget.style.borderColor = color.line }}
+        />
+        {searching && (
+          <div style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 11, color: color.inkFaint }}>
+            …
           </div>
         )}
+      </div>
 
-        {/* Results */}
-        <div>
-          {searchResults.length === 0 && !searching && (
-            <div style={{ textAlign: 'center', color: color.inkFaint, fontSize: 13, paddingTop: 40 }}>
-              {searchQuery || activeType || activeProject ? 'No results' : 'No files indexed'}
-            </div>
-          )}
-          {searchResults.map((r) => (
-            <ResultCard
-              key={r.path}
-              result={r}
-              active={activePath === r.path}
-              onActivate={(e) => onOpenResult(r, e)}
-            />
+      {/* Filter chips */}
+      {(knownTypes.length > 0 || knownProjects.length > 0) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2], marginBottom: space[6] }}>
+          {knownTypes.map((t) => (
+            <TypeChip key={t} label={t} active={activeType === t} onClick={() => onTypeFilter(t)} />
+          ))}
+          <div style={{ width: 1, background: color.hair, margin: '0 2px', alignSelf: 'stretch' }} />
+          {knownProjects.map((p) => (
+            <TypeChip key={p} label={p} active={activeProject === p} onClick={() => onProjectFilter(p)} />
           ))}
         </div>
-      </div>
-    )
-  }
+      )}
 
-  // ── Editor view (visually identical to today's single-panel editor) ──
+      {/* Results */}
+      <div>
+        {searchResults.length === 0 && !searching && (
+          <div style={{ textAlign: 'center', color: color.inkFaint, fontSize: 13, paddingTop: 40 }}>
+            {searchQuery || activeType || activeProject ? 'No results' : 'No files indexed'}
+          </div>
+        )}
+        {searchResults.map((r) => (
+          <ResultCard
+            key={r.path}
+            result={r}
+            active={activePath === r.path}
+            onActivate={(e) => onOpenResult(r, e)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Editor view (visually identical to today's single-panel editor) ─────────
+
+function EditorView(props: {
+  activePath: string | null
+  loaded: LoadedFile | null
+  onEditorChange: (markdown: string) => void
+  onEditorSave: () => void
+}) {
+  const { activePath, loaded, onEditorChange, onEditorSave } = props
   return (
     <div style={{ maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 40px 80px', boxSizing: 'border-box' }}>
       {loaded?.loading ? (
