@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 use chrono::Local;
 use gray_matter::engine::YAML;
@@ -122,10 +122,59 @@ const SCHEMA: &str = "
       content=memory_files,
       content_rowid=rowid
     );
+
+    -- Vector store for embeddings (TIN-1631) and hybrid search (TIN-1632).
+    -- `embedding` uses sqlite-vec's F32_BLOB type; 1536 dims = OpenAI
+    -- text-embedding-3-small. Requires sqlite-vec to be registered on the
+    -- connection (see register_sqlite_vec / init_db) before this runs.
+    CREATE TABLE IF NOT EXISTS chunks (
+      id        INTEGER PRIMARY KEY,
+      file_path TEXT NOT NULL,
+      chunk_idx INTEGER NOT NULL,
+      content   TEXT NOT NULL,
+      sha256    TEXT NOT NULL,
+      embedding F32_BLOB(1536)
+    );
+    CREATE INDEX IF NOT EXISTS chunks_path ON chunks(file_path);
 ";
+
+/// Dimensionality of stored embeddings (OpenAI text-embedding-3-small).
+pub const EMBEDDING_DIM: usize = 1536;
+
+/// Register the statically-linked `sqlite-vec` extension as a SQLite
+/// *auto-extension*, so it is initialised on every connection opened afterwards
+/// (including rusqlite's in-memory connections in tests).
+///
+/// Mechanism (sqlite-vec 0.1.9 + rusqlite 0.37, bundled SQLite):
+/// `sqlite_vec::sqlite3_vec_init` is the extension's C entry point. We hand it
+/// to `sqlite3_auto_extension`, which SQLite invokes for each new connection.
+/// This is the crate's documented integration path — no loadable `.so`/`.dylib`
+/// and no per-connection `load_extension` call, so `tauri build`'s static link
+/// is unaffected.
+///
+/// `Once` guards against double-registration (auto-extensions are process-wide
+/// global state; registering the same init twice is harmless but pointless, and
+/// tests open many connections).
+pub fn register_sqlite_vec() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        // SAFETY: `sqlite3_vec_init` has the C signature SQLite expects for an
+        // auto-extension entry point; the transmute only erases the typed fn
+        // pointer to the `unsafe extern "C" fn()` that the FFI binding wants.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+    });
+}
 
 /// Open (creating if needed) the index DB in `root` and ensure the schema.
 pub fn init_db(root: &Path) -> rusqlite::Result<Connection> {
+    // Register sqlite-vec BEFORE opening the connection so `F32_BLOB` columns
+    // and the `vec_*` functions are available when the schema is created.
+    register_sqlite_vec();
+
     // Make sure the root exists so Connection::open can create the db file.
     let _ = fs::create_dir_all(root);
     let db_path = root.join(".studio-index.db");
@@ -133,6 +182,72 @@ pub fn init_db(root: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
+}
+
+// ── Vector store (chunks) ────────────────────────────────────────────────────
+
+/// Encode an f32 embedding into the little-endian byte blob sqlite-vec stores in
+/// an `F32_BLOB` column.
+pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// One nearest-neighbour hit from [`nearest_chunks`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkHit {
+    pub id: i64,
+    pub file_path: String,
+    pub chunk_idx: i64,
+    pub content: String,
+    /// Cosine distance to the query vector (0 = identical direction).
+    pub distance: f64,
+}
+
+/// Insert a chunk and its embedding, returning the new row id. `embedding` must
+/// have [`EMBEDDING_DIM`] elements — sqlite-vec rejects a mismatched length.
+/// Used by the embeddings pipeline (TIN-1631).
+pub fn insert_chunk(
+    conn: &Connection,
+    file_path: &str,
+    chunk_idx: i64,
+    content: &str,
+    sha256: &str,
+    embedding: &[f32],
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO chunks (file_path, chunk_idx, content, sha256, embedding)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![file_path, chunk_idx, content, sha256, embedding_to_blob(embedding)],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Cosine-similarity nearest-neighbour query over `chunks`. Returns up to
+/// `limit` rows ordered by ascending `vec_distance_cosine` (closest first).
+/// Used by hybrid search (TIN-1632).
+pub fn nearest_chunks(
+    conn: &Connection,
+    query: &[f32],
+    limit: i64,
+) -> rusqlite::Result<Vec<ChunkHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, file_path, chunk_idx, content,
+                vec_distance_cosine(embedding, ?1) AS distance
+         FROM chunks
+         WHERE embedding IS NOT NULL
+         ORDER BY distance ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![embedding_to_blob(query), limit], |row| {
+        Ok(ChunkHit {
+            id: row.get("id")?,
+            file_path: row.get("file_path")?,
+            chunk_idx: row.get("chunk_idx")?,
+            content: row.get("content")?,
+            distance: row.get("distance")?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ── Frontmatter helpers ─────────────────────────────────────────────────────
@@ -492,8 +607,10 @@ pub fn create_file(
 mod tests {
     use super::*;
 
-    /// In-memory connection with the production schema applied.
+    /// In-memory connection with the production schema applied. Registers
+    /// sqlite-vec first so the `chunks` table's `F32_BLOB` column is recognised.
     fn mem_db() -> Connection {
+        register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         conn
@@ -634,5 +751,75 @@ mod tests {
         let mut bad = payload.clone();
         bad.projects = vec![];
         assert!(write_new_file(&root, &bad, "2026-06-20").is_err(), "missing projects rejected");
+    }
+
+    // ── sqlite-vec ────────────────────────────────────────────────────────────
+
+    /// A 1536-d unit-ish vector that points mostly along axis `axis`. Cheap way
+    /// to make vectors whose cosine ordering relative to a query is predictable.
+    fn axis_vec(axis: usize) -> Vec<f32> {
+        let mut v = vec![0.0_f32; EMBEDDING_DIM];
+        v[axis] = 1.0;
+        v[axis + 1] = 0.1; // small off-axis component so it's not degenerate
+        v
+    }
+
+    #[test]
+    fn sqlite_vec_loads_and_reports_version() {
+        // Proves the extension actually registered against the bundled SQLite
+        // build — if the static link failed this row query would error.
+        let conn = mem_db();
+        let version: String = conn
+            .query_row("SELECT vec_version()", [], |r| r.get(0))
+            .expect("vec_version() should exist once sqlite-vec is loaded");
+        assert!(version.starts_with('v'), "got vec_version = {version:?}");
+    }
+
+    #[test]
+    fn cosine_nn_orders_by_similarity() {
+        let conn = mem_db();
+        // Chunk 1 sits on axis 0, chunk 2 on axis 500 (orthogonal-ish).
+        insert_chunk(&conn, "a.md", 0, "near", "sha-a", &axis_vec(0)).unwrap();
+        insert_chunk(&conn, "b.md", 0, "far", "sha-b", &axis_vec(500)).unwrap();
+
+        // Query points along axis 0, so chunk 1 must come first.
+        let query = axis_vec(0);
+        let hits = nearest_chunks(&conn, &query, 10).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].file_path, "a.md", "closest chunk first");
+        assert_eq!(hits[1].file_path, "b.md");
+        assert!(
+            hits[0].distance < hits[1].distance,
+            "cosine distance must increase with the result order: {hits:?}"
+        );
+        // Identical-direction vector → ~0 cosine distance.
+        assert!(hits[0].distance < 1e-3, "near chunk should be ~0 distance");
+    }
+
+    #[test]
+    fn cosine_nn_respects_limit() {
+        let conn = mem_db();
+        for i in 0..5 {
+            insert_chunk(&conn, "f.md", i, "c", "sha", &axis_vec(i as usize)).unwrap();
+        }
+        let hits = nearest_chunks(&conn, &axis_vec(0), 3).unwrap();
+        assert_eq!(hits.len(), 3, "limit caps the result count");
+    }
+
+    #[test]
+    fn fts_and_vec_coexist_on_one_connection() {
+        // The headline risk: FTS5 + sqlite-vec on the same bundled SQLite. Build
+        // the FTS index and run a vector query on the same connection.
+        let root = temp_root("coexist");
+        write(&root, "studio/a.md", "---\nname: alpha\ntype: feedback\nprojects: studio\n---\nrusqlite migration note");
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+        assert_eq!(run_search(&conn, &input("rusqlite")).unwrap().len(), 1);
+
+        insert_chunk(&conn, "studio/a.md", 0, "rusqlite migration note", "sha", &axis_vec(0)).unwrap();
+        let hits = nearest_chunks(&conn, &axis_vec(0), 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        // And FTS still works after the vector ops.
+        assert_eq!(run_search(&conn, &input("rusqlite")).unwrap().len(), 1);
     }
 }

@@ -30,6 +30,10 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-store = "2.4.3"
 keyring = { version = "4.1.1", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
+# sqlite-vec: vector-search SQLite extension, statically linked into the bundled
+# SQLite build. Registered as a SQLite auto-extension at process startup (see
+# search::register_sqlite_vec) — no dynamic .so/.dylib to ship.
+sqlite-vec = "0.1.9"
 gray_matter = "0.3.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # E2E only (TIN-1645): embeds a W3C WebDriver server (port 4445) so WebdriverIO
