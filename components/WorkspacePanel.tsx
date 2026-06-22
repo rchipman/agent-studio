@@ -1,9 +1,10 @@
 'use client'
 
-import { useRef, useEffect } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
 import { MemorySearchResult, OpenDoc, PanelSide, PanelTab, LoadedFile } from '@/lib/types'
+import { fileLinks, type FileLinks, type LinkedFile, type TicketRef } from '@/lib/links'
 import TypeChip from '@/components/TypeChip'
 import DiffView from '@/components/DiffView'
 
@@ -134,6 +135,213 @@ function CalmEmpty({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   )
+}
+
+// ── Links tab (TIN-1639) ─────────────────────────────────────────────────────
+
+/** A section label with a trailing count, e.g. `LINKS OUT  3`. */
+function LinkSectionHeader({ label, count }: { label: string; count: number }) {
+  return (
+    <div style={{ ...typeRamp.label, color: color.inkSoft, marginBottom: space[3] }}>
+      {label} <span style={{ color: color.inkFaint }}>{count}</span>
+    </div>
+  )
+}
+
+/** A Linear ticket mention chip. Mono ID, optional cached title; opens Linear. */
+function TicketChip({ ticket, onOpen }: { ticket: TicketRef; onOpen: (id: string) => void }) {
+  return (
+    <button
+      onClick={() => onOpen(ticket.id)}
+      title="Open in Linear"
+      style={{
+        padding: '3px 10px',
+        borderRadius: radius.chip,
+        border: `1px solid ${color.line}`,
+        background: 'transparent',
+        color: color.inkSoft,
+        fontFamily: font.mono,
+        fontSize: 11,
+        cursor: 'pointer',
+        transition: 'all 0.12s ease',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = color.forestWash
+        e.currentTarget.style.borderColor = color.forestLine
+        e.currentTarget.style.color = color.ink
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent'
+        e.currentTarget.style.borderColor = color.line
+        e.currentTarget.style.color = color.inkSoft
+      }}
+    >
+      {ticket.id}
+      {ticket.title && (
+        <span style={{ ...typeRamp.meta, color: color.inkSoft }}> · {ticket.title}</span>
+      )}
+    </button>
+  )
+}
+
+/** Adapt a LinkedFile to the MemorySearchResult shape ResultCard renders. The
+ *  absent date/tags/status fields are empty (MetaBar guards on empty date). */
+function linkedToResult(f: LinkedFile): MemorySearchResult {
+  return {
+    path: f.path,
+    name: f.name,
+    type: f.type,
+    projects: f.projects,
+    excerpt: f.excerpt,
+    created: '',
+    updated: '',
+    tags: [],
+    status: '',
+  }
+}
+
+/** The Links tab body for one open file: mentions, outbound links, backlinks. */
+function LinksTab({
+  path,
+  onOpenResult,
+  onOpenTicket,
+}: {
+  path: string
+  onOpenResult: (result: MemorySearchResult, e: React.MouseEvent) => void
+  onOpenTicket: (id: string) => void
+}) {
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [links, setLinks] = useState<FileLinks | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setStatus('loading')
+    setLinks(null)
+    fileLinks(path)
+      .then((res) => {
+        if (cancelled) return
+        setLinks(res)
+        setStatus('ready')
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [path])
+
+  const column = {
+    maxWidth: 680,
+    width: '100%',
+    margin: '0 auto',
+    padding: `${space[8]}px ${space[7]}px 80px`,
+    boxSizing: 'border-box' as const,
+  }
+
+  if (status === 'loading') {
+    return (
+      <div style={column}>
+        <div style={{ ...typeRamp.body, textAlign: 'center', color: color.inkSoft, paddingTop: 60 }}>
+          Reading links…
+        </div>
+      </div>
+    )
+  }
+
+  if (status === 'error' || !links) {
+    return (
+      <div style={column}>
+        <div
+          style={{
+            ...typeRamp.body,
+            color: color.notice,
+            background: 'rgba(155,123,90,0.08)',
+            borderRadius: radius.md,
+            padding: `${space[3]}px ${space[4]}px`,
+            textAlign: 'center',
+          }}
+        >
+          Could not read links for this note.
+        </div>
+      </div>
+    )
+  }
+
+  const isEmpty =
+    links.tickets.length === 0 && links.outbound.length === 0 && links.backlinks.length === 0
+  if (isEmpty) {
+    return (
+      <CalmEmpty>
+        Nothing links here yet. Mention a note with [[ or a ticket like TIN-1639, and it shows up here.
+      </CalmEmpty>
+    )
+  }
+
+  // Present sections in order, each carrying its own top margin for the section
+  // rhythm (the first present section gets no top margin).
+  const sections: React.ReactNode[] = []
+  const sectionWrap = (key: string, node: React.ReactNode) => (
+    <div key={key} style={{ marginTop: sections.length === 0 ? 0 : space[7] }}>
+      {node}
+    </div>
+  )
+
+  if (links.tickets.length > 0) {
+    sections.push(
+      sectionWrap(
+        'mentions',
+        <>
+          <LinkSectionHeader label="MENTIONS" count={links.tickets.length} />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
+            {links.tickets.map((t) => (
+              <TicketChip key={t.id} ticket={t} onOpen={onOpenTicket} />
+            ))}
+          </div>
+        </>,
+      ),
+    )
+  }
+
+  if (links.outbound.length > 0) {
+    sections.push(
+      sectionWrap(
+        'outbound',
+        <>
+          <LinkSectionHeader label="LINKS OUT" count={links.outbound.length} />
+          {links.outbound.map((f) => (
+            <ResultCard
+              key={f.path}
+              result={linkedToResult(f)}
+              active={false}
+              onActivate={(e) => onOpenResult(linkedToResult(f), e)}
+            />
+          ))}
+        </>,
+      ),
+    )
+  }
+
+  if (links.backlinks.length > 0) {
+    sections.push(
+      sectionWrap(
+        'backlinks',
+        <>
+          <LinkSectionHeader label="LINKED FROM" count={links.backlinks.length} />
+          {links.backlinks.map((f) => (
+            <ResultCard
+              key={f.path}
+              result={linkedToResult(f)}
+              active={false}
+              onActivate={(e) => onOpenResult(linkedToResult(f), e)}
+            />
+          ))}
+        </>,
+      ),
+    )
+  }
+
+  return <div style={column}>{sections}</div>
 }
 
 // ── Shared close glyph (panel-close ✕, reused on doc tabs) ───────────────────
@@ -491,6 +699,14 @@ export interface WorkspacePanelProps {
   /** Open a result/file in this panel, or the other panel when ⌘-clicked. */
   onOpenResult: (result: MemorySearchResult, e: React.MouseEvent) => void
 
+  /** Open a Linear ticket (by id) in the in-app Linear browser. Used by the
+   *  Links tab ticket chips and the editor's TIN-XXXX links (TIN-1639). */
+  onOpenTicket: (id: string) => void
+
+  /** Open a `[[slug]]` wiki-link target (resolved to a file by the orchestrator)
+   *  in this panel. Used by the editor's rendered wiki-links (TIN-1639). */
+  onOpenWikiLink: (slug: string) => void
+
   /**
    * Working directory for the Diff tab. The orchestrator (app/page.tsx) passes
    * this from settings / agent cwd. Defaults to empty string (DiffView will
@@ -532,6 +748,8 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
     onProjectFilter,
     searchInputRef,
     onOpenResult,
+    onOpenTicket,
+    onOpenWikiLink,
     onEditorChange,
     onEditorSave,
     workingDir = '',
@@ -594,11 +812,17 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
             loaded={loaded}
             onEditorChange={onEditorChange}
             onEditorSave={onEditorSave}
+            onOpenWikiLink={onOpenWikiLink}
+            onOpenTicket={onOpenTicket}
           />
         )}
 
-        {inEditor && activeSurface === 'links' && (
-          <CalmEmpty>No links yet for this note.</CalmEmpty>
+        {inEditor && activeSurface === 'links' && activePath && (
+          <LinksTab
+            path={activePath}
+            onOpenResult={onOpenResult}
+            onOpenTicket={onOpenTicket}
+          />
         )}
 
         {inEditor && activeSurface === 'diff' && (
@@ -722,8 +946,10 @@ function EditorView(props: {
   loaded: LoadedFile | null
   onEditorChange: (markdown: string) => void
   onEditorSave: () => void
+  onOpenWikiLink: (slug: string) => void
+  onOpenTicket: (id: string) => void
 }) {
-  const { activePath, loaded, onEditorChange, onEditorSave } = props
+  const { activePath, loaded, onEditorChange, onEditorSave, onOpenWikiLink, onOpenTicket } = props
   return (
     <div style={{ maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 40px 80px', boxSizing: 'border-box' }}>
       {loaded?.loading ? (
@@ -738,6 +964,8 @@ function EditorView(props: {
             initialContent={loaded?.content ?? ''}
             onChange={onEditorChange}
             onSave={onEditorSave}
+            onOpenWikiLink={onOpenWikiLink}
+            onOpenTicket={onOpenTicket}
           />
         </>
       )}
