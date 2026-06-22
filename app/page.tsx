@@ -19,9 +19,11 @@ import { slugify } from '@/lib/slug'
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
+  OpenDoc,
   PanelSide,
   PanelState,
   PanelTab,
+  LegacyPanelState,
   LoadedFile,
 } from '@/lib/types'
 
@@ -336,12 +338,37 @@ interface PersistedLayout {
   leftWidth: number
 }
 
-const DEFAULT_PANEL: PanelState = { activePath: null, activeTab: 'content' }
+const emptyPanel = (): PanelState => ({ tabs: [], activeTabId: null })
+
+/** Normalize a persisted panel into the current {@link PanelState}, migrating
+ *  the legacy `{ activePath, activeTab }` shape (TIN-1640) in place:
+ *  a set `activePath` becomes a single open tab carrying its old surface;
+ *  a null `activePath` becomes an empty tab list with Search active. */
+function migratePanel(raw: unknown): PanelState {
+  if (!raw || typeof raw !== 'object') return emptyPanel()
+
+  // Already the new shape?
+  if (Array.isArray((raw as PanelState).tabs)) {
+    const p = raw as PanelState
+    const tabs = p.tabs.filter((t): t is OpenDoc => !!t && typeof t.path === 'string')
+    const activeTabId =
+      p.activeTabId && tabs.some((t) => t.path === p.activeTabId) ? p.activeTabId : null
+    return { tabs, activeTabId }
+  }
+
+  // Legacy shape → migrate.
+  const legacy = raw as Partial<LegacyPanelState>
+  if (legacy.activePath) {
+    const surface: PanelTab = legacy.activeTab ?? 'content'
+    return { tabs: [{ path: legacy.activePath, surface }], activeTabId: legacy.activePath }
+  }
+  return emptyPanel()
+}
 
 function loadLayout(): PersistedLayout {
   const fallback: PersistedLayout = {
-    left: { ...DEFAULT_PANEL },
-    right: { ...DEFAULT_PANEL },
+    left: emptyPanel(),
+    right: emptyPanel(),
     rightOpen: false,
     leftWidth: 50,
   }
@@ -350,8 +377,8 @@ function loadLayout(): PersistedLayout {
     if (!stored) return fallback
     const parsed = JSON.parse(stored) as Partial<PersistedLayout>
     return {
-      left: parsed.left ?? fallback.left,
-      right: parsed.right ?? fallback.right,
+      left: migratePanel(parsed.left),
+      right: migratePanel(parsed.right),
       rightOpen: parsed.rightOpen ?? false,
       leftWidth:
         typeof parsed.leftWidth === 'number' && parsed.leftWidth >= 20 && parsed.leftWidth <= 80
@@ -379,11 +406,14 @@ export default function Home() {
   const [files, setFiles] = useState<Record<string, LoadedFile>>({})
 
   // Panel layout
-  const [leftPanel, setLeftPanel] = useState<PanelState>(DEFAULT_PANEL)
-  const [rightPanel, setRightPanel] = useState<PanelState>(DEFAULT_PANEL)
+  const [leftPanel, setLeftPanel] = useState<PanelState>(emptyPanel)
+  const [rightPanel, setRightPanel] = useState<PanelState>(emptyPanel)
   const [rightOpen, setRightOpen] = useState(false)
   const [leftWidth, setLeftWidth] = useState(50)
   const [layoutReady, setLayoutReady] = useState(false)
+  // Which panel the keyboard acts on (⌘W / ⌃Tab). Follows the last interaction;
+  // falls back to the right panel when it's open, else the left.
+  const [focusedSide, setFocusedSide] = useState<PanelSide>('left')
 
   const [recentPaths, setRecentPaths] = useState<string[]>([])
 
@@ -428,12 +458,12 @@ export default function Home() {
     setRightPanel(layout.right)
     setRightOpen(layout.rightOpen)
     setLeftWidth(layout.leftWidth)
-    lastOpenedPathRef.current = layout.right.activePath ?? layout.left.activePath
+    lastOpenedPathRef.current = layout.right.activeTabId ?? layout.left.activeTabId
 
-    // Restore file contents for whatever was open in each panel
+    // Restore file contents for every open tab across both panels.
     const toRestore = new Set<string>()
-    if (layout.left.activePath) toRestore.add(layout.left.activePath)
-    if (layout.right.activePath) toRestore.add(layout.right.activePath)
+    layout.left.tabs.forEach((t) => toRestore.add(t.path))
+    layout.right.tabs.forEach((t) => toRestore.add(t.path))
     toRestore.forEach((p) => loadFile(p))
 
     setLayoutReady(true)
@@ -576,13 +606,78 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Open a file into a specific panel side. Opening into the right panel reveals it.
+  // Open a file into a specific panel side as a document tab. Appends a new tab
+  // and selects it, or re-selects the existing tab if the path is already open.
+  // Opening into the right panel reveals it. Never replaces.
   const openInSide = useCallback((filePath: string, side: PanelSide, meta?: MemorySearchResult) => {
     if (side === 'right') setRightOpen(true)
     const setter = side === 'left' ? setLeftPanel : setRightPanel
-    setter((prev) => ({ ...prev, activePath: filePath }))
+    setter((prev) => {
+      if (prev.tabs.some((t) => t.path === filePath)) {
+        return { ...prev, activeTabId: filePath }
+      }
+      return {
+        tabs: [...prev.tabs, { path: filePath, surface: 'content' }],
+        activeTabId: filePath,
+      }
+    })
     loadFile(filePath, meta)
   }, [loadFile])
+
+  // Select an already-open document tab in a panel.
+  const selectDoc = useCallback((side: PanelSide, filePath: string) => {
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => ({ ...prev, activeTabId: filePath }))
+  }, [])
+
+  // Select the implicit Search tab in a panel (and focus its field).
+  const selectSearch = useCallback((side: PanelSide) => {
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => ({ ...prev, activeTabId: null }))
+    if (side === 'left') setTimeout(() => searchRef.current?.focus(), 50)
+  }, [])
+
+  // Close a document tab. The next active tab is the right neighbour, then the
+  // left, falling back to Search (null) when no documents remain. Only changes
+  // the active selection when the closed tab was the active one.
+  const closeDoc = useCallback((side: PanelSide, filePath: string) => {
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => {
+      const idx = prev.tabs.findIndex((t) => t.path === filePath)
+      if (idx === -1) return prev
+      const tabs = prev.tabs.filter((t) => t.path !== filePath)
+      let activeTabId = prev.activeTabId
+      if (prev.activeTabId === filePath) {
+        const neighbour = tabs[idx] ?? tabs[idx - 1] ?? null
+        activeTabId = neighbour?.path ?? null
+      }
+      return { tabs, activeTabId }
+    })
+  }, [])
+
+  // Set the active document tab's surface (Content / Links / Diff) in a panel.
+  const setSurface = useCallback((side: PanelSide, surface: PanelTab) => {
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => {
+      if (prev.activeTabId === null) return prev
+      return {
+        ...prev,
+        tabs: prev.tabs.map((t) => (t.path === prev.activeTabId ? { ...t, surface } : t)),
+      }
+    })
+  }, [])
+
+  // Cycle to the next / previous tab in a panel, wrapping, Search included.
+  // The cycle order is [Search, ...tabs]; null represents Search.
+  const cycleTab = useCallback((side: PanelSide, dir: 1 | -1) => {
+    const setter = side === 'left' ? setLeftPanel : setRightPanel
+    setter((prev) => {
+      const order: (string | null)[] = [null, ...prev.tabs.map((t) => t.path)]
+      const cur = order.indexOf(prev.activeTabId)
+      const next = order[(cur + dir + order.length) % order.length]
+      return { ...prev, activeTabId: next }
+    })
+  }, [])
 
   // ── Save (routes by path) ──
 
@@ -647,21 +742,37 @@ export default function Home() {
   const toggleRightPanel = useCallback(() => {
     setRightOpen((open) => {
       if (open) return false
-      // Opening: restore the last-used file into the right panel if it's empty.
+      // Opening: if the right panel has no tabs, seed it with the last-used file
+      // as its first document tab so the split opens on something useful.
       setRightPanel((prev) => {
-        if (prev.activePath) return prev
-        const last = lastOpenedPathRef.current ?? leftPanel.activePath
+        if (prev.tabs.length > 0) return prev
+        const last = lastOpenedPathRef.current ?? leftPanel.activeTabId
         if (last) {
           loadFile(last)
-          return { ...prev, activePath: last }
+          return { tabs: [{ path: last, surface: 'content' }], activeTabId: last }
         }
         return prev
       })
       return true
     })
-  }, [leftPanel.activePath, loadFile])
+  }, [leftPanel.activeTabId, loadFile])
 
   const closeRightPanel = useCallback(() => setRightOpen(false), [])
+
+  // The panel the keyboard currently targets. Kept in a ref so the keydown
+  // listener (bound once) always reads the latest value without re-binding.
+  const focusedSideRef = useRef<PanelSide>('left')
+  useEffect(() => {
+    // A closed right panel can never hold focus; fall back to the left.
+    focusedSideRef.current = rightOpen ? focusedSide : 'left'
+  }, [focusedSide, rightOpen])
+
+  // Latest panel state, mirrored into refs so the keydown listener (bound once)
+  // can read tab state without being a dependency.
+  const leftPanelRef = useRef(leftPanel)
+  const rightPanelRef = useRef(rightPanel)
+  useEffect(() => { leftPanelRef.current = leftPanel }, [leftPanel])
+  useEffect(() => { rightPanelRef.current = rightPanel }, [rightPanel])
 
   // ── Keyboard shortcuts ──
 
@@ -698,8 +809,24 @@ export default function Home() {
       }
       if (mod && e.key === 'f') {
         e.preventDefault()
-        setLeftPanel((prev) => ({ ...prev, activePath: null }))
-        setTimeout(() => searchRef.current?.focus(), 50)
+        // Select the focused panel's Search tab and focus the field.
+        selectSearch(focusedSideRef.current)
+        return
+      }
+      if (mod && (e.key === 'w' || e.key === 'W')) {
+        // Close the focused panel's active document tab. No-op on Search.
+        const side = focusedSideRef.current
+        const panel = side === 'left' ? leftPanelRef.current : rightPanelRef.current
+        if (panel.activeTabId) {
+          e.preventDefault()
+          closeDoc(side, panel.activeTabId)
+        }
+        return
+      }
+      if (e.ctrlKey && (e.key === 'Tab' || e.code === 'Tab')) {
+        // ⌃Tab / ⌃⇧Tab cycle tabs in the focused panel (wrap, Search included).
+        e.preventDefault()
+        cycleTab(focusedSideRef.current, e.shiftKey ? -1 : 1)
         return
       }
       if (mod && e.key === ',') {
@@ -709,9 +836,16 @@ export default function Home() {
       }
       if (mod && e.key === 'd') {
         e.preventDefault()
-        // Show the diff alongside the file: open the right panel on its Diff tab.
+        // Show the diff alongside the file: open the right panel and put its
+        // active document tab on the Diff surface.
         setRightOpen(true)
-        setRightPanel((prev) => ({ ...prev, activeTab: 'diff' }))
+        setRightPanel((prev) => {
+          if (prev.activeTabId === null) return prev
+          return {
+            ...prev,
+            tabs: prev.tabs.map((t) => (t.path === prev.activeTabId ? { ...t, surface: 'diff' } : t)),
+          }
+        })
         return
       }
       if (mod && (e.key === 'r' || e.key === 'R')) {
@@ -727,7 +861,7 @@ export default function Home() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [toggleRightPanel])
+  }, [toggleRightPanel, selectSearch, closeDoc, cycleTab])
 
   // The launcher hands a composed run to the terminal: slide it up, then spawn.
   const handleLaunch = useCallback((req: RunRequest) => {
@@ -738,21 +872,24 @@ export default function Home() {
 
   // ── Derived ──
 
-  const leftLoaded = leftPanel.activePath ? files[leftPanel.activePath] ?? null : null
-  const rightLoaded = rightPanel.activePath ? files[rightPanel.activePath] ?? null : null
+  // The active document for a panel = the tab whose path is activeTabId.
+  const leftActiveDoc = leftPanel.tabs.find((t) => t.path === leftPanel.activeTabId) ?? null
+  const rightActiveDoc = rightPanel.tabs.find((t) => t.path === rightPanel.activeTabId) ?? null
+
+  const leftLoaded = leftActiveDoc ? files[leftActiveDoc.path] ?? null : null
+  const rightLoaded = rightActiveDoc ? files[rightActiveDoc.path] ?? null : null
+
+  const lookupLoaded = useCallback((path: string): LoadedFile | null => files[path] ?? null, [files])
 
   // Top-bar context follows the most relevant panel: the right when open, else left.
-  const focusPanel = rightOpen && rightPanel.activePath ? rightPanel : leftPanel
-  const focusLoaded = focusPanel.activePath ? files[focusPanel.activePath] ?? null : null
-  const inEditor = focusPanel.activePath !== null
+  const focusPanel = rightOpen && rightPanel.activeTabId ? rightPanel : leftPanel
+  const focusLoaded = focusPanel.activeTabId ? files[focusPanel.activeTabId] ?? null : null
+  const inEditor = focusPanel.activeTabId !== null
   const wordCount = countWords(focusLoaded?.content ?? '')
 
-  const setLeftTab = useCallback((tab: PanelTab) => setLeftPanel((p) => ({ ...p, activeTab: tab })), [])
-  const setRightTab = useCallback((tab: PanelTab) => setRightPanel((p) => ({ ...p, activeTab: tab })), [])
-
   const goHome = useCallback(() => {
-    setLeftPanel((p) => ({ ...p, activePath: null }))
-  }, [])
+    selectSearch('left')
+  }, [selectSearch])
 
   return (
     <div
@@ -900,6 +1037,8 @@ export default function Home() {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         {/* LEFT panel — always present, flexes to leftWidth when split is open */}
         <div
+          onMouseDownCapture={() => setFocusedSide('left')}
+          onFocusCapture={() => setFocusedSide('left')}
           style={{
             display: 'flex',
             flexBasis: rightOpen ? `${leftWidth}%` : '100%',
@@ -912,10 +1051,17 @@ export default function Home() {
           <WorkspacePanel
             side="left"
             workingDir={activeWorkingDir}
-            activeTab={leftPanel.activeTab}
-            onSelectTab={setLeftTab}
-            activePath={leftPanel.activePath}
+            tabs={leftPanel.tabs}
+            activeTabId={leftPanel.activeTabId}
+            onSelectSearch={() => selectSearch('left')}
+            onSelectDoc={(p) => selectDoc('left', p)}
+            onCloseDoc={(p) => closeDoc('left', p)}
+            onAddDoc={() => selectSearch('left')}
+            onSelectSurface={(s) => setSurface('left', s)}
+            activePath={leftActiveDoc?.path ?? null}
+            activeSurface={leftActiveDoc?.surface ?? 'content'}
             loaded={leftLoaded}
+            loadedByPath={lookupLoaded}
             searchQuery={searchQuery}
             searching={searching}
             searchResults={searchResults}
@@ -928,8 +1074,8 @@ export default function Home() {
             onProjectFilter={handleProjectFilter}
             searchInputRef={searchRef}
             onOpenResult={makeOpenResult('left')}
-            onEditorChange={makeEditorChange(leftPanel.activePath)}
-            onEditorSave={makeEditorSave(leftPanel.activePath)}
+            onEditorChange={makeEditorChange(leftActiveDoc?.path ?? null)}
+            onEditorSave={makeEditorSave(leftActiveDoc?.path ?? null)}
           />
         </div>
 
@@ -943,6 +1089,8 @@ export default function Home() {
 
         {/* RIGHT panel — kept mounted (display:none) when closed to preserve state */}
         <div
+          onMouseDownCapture={() => setFocusedSide('right')}
+          onFocusCapture={() => setFocusedSide('right')}
           style={{
             display: rightOpen ? 'flex' : 'none',
             flexBasis: `${100 - leftWidth}%`,
@@ -956,12 +1104,19 @@ export default function Home() {
           <WorkspacePanel
             side="right"
             workingDir={activeWorkingDir}
-            activeTab={rightPanel.activeTab}
-            onSelectTab={setRightTab}
+            tabs={rightPanel.tabs}
+            activeTabId={rightPanel.activeTabId}
+            onSelectSearch={() => selectSearch('right')}
+            onSelectDoc={(p) => selectDoc('right', p)}
+            onCloseDoc={(p) => closeDoc('right', p)}
+            onAddDoc={() => selectSearch('right')}
+            onSelectSurface={(s) => setSurface('right', s)}
             showClose
             onClose={closeRightPanel}
-            activePath={rightPanel.activePath}
+            activePath={rightActiveDoc?.path ?? null}
+            activeSurface={rightActiveDoc?.surface ?? 'content'}
             loaded={rightLoaded}
+            loadedByPath={lookupLoaded}
             searchQuery={searchQuery}
             searching={searching}
             searchResults={searchResults}
@@ -973,8 +1128,8 @@ export default function Home() {
             onTypeFilter={handleTypeFilter}
             onProjectFilter={handleProjectFilter}
             onOpenResult={makeOpenResult('right')}
-            onEditorChange={makeEditorChange(rightPanel.activePath)}
-            onEditorSave={makeEditorSave(rightPanel.activePath)}
+            onEditorChange={makeEditorChange(rightActiveDoc?.path ?? null)}
+            onEditorSave={makeEditorSave(rightActiveDoc?.path ?? null)}
           />
         </div>
       </div>
