@@ -981,3 +981,563 @@ Curly apostrophes in prose; no em-dashes; mono for IDs and the `[[` token where 
 ---
 
 SELF-REPORT: confidence: high; model-fit: right (design judgment + token discipline + reuse mapping across a large existing spec; a cheaper model would likely have invented primitives or missed the no-red / no-em-dash-in-copy nuance).
+
+---
+
+## Frontmatter manager (TIN-1638)
+
+Three surfaces that make a memory file's frontmatter feel *taken care of* rather
+than *demanded*: **smart generation on create** (the file arrives already
+described), the **import flow** (existing `.md` files come in already described),
+and the **audit view** (`⌘⇧A` — the library's quiet self-portrait of what's still
+loose). They share the house voice exactly: forest on cream, serif for reading,
+sans for chrome, mono for paths, calm and present, no alarm. Every value below is
+a named token from §A. No new primitive is introduced that an existing one
+(`ResultCard`/`MetaBar`, `TypeChip`, the modal card, `CalmEmpty`, the full-view top
+bar, the recessive `--notice` block) cannot carry.
+
+The backend is built (`lib/frontmatter.ts`):
+
+- `suggestFrontmatter(content)` → `Suggestion = { name, title, type, projects[],
+  tags[], created, status }` — rule-based, instant, local. Drives Surfaces 1 and 2.
+- `auditFrontmatter()` → `AuditEntry[] = { path, status:
+  'complete'|'partial'|'missing', type, projects[], created, docStatus, missing[] }`,
+  unhealthy first. Drives Surface 3.
+- `importMarkdown(content, frontmatter)` → writes `{root}/{firstProject}/{slug}.md`,
+  returns the path. Commits Surface 2.
+
+**One cross-surface decision, stated once: the result-card preview is the trust
+device.** In every surface where a user edits frontmatter (create, import, audit
+fix), we render a live `ResultCard` showing exactly how this note will read in
+search, built from the current field values. The fields edit the card you can see;
+nothing is abstract. This reuses `ResultCard` / `MetaBar` verbatim by adapting the
+`Suggestion`/`AuditEntry` to the `MemorySearchResult` shape the card already
+renders (the `linkedToResult` adapter from §Wiki-linking is the established
+pattern; add a sibling `suggestionToResult` / `auditToResult`). The preview is
+never a separate styled box — it is the actual search card, so "the card will look
+like this" is literally true.
+
+**The health language, stated once (the no-alarm core).** A file is never
+"invalid," never "wrong," never flagged. Three calm states, one hue each, plain
+words:
+
+| Audit status | Dot | Word | Token (dot + text) | Reading |
+| --- | --- | --- | --- | --- |
+| `complete` | ● filled | `Described` | `--forest` on `--forest-wash` | Quietly affirmed. The note is taken care of. |
+| `partial` | ◐ half | `Needs a little` | `--notice` (tan) on `rgba(155,123,90,0.08)` | An invitation, not a fault. |
+| `missing` | ○ ring | `Not described yet` | `--ink-faint` dot, `--ink-soft` text | Simply undone, like an empty field. The calmest of the three, never the loudest. |
+
+The dots are drawn glyphs (`●` / `◐` / `○`) in the status hue, 8px, never traffic
+lights, never `✗`/`⚠`. The deliberate inversion of the usual alarm grammar:
+`missing` — the "worst" state — is rendered the *quietest* (faint ring, no colour),
+because a note nobody has described yet is not an emergency, it is just a note
+waiting. `partial` carries the one warm accent (tan) because it is the most
+*actionable* state: one field away from done, the place a gentle nudge actually
+helps. Nothing red, nothing demands; tan invites, faint recedes.
+
+---
+
+### Surface 1 — Smart generation on create
+
+Upgrades the existing `NewFileModal` (in `app/page.tsx`) and the `handleFileCreated`
+flow. The principle: **the modal must not get heavier.** Today's modal already
+asks for Name, Type, Project(s), Tags. Smart generation does not *add* a step — it
+**fills the fields that are already there** and adds one quiet preview. The user's
+job shrinks from "describe this note" to "glance, maybe adjust, confirm."
+
+**Shape: the same 480-wide cream modal card** (`--bg-raised`, `--r-lg`,
+`--shadow-modal`, padding `--sp-7`, scrim `--scrim`), same title treatment, same
+field rhythm and the same `Cancel` / primary-button footer. We change three things:
+
+1. **A body field becomes the seed.** Below `Name`, add one borderless serif
+   textarea (the `QuickCapture` content treatment: `--font-serif`, 15 / 1.6,
+   transparent, no border, `rows={4}`), placeholder `Paste or write the note. We
+   will describe it for you.` This is optional — the modal still works name-only —
+   but it is the input `suggestFrontmatter` reads.
+
+2. **Suggestion fills the existing fields, live.** As the user types into Name or
+   the body (debounced 300ms, matching the editor autosave debounce), call
+   `suggestFrontmatter(content)` and **pre-select** the suggested `type`, the
+   suggested `projects` chips, and populate `tags`. These are not a separate
+   "suggestion panel" — they land *in the Type / Project(s) / Tags rows that
+   already exist*, as the active `TypeChip` selections. The suggestion is invisible
+   as a mechanism; it simply means the fields arrive correct. A single quiet line
+   sits under the field group, `--t-meta` `--ink-faint`: `Described from your
+   note.` with a trailing `Regenerate` text button (`--ink-soft`, hover `--ink`).
+   The user never has to know a model ran; they only notice the fields were already
+   right.
+
+3. **The preview card sits at the bottom**, above the footer, under a `--hair`
+   rule: a live `ResultCard` (resting state, not interactive — `cursor: default`,
+   no hover lift) built from the current field values via `suggestionToResult`.
+   Headed by a `--t-label` `--ink-soft` line: `HOW THIS WILL LOOK`. This replaces
+   the old standalone `Slug:` hint line (the slug now reads inside the card's
+   path/name); keep the slug visible as the card's `name`. The preview is the proof
+   that the fields mean something.
+
+**Layout, top to bottom:** title `New memory file` → `Name` field (unchanged) →
+the serif body seed → `Type` chip row (pre-selected) → `Project(s)` chip row
+(pre-selected) → `Tags` field (pre-filled) → `Described from your note.
+Regenerate` line → `--hair` rule → `HOW THIS WILL LOOK` + preview `ResultCard` →
+footer (`Cancel` secondary, `Create file` primary).
+
+**Regenerate.** Re-runs `suggestFrontmatter` against the current body and **resets
+the fields to the fresh suggestion**, discarding manual edits to type/projects/tags
+(Name is never touched — it is the user's). It is a deliberate "start the
+description over" act, so it does not silently clobber on every keystroke; the
+debounced auto-fill only runs while a field is still at its suggested value
+(untouched). Once the user edits a field by hand, auto-fill stops touching *that*
+field — their choice wins — and `Regenerate` is the explicit way to ask again.
+
+**States:**
+- *Default (empty)* — name-only flow, fields at their existing defaults, no
+  `Described from…` line yet, preview card shows the empty-ish note (name
+  placeholder italic in `--ink-faint`). Identical in weight to today's modal.
+- *Suggesting* — while the debounced call is in flight, the `Described from your
+  note.` line reads `Describing…` in `--ink-faint`. No spinner.
+- *Suggested* — fields populated, line reads `Described from your note.` +
+  `Regenerate`.
+- *Editing (manual)* — a user-touched chip/field stays as the user set it; the
+  line drops the participle and reads `Described, with your edits.`
+- *Creating* — primary button reads `Creating…`, disabled, per today's modal.
+- *Error* — the existing recessive notice (`--notice` on `rgba(155,123,90,0.08)`,
+  `--r-md`): copy unchanged from today for validation (`Name is required.` etc.),
+  and `Could not create the file. Your work is still here.` for a write failure.
+
+**Copy (verbatim):**
+- Body placeholder: `Paste or write the note. We’ll describe it for you.`
+- Describe line: `Describing…` · `Described from your note.` · `Described, with
+  your edits.`
+- Regenerate button: `Regenerate`
+- Preview label: `HOW THIS WILL LOOK`
+- Buttons (unchanged): `Cancel` · `Create file` / `Creating…`
+- Write error: `Could not create the file. Your work is still here.`
+
+---
+
+### Surface 2 — Import flow
+
+A modal to bring existing `.md` files into memory. Triggered two ways, both with a
+visible affordance: **drag-and-drop** of `.md` files onto the window, and **`⌘O`**
+(native file picker, `open` from `@tauri-apps/plugin-dialog`, `multiple: true`,
+`.md` filter). Add `⌘O` to the §B shortcut map (Import, modal) with a top-bar
+control.
+
+**The drag affordance (what the window shows while dragging).** No modal yet — the
+whole window gets a calm drop veil: a `--scrim`-light wash (`rgba(38,35,32,0.06)`,
+the `--neutral-tint` value) over the content, and a centered floating card
+(`--bg-raised`, `--r-lg`, `--shadow-modal`, padding `--sp-7`) with one serif line
+`--t-display` `--ink`: `Drop Markdown files to import.` and one `--t-meta`
+`--ink-faint` sub-line: `We’ll describe each one before anything is saved.` A
+`2px dashed --forest-line` inset border on the card edge signals the target. No
+icon, no bounce; the veil fades in over 0.15s. On drop, the veil becomes the import
+modal. Dragging non-`.md` files shows the same veil with the sub-line replaced by
+`Only .md files come in here.` in `--ink-faint` (calm, not a rejection buzz).
+
+**The modal shell.** The 560-wide cream card (matching `SettingsModal`'s width,
+since import is the heavier of the two — it carries a preview and a queue), title
+`Import notes` (`--t-title`). Two arrangements by count:
+
+**Single file** — the modal *is* one per-file editor (see below), footer
+`Cancel` / `Import` (primary). Quiet, no queue chrome.
+
+**Multiple files (bulk)** — a **left queue rail (~200) + right per-file editor**,
+inside the same card:
+
+- **Queue rail.** A vertical list, one row per dropped file. Each row: the filename
+  (`--t-body`, truncated from the left so the stem stays visible, `--font-mono` for
+  the name since it is a path leaf) over a status line. Status uses the **same calm
+  dot grammar as the audit** but scoped to the import lifecycle:
+  - `○ Pending` — `--ink-faint` ring + `--ink-soft` text. Not yet reviewed.
+  - `◐ Reviewed` — `--notice` half-dot + text. Looked at, edits made, ready.
+  - `● Imported` — `--forest` filled dot + `--forest` text. Written to disk.
+  The active row uses the standard list-row selected treatment (`--forest-wash`
+  fill, 2px `--forest` left border). Rows are click-to-select; selecting loads that
+  file into the editor on the right. A `--t-meta` `--ink-faint` tally pinned to the
+  rail bottom: `2 of 5 imported.`
+- **Per-file editor (right).** Identical fields to Surface 1, but seeded by *the
+  file*: if the dropped file **already has frontmatter**, parse it and show it for
+  review (fields pre-filled from the file, the describe-line reads `From this
+  file’s frontmatter.`); if it has **none**, run `suggestFrontmatter` on the body
+  and show the suggestion (`Described from the note.`). Below the fields, the same
+  `HOW THIS WILL LOOK` preview `ResultCard`. Above the fields, the source path in
+  `--t-mono` `--ink-faint`, truncated from the left.
+
+**Step-through + bulk-confirm.** The footer carries both rhythms:
+- A primary `Import this one` button commits the active file (calls
+  `importMarkdown`), marks it `● Imported`, and **auto-advances to the next
+  `Pending` file** — the step-through. When the last is done, the button becomes
+  `Done`.
+- A secondary `Import all 5` button (count live) bulk-commits every `Pending` /
+  `Reviewed` file in sequence, each row flipping to `● Imported` as it lands, then
+  closes to a toast. This is the "I trust the suggestions, take them all" path.
+- `Cancel` closes without writing; already-imported files stay imported (writing is
+  per-file and committed, never rolled back — honest, never a surprise).
+
+**Toast on completion** (the shared toast primitive): `Imported 5 notes.` with a
+trailing `Show in search` text button that runs a search scoped to the imported
+paths. Single-file: `Imported to {project}.` + `Open` (matches QuickCapture's
+toast).
+
+**States:**
+- *Dragging* — the drop veil (above).
+- *Empty queue / picker cancelled* — modal does not open; no-op.
+- *Reviewing* — default, per-file editor populated.
+- *Importing one* — that row’s dot animates from `◐` to `●` (opacity cross-fade
+  0.15s, no motion); primary button reads `Importing…` briefly.
+- *Importing all* — rows flip top-down; the `Import all` button reads `Importing 3
+  of 5…`.
+- *Per-file import error* — the row keeps its pre-import status and gains a
+  `--notice` sub-line `Could not import this one. Still here to retry.`; the bulk
+  run continues past it (honest partial success), and the final toast reads
+  `Imported 4 notes. One is still waiting.`
+- *Duplicate target path* — if `importMarkdown` would overwrite, the editor shows a
+  recessive `--notice` line under the path: `A note already lives at this path.
+  Change the name or project to keep both.` (calm, names the fix, never blocks
+  loudly).
+
+**Copy (verbatim):**
+- Drag veil: `Drop Markdown files to import.` · sub `We’ll describe each one before
+  anything is saved.` · non-md sub `Only .md files come in here.`
+- Title: `Import notes`
+- Source path label: (the path itself, no label)
+- Describe line: `From this file’s frontmatter.` · `Described from the note.`
+- Preview label: `HOW THIS WILL LOOK`
+- Queue statuses: `Pending` · `Reviewed` · `Imported`
+- Queue tally: `2 of 5 imported.`
+- Buttons: `Import this one` · `Import all 5` · `Importing…` · `Importing 3 of 5…`
+  · `Done` · `Cancel`
+- Single-file buttons: `Import` · `Cancel`
+- Duplicate notice: `A note already lives at this path. Change the name or project
+  to keep both.`
+- Per-file error: `Could not import this one. Still here to retry.`
+- Toast (bulk): `Imported 5 notes.` + `Show in search`
+- Toast (single): `Imported to studio.` + `Open`
+- Toast (partial): `Imported 4 notes. One is still waiting.`
+
+---
+
+### Surface 3 — Audit view (`⌘⇧A`)
+
+A **full view** (per §B), same family as the transcript browser: it replaces the
+main content column, the top bar persists with `← Agent Studio`, and the centre
+reads `Frontmatter`. Add `⌘⇧A` to the §B shortcut map (Audit, full view) with a
+visible top-bar affordance. This is the surface that literally surfaces "problems,"
+so it is where the no-alarm rule earns its keep: it must read as a **calm
+self-portrait of the library**, a gentle to-do, never a list of errors.
+
+**Top bar.** `← Agent Studio` left, `Frontmatter` centred (`--t-title`), and on the
+right a single quiet summary line in `--t-meta` `--ink-soft`: `48 described · 6
+need a little · 2 not yet.` This headline is the whole emotional frame — it leads
+with the *good* count, names the loose ones in plain words, and never totals them
+as a "problem count."
+
+**Filter chips.** Below the top bar, a `--bg-field` pill strip (matching the search
+filter row and the graph filter strip), `gap: --sp-2`, using `TypeChip`:
+`All` · `Need a little` · `Not yet`. Default `All`. (Three chips only — these map
+to `complete`+`partial`+`missing` / `partial` / `missing`. There is no lone
+"described/complete" filter because a library of finished notes is not something
+you go *looking* for; you filter to find what is still loose.) A trailing
+`Fix all` text button (`--forest`, weight 600) sits at the right of the strip when
+any partial-or-missing file exists.
+
+**The list (rows, not a dense table).** `auditFrontmatter()` returns unhealthy
+first; render in that order. Each row reuses the **list-row** primitive (`8px 16px`,
+hover `--bg-field-strong`, selected `--forest-wash` + 2px `--forest` left border) —
+*not* a spreadsheet grid, because a grid of statuses reads as a defect report. A
+row, left to right:
+
+- **Health dot + word** (fixed ~150 left column): the calm dot (`●` / `◐` / `○`)
+  in its status hue + the word `Described` / `Needs a little` / `Not yet`
+  (`--t-body`, the dot's text hue). This is the only "status" the eye lands on, and
+  it reads as a state of grace, not a grade.
+- **Name** (`--t-body` 13 / 600 `--ink`) over the **path** (`--t-mono` `--ink-faint`,
+  truncated from the left). The note's identity.
+- **Type chip + project chips** — the `MetaBar` treatment exactly (`--forest-tint`
+  type, `--tan-tint` projects). When `type` is absent, *no* empty chip — instead a
+  `--t-meta` `--ink-faint` italic word in the type slot: `no type yet`. Same for
+  projects: `no project yet`. Plain language fills the gap; nothing is blank-and-red.
+- **Created** (`--t-meta` `--ink-faint`, right-aligned) — the date, or the word
+  `undated` in `--ink-faint` when absent.
+- **What's loose** (only on `partial`/`missing` rows, a trailing `--t-meta`
+  `--notice` phrase built from `missing[]`): `needs a type` · `needs a project` ·
+  `needs a created date`, joined naturally — `needs a type and a created date`.
+  This is the actionable heart, in the one warm accent, phrased as a need not a
+  fault. `complete` rows show nothing here — silence is the affirmation.
+
+**Click a row** → opens that file's frontmatter editor. Reuse the **per-file editor
+from Surface 2** presented as a centered modal over the audit view (the modal-over-
+full-view stacking §B allows): same fields, same `HOW THIS WILL LOOK` preview, but
+seeded from the existing file and committing an in-place rewrite (not a new
+`importMarkdown` — a `save`/update of the same path). Footer `Cancel` / `Save`. On
+save, the row's health dot re-resolves live (a `◐`→`●` cross-fade) and the
+top-bar summary recounts. The library heals in front of you, one calm dot at a time.
+
+**Fix all.** The `Fix all` button **steps through the unhealthy files** in order:
+it opens the first partial/missing file in that same editor modal, and the footer
+gains a `Save and next →` primary (alongside `Skip` secondary). Saving advances to
+the next unhealthy file; `Skip` advances without writing. A `--t-meta` `--ink-faint`
+progress line in the modal header: `2 of 8.` When the last is handled, the modal
+closes and the summary updates. This turns the chore into a quiet, finite pass —
+the same step-through rhythm as the bulk import, so the two "work through a list"
+moments feel identical.
+
+**States:**
+- *Default* — the list, unhealthy first, filter `All`.
+- *Loading* — centered `--ink-soft` `--t-body`: `Reading your library…`
+- *Filtered to empty* (e.g. `Not yet` with none missing) — `CalmEmpty`: `Nothing
+  here needs that. Try another filter.`
+- *All-healthy (the reward state)* — when every file is `complete`, the whole view
+  becomes a single `CalmEmpty`, centered, no list, no chips: a `--t-display`
+  `--ink` line `Every note is described.` and a `--t-meta` `--ink-faint` sub-line
+  `Your library is tidy. Nothing to do here.` The `Fix all` button is absent. This
+  is the only place the manager celebrates, and it does so by going quiet — the
+  most affirming state is an empty, restful screen.
+- *Error* — recessive notice block: `Could not read the library just now.` with a
+  `Refresh` text button (`--ink-soft`).
+- *Empty library (no files at all)* — `CalmEmpty`: `No notes yet. Create one with
+  ⌘N and it shows up here.`
+
+**Copy (verbatim):**
+- Top-bar centre title: `Frontmatter`
+- Summary: `48 described · 6 need a little · 2 not yet.`
+- Health words: `Described` · `Needs a little` · `Not yet`
+- Filter chips: `All` · `Need a little` · `Not yet`
+- Missing-field gap words: `no type yet` · `no project yet` · `undated`
+- What's-loose phrases: `needs a type` · `needs a project` · `needs a created date`
+  (joined with `and`, e.g. `needs a type and a created date`)
+- Fix-all button: `Fix all`
+- Editor step-through: `Save and next →` · `Skip` · header `2 of 8.`
+- Editor (single): `Save` · `Cancel`
+- Loading: `Reading your library…`
+- Filtered-empty: `Nothing here needs that. Try another filter.`
+- All-healthy: `Every note is described.` · sub `Your library is tidy. Nothing to
+  do here.`
+- Empty library: `No notes yet. Create one with ⌘N and it shows up here.`
+- Error: `Could not read the library just now.` + `Refresh`
+
+---
+
+### How the audit stays calm (the no-alarm design, stated plainly)
+
+The audit's job is to surface incomplete files. Every instinct in tooling says:
+red badges, a `⚠` per row, a "12 errors" count, a sortable Status column that reads
+like a build failure. We do none of it, and the file is *more* legible for it:
+
+1. **Lead with the good number.** The summary is `48 described · 6 need a little ·
+   2 not yet` — the eye lands on 48, not on a problem count. The library is mostly
+   fine, and the frame says so.
+2. **Invert the alarm grammar.** The "worst" state (`missing`) is rendered the
+   *quietest* — a faint ring, `--ink-faint`, no colour. The most *actionable* state
+   (`partial`) carries the one warm accent (tan `--notice`), because that is where a
+   nudge pays off. Nothing recedes harder than red would shout.
+3. **Plain words, never glyphs of alarm.** `Needs a little`, `Not yet`, `needs a
+   type`. A blank field becomes `no type yet`, not an empty-red cell. The dots are
+   `●◐○`, never `✗`/`⚠`. No exclamation marks anywhere.
+4. **No red, by token.** There is no red token to reach for (§D); `partial` uses
+   `--notice` (tan), `complete` uses `--forest`, `missing` uses `--ink-faint`. The
+   strongest colour on the screen is the calm forest of a *finished* note.
+5. **The reward is silence.** A fully-described library is an empty, restful screen
+   (`Every note is described.`), not a green check-laden dashboard. Done looks like
+   peace.
+6. **Every loose file is an invitation, made finite.** `Fix all` turns the list
+   into a short, countable pass (`2 of 8`), the same gentle step-through as import.
+   The user is never confronted with a wall of red; they are offered a calm
+   sequence and a clear end.
+
+---
+
+SELF-REPORT: confidence: high; model-fit: right (cross-surface design judgment, token discipline, and reuse mapping over a large existing spec, plus the load-bearing nuance of inverting alarm grammar so `missing` reads quietest while staying honest; a cheaper model would likely have reached for a status grid, a red/✗ vocabulary, or invented a new preview primitive instead of reusing ResultCard).
+
+---
+
+## Dark theme (TIN-1673)
+
+The same room at night. Not a second app — the cream room with the lights down: a
+warm near-black instead of paper, a soft warm off-white instead of ink, the forest
+still the accent, heather and tan re-tuned so they read against dark instead of
+disappearing into it. Every house rule carries over unchanged: no red, no alarm,
+removals stay calm, attention is earned in tan not demanded. The light theme is
+forest-on-cream; this is forest-on-ember.
+
+Two anchors set the whole mood and everything else hangs off them:
+
+- **`--bg-app` = `#1A1815`** — a warm near-black. Brown-black, not slate; it is the
+  cream `#F2F0ED` taken down to embers, keeping the same hue family so the room is
+  recognisably ours. (Cold `#0F1115`-style slates are explicitly rejected.)
+- **`--ink` = `#ECE7DF`** — a soft warm off-white, never `#FFF`. It is the light
+  theme's cream lifted to a text weight; pure white on a warm dark reads clinical
+  and buzzes, this reads like warm paper at night.
+
+### Inversion principle (how the light values map)
+
+The light theme builds backgrounds from **white at low alpha over cream** and lines
+from **ink at low alpha over light**. In dark, both invert: backgrounds are **warm
+white at low alpha over the near-black** (so raised surfaces get *lighter*, as they
+must), and hairlines/tints are **warm white at low alpha** (light-on-dark overlays),
+*not* the light theme's dark-on-light. The forest/tan/heather hues lighten and
+slightly desaturate so they sit on dark without glowing. Alphas are nudged up a
+touch because overlays read fainter on dark than on light.
+
+### Token → dark value (every `color` key)
+
+Paste-ready for a `[data-theme="dark"]` block. Names match `lib/tokens.ts` /
+`globals.css` exactly.
+
+| Token | Dark value | Note |
+| --- | --- | --- |
+| `bgApp` / `--bg-app` | `#1A1815` | Warm near-black. App background, top bar. |
+| `bgRaised` / `--bg-raised` | `#23211D` | Modals, panels, menus. One warm step up from bgApp. |
+| `bgField` / `--bg-field` | `rgba(255,250,242,0.06)` | Inputs, search fields. Warm-white veil, not white-white. |
+| `bgFieldStrong` / `--bg-field-strong` | `rgba(255,250,242,0.10)` | Hovered cards, inline inputs. |
+| `bgCard` / `--bg-card` | `rgba(255,250,242,0.04)` | Resting result cards. Barely-there lift. |
+| `ink` / `--ink` | `#ECE7DF` | Primary text. Soft warm off-white. |
+| `inkSoft` / `--ink-soft` | `#A8A199` | Secondary text, labels. |
+| `inkFaint` / `--ink-faint` | `#766F66` | Tertiary text, timestamps, hints. |
+| `forest` / `--forest` | `#8FB089` | Primary accent. Sage-lifted forest — the dark-room forest. |
+| `forestTint` / `--forest-tint` | `rgba(143,176,137,0.16)` | Type chips, forest badges. |
+| `forestLine` / `--forest-line` | `rgba(143,176,137,0.36)` | Active card border. |
+| `forestWash` / `--forest-wash` | `rgba(143,176,137,0.10)` | Active card fill, selected row. |
+| `tan` / `--tan` | `#C9A57E` | Project accent. Warmer, lighter tan. |
+| `tanTint` / `--tan-tint` | `rgba(201,165,126,0.16)` | Project chips, project badges. |
+| `hair` / `--hair` | `rgba(255,250,242,0.10)` | Standard hairline / divider. |
+| `hairSoft` / `--hair-soft` | `rgba(255,250,242,0.07)` | Card border, lighter divider. |
+| `neutralTint` / `--neutral-tint` | `rgba(255,250,242,0.06)` | Neutral badge, `attic` domain. |
+| `line` / `--line` | `rgba(255,250,242,0.18)` | Input border, control border. |
+| `scrim` / `--scrim` | `rgba(8,7,6,0.60)` | Modal overlay. Darkens the dark — must read as a layer below the raised card. |
+| `termBg` / `--term-bg` | `#15140F` | Terminal surface. Nudged *below* bgApp so the terminal still reads as its own well. |
+| `termFg` / `--term-fg` | `#D4D0CB` | Terminal text. Unchanged — already warm, still clears AA on the new termBg. |
+| `add` / `--add` | `#8FB089` | Diff additions, "saved". Same as forest. Forest, not green-LED. |
+| `addWash` / `--add-wash` | `rgba(143,176,137,0.14)` | Added-line background. Light-on-dark. |
+| `remove` / `--remove` | `#B9A6C6` | Diff removals. Lifted heather, never red. |
+| `removeWash` / `--remove-wash` | `rgba(185,166,198,0.14)` | Removed-line background. Light-on-dark. |
+| `notice` / `--notice` | `#C9A57E` | "Out of date", "unsaved". Same as tan. Attention without alarm. |
+
+Shadows also need re-tuning for dark (the light theme's `rgba(38,35,32,…)` ink
+shadows vanish on a near-black). Deepen them and lean on the `bgRaised` step +
+hairline for separation rather than the shadow alone:
+
+| Token | Dark value |
+| --- | --- |
+| `--shadow-modal` | `0 20px 60px rgba(0,0,0,0.55)` |
+| `--shadow-panel` | `-4px 0 24px rgba(0,0,0,0.40)` |
+| `--shadow-toast` | `0 4px 20px rgba(0,0,0,0.45)` |
+
+The `globals.css` hard-coded bits move into the theme blocks too: the
+`::-webkit-scrollbar-thumb` (`rgba(255,250,242,0.14)` / hover `0.24` in dark), the
+`html, body` background (`#1A1815`), and the Milkdown/ProseMirror `color`,
+`caret-color`, link, and blockquote values, which currently hard-code `#262320` /
+`#3E5641` / `#6B6760` — these should reference the ink/forest/inkSoft tokens so they
+follow the theme. The `hljs` code-highlight block is already a dark theme and stays.
+
+### Contrast checks (verified, sRGB WCAG 2.x)
+
+Computed against the anchors above. AA is 4.5:1 for body text, 3:1 for large text
+and UI accents.
+
+| Pair | Ratio | Verdict |
+| --- | --- | --- |
+| `ink` `#ECE7DF` on `bgApp` `#1A1815` | **14.4 : 1** | AAA — body text. The anchor pair. |
+| `ink` on `bgRaised` `#23211D` | 13.1 : 1 | AAA — text on modals/panels. |
+| `inkSoft` `#A8A199` on `bgApp` | **6.9 : 1** | AA (passes AAA for large). Secondary text, labels. |
+| `inkSoft` on `bgRaised` | 6.3 : 1 | AA. |
+| `inkFaint` `#766F66` on `bgApp` | 3.6 : 1 | Passes AA for large/non-essential (timestamps, hints, placeholders) by design — same role as in light. |
+| `forest` `#8FB089` on `bgApp` | **7.4 : 1** | AA. Accent text, active state, `add` gutter. |
+| `forest` on `bgRaised` | 6.7 : 1 | AA. |
+| `tan` `#C9A57E` (= `notice`) on `bgApp` | 7.7 : 1 | AA. Project accent, notice text. |
+| `remove` `#B9A6C6` heather on `bgApp` | 7.9 : 1 | AA. Diff removals — calm, never red. |
+| `add` text on `addWash`-over-`bgApp` | 5.8 : 1 | AA. The diff add line reads. |
+| `remove` text on `removeWash`-over-`bgApp` | 6.1 : 1 | AA. The diff remove line reads. |
+| `termFg` `#D4D0CB` on `termBg` `#15140F` | 11.5 : 1 | AAA. Terminal unaffected. |
+
+Body ink on app background clears AA (and AAA) with wide margin; every accent used
+as text clears AA. `inkFaint` intentionally sits at the large-text AA threshold for
+its tertiary role, matching its light-theme counterpart (`#9B9490` on cream ≈ 2.7:1
+there, so dark `inkFaint` is in fact *more* legible than light's).
+
+### Washes, tints, and overlays (the light-on-dark rule)
+
+The single rule: **on dark, every tint/wash/hairline is a light overlay, never a
+dark one.** The light theme's `rgba(38,35,32,…)` (ink-over-light) values would paint
+*darker* smudges on the near-black and read as holes. They all flip to warm-white or
+the lifted-accent hue:
+
+- **Neutral structure** (`hair`, `hairSoft`, `neutralTint`, `line`, the three
+  `bg*` field surfaces, scrollbar): warm white `rgba(255,250,242,α)`. Alpha bumped
+  ~+0.04 over the obvious inversion because a light veil reads fainter on a dark base
+  than a dark veil reads on a light one. `line` (control borders) is the strongest
+  at `0.18`; `bgCard` the faintest at `0.04`.
+- **Forest washes/tints** use the *lifted* forest `143,176,137`, not the light
+  `62,86,65` (which would barely register). `forestTint` `0.16`, `forestLine`
+  `0.36`, `forestWash` / `addWash` `0.10`–`0.14`.
+- **Heather/tan washes** likewise use the lifted hues (`185,166,198` /
+  `201,165,126`) at `0.14`–`0.16`.
+- **`scrim` is the one overlay that stays dark** (`rgba(8,7,6,0.60)`) — its job is
+  to push the underlying view *down* a layer beneath a raised card, and on a dark
+  base that still means darkening + the modal's own `bgRaised` lift carries the
+  separation. Alpha is raised from light's `0.45` to `0.60` so the modal still reads
+  as floating.
+
+The recessive notice block (hard-coded `rgba(155,123,90,0.08)` in `DiffView.tsx`,
+`WorkspacePanel.tsx`, etc.) should become a token-or-theme value; in dark use
+`rgba(201,165,126,0.12)` (lifted tan, slightly higher alpha) under `--notice` text.
+
+### Cross-surface domain hues still resolve
+
+The §Wiki-linking rule "a domain has one hue, everywhere" must survive the dark
+re-tune — the five graph/Links domains key off existing tokens, so they move with
+them and stay mutually distinguishable on `bgApp`: `studio` (forestTint/forest),
+`shared` (tanTint/tan), `attic` (neutralTint/inkSoft), `understory`
+(forestWash/forest — still a lighter forest than studio), `website`
+(removeWash/remove — heather as identity, still calm, still no red). Verified the
+five fills read as distinct washes against `#1A1815`.
+
+### Implementation: theme selector strategy
+
+**Recommendation: keep `:root` as the light theme (the default), add
+`:root[data-theme="dark"]` as the override.** Reasons:
+
+1. The app ships light today; an unset/legacy state must stay light, so light is the
+   natural base. A bare `:root` = light keeps that true with zero migration.
+2. Builders override only what changes inside one `[data-theme="dark"]` block — the
+   non-color tokens (space, radii, type, fonts) never fork.
+3. Add an explicit `:root[data-theme="light"]` block too, but only as an *alias of
+   the base values*, so "System → light" and "System → dark" are both addressable
+   and a future third theme has a clean slot. The base `:root` and
+   `[data-theme="light"]` hold identical color values (light); `[data-theme="dark"]`
+   holds the table above. `lib/tokens.ts` gains a parallel `darkColor` export (or a
+   `colorFor(theme)` helper) so inline-styled React — which reads JS tokens, not CSS
+   vars — can switch too; the components consume it via a `useTheme()` hook rather
+   than importing `color` directly. (This JS side is the real work; the CSS side is a
+   paste.)
+
+For **System**, resolve `prefers-color-scheme` to set `data-theme` on the root at
+load and on change; never leave it unset when System is chosen, so the JS token
+object and the CSS vars always agree.
+
+### Toggle UI
+
+**In Settings: a Light / Dark / System segmented control.** A new first row in a
+small **Appearance** section (above Roots), three segments reusing the `TypeChip`
+active/resting treatment (active = forest fill / ink-on-forest, resting =
+transparent / `inkSoft` with `line` border) so it introduces no new primitive.
+Default **System**. Label `Theme` (`--t-label`), the segment under it. This is the
+canonical, discoverable home for the choice — calm, explained once, set and
+forgotten.
+
+**Top-bar sun/moon: no.** It fails house rule 5 (a top-bar control that does one tiny
+job, permanently spending the calmest real estate in the app on a setting most users
+flip once). Theme is not a per-session act like search or run; it does not earn a
+persistent chrome affordance.
+
+**A command-palette action: yes, quietly.** Add a single `⌘K` entry —
+`Switch theme` (cycles Light → Dark → System, or opens the Settings row) — so power
+users who live in the palette can reach it without a mouse, and it stays an
+accelerator with a visible door (the Settings control), exactly per house rule 7. No
+new global chord: a dedicated theme keybinding would clutter the §B map for a
+once-a-month act. So: **segmented control in Settings (the door) + one command-
+palette entry (the accelerator), no top-bar glyph, no global shortcut.**
+
+---
+
+SELF-REPORT: confidence: high; model-fit: right (palette design with measured WCAG verification, token-name fidelity for a paste-in builder, and the load-bearing nuances — warm-not-cold near-black, light-on-dark overlay inversion, scrim staying dark, terminal nudged below bgApp, and the five cross-surface domain hues surviving the re-tune; a cheaper model would likely have produced a cold slate palette, inverted overlays as dark-on-dark smudges, or broken the no-red / domain-hue constraints).

@@ -134,6 +134,27 @@ window, and reopening the same ticket focuses the existing one.
 
 ---
 
+## 8b. Frontmatter — described, imported, audited
+
+Every memory file has a small frontmatter block (type, projects, tags, dates).
+Studio fills it in for you and keeps it healthy.
+
+- **Smart create.** When you create a note (**⌘N**), paste or write the body and
+  Studio describes it: it suggests a name, type, projects, and tags from the
+  content, with a live preview of how the card will look. Every field stays
+  editable, and **Regenerate** re-describes from your latest text. Anything you
+  edit by hand is kept.
+- **Import existing notes.** Drop one or more `.md` files onto the window, or press
+  **⌘O** to pick them. Studio reviews each file's frontmatter (or generates it when
+  there is none), lets you adjust, and files it into the right project folder.
+  Multiple files queue up so you can step through or import them all at once.
+- **Audit (⌘⇧A).** A calm health view of your whole library: which notes are fully
+  described, which need a little, and which are not described yet. Click a row to
+  fix one, or "Fix all" to step through the loose ones. A tidy library is an empty
+  screen, not a wall of warnings.
+
+---
+
 ## 9. Connecting notes — wiki-links and the graph
 
 Notes are not a flat folder; they form a graph. Three ways to use it:
@@ -208,6 +229,8 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘D` | Diff tab |
 | `⌘T` | Transcripts |
 | `⌘G` | Knowledge graph |
+| `⌘O` | Import Markdown files |
+| `⌘⇧A` | Frontmatter audit |
 | `⌘R` | Launcher |
 | `⌘,` | Settings |
 | `⌘Return` | Save / Run (in modals and the launcher) |
