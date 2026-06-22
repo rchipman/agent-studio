@@ -24,11 +24,14 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::hybrid;
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 /// A single search result. Field names match `MemorySearchResult` in
 /// `lib/types.ts` (note `type` is a reserved word in Rust, hence the rename).
-#[derive(Serialize, Clone)]
+/// `Default` lets the hybrid ranker move results out of candidates cheaply.
+#[derive(Serialize, Clone, Default)]
 pub struct SearchResult {
     pub path: String,
     pub name: String,
@@ -191,6 +194,15 @@ pub fn init_db(root: &Path) -> rusqlite::Result<Connection> {
 /// an `F32_BLOB` column.
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     embedding.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Decode an `F32_BLOB` byte blob back into an f32 embedding. Trailing bytes
+/// that don't complete a 4-byte float are ignored (the column is fixed-width so
+/// this is defensive only). Used to rehydrate representative embeddings for MMR.
+pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect()
 }
 
 /// One nearest-neighbour hit from [`nearest_chunks`].
@@ -483,6 +495,211 @@ fn run_search(conn: &Connection, input: &SearchInput) -> rusqlite::Result<Vec<Se
     Ok(results)
 }
 
+// ── Hybrid search (TIN-1632) ─────────────────────────────────────────────────
+
+/// How many candidates to pull from each retriever before ranking. Larger than
+/// the returned `top_n` so temporal decay + MMR have room to reorder.
+const CANDIDATE_POOL: i64 = 50;
+
+/// Build the optional `type`/`project` filter SQL fragment and its positional
+/// params, shared by the FTS and hybrid paths.
+fn build_filters(input: &SearchInput) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+    let mut sql = String::new();
+    let mut params: Vec<Value> = Vec::new();
+    let type_f = input.type_filter.trim();
+    let project_f = input.project_filter.trim();
+    if !type_f.is_empty() {
+        sql.push_str(" AND mf.type = ?");
+        params.push(Value::Text(type_f.to_string()));
+    }
+    if !project_f.is_empty() {
+        sql.push_str(" AND (',' || mf.projects || ',') LIKE ?");
+        params.push(Value::Text(format!("%,{},%", project_f)));
+    }
+    (sql, params)
+}
+
+/// Lowercased, de-duplicated content tokens (alphanumeric words) for the Jaccard
+/// MMR fallback. Capped so a huge file doesn't blow up the candidate payload.
+fn tokenize(body: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in body.split(|c: char| !c.is_alphanumeric()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let tok = raw.to_lowercase();
+        if seen.insert(tok.clone()) {
+            out.push(tok);
+            if out.len() >= 200 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// True if a result satisfies the active type/project filters (applied to
+/// vector-only candidates, which bypass the FTS WHERE clause).
+fn passes_filters(result: &SearchResult, input: &SearchInput) -> bool {
+    let tf = input.type_filter.trim();
+    let pf = input.project_filter.trim();
+    if !tf.is_empty() && result.type_ != tf {
+        return false;
+    }
+    if !pf.is_empty() && !result.projects.iter().any(|p| p == pf) {
+        return false;
+    }
+    true
+}
+
+/// FTS5 candidates for a non-empty text query, each carrying its BM25 `rank` and
+/// content tokens. This is the BM25 arm of the hybrid pipeline.
+fn fts_candidates(
+    conn: &Connection,
+    input: &SearchInput,
+) -> rusqlite::Result<Vec<hybrid::RankInput>> {
+    use rusqlite::types::Value;
+    let query = input.q.trim();
+    let fts_query = format!("\"{}\"*", query.replace('"', "\"\""));
+    let (filter_sql, filter_params) = build_filters(input);
+
+    let sql = format!(
+        "SELECT mf.path, mf.name, mf.type, mf.projects, mf.created, mf.updated,
+                mf.tags, mf.status,
+                snippet(memory_fts, 4, '', '', '…', 20) AS excerpt,
+                mf.body AS body, rank AS rank
+         FROM memory_fts
+         JOIN memory_files mf ON mf.rowid = memory_fts.rowid
+         WHERE memory_fts MATCH ?{filter_sql}
+         ORDER BY rank
+         LIMIT ?"
+    );
+    let mut params: Vec<Value> = vec![Value::Text(fts_query)];
+    params.extend(filter_params);
+    params.push(Value::Integer(CANDIDATE_POOL));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let result = map_row(row)?;
+        let body: String = row.get("body")?;
+        let rank: f64 = row.get("rank")?;
+        out.push(hybrid::RankInput {
+            result,
+            bm25_rank: Some(rank),
+            vec_dist: None,
+            embedding: None,
+            terms: tokenize(&body),
+        });
+    }
+    Ok(out)
+}
+
+/// Fetch display metadata + body for a single file by path (for vector-only
+/// candidates the FTS arm never saw).
+fn fetch_meta(conn: &Connection, path: &str) -> Option<(SearchResult, String)> {
+    conn.query_row(
+        "SELECT path, name, type, projects, created, updated, tags, status,
+                substr(body, 1, 160) AS excerpt, body
+         FROM memory_files WHERE path = ?1",
+        params![path],
+        |row| {
+            let projects: String = row.get("projects")?;
+            let tags: String = row.get("tags")?;
+            let body: String = row.get("body")?;
+            Ok((
+                SearchResult {
+                    path: row.get("path")?,
+                    name: row.get("name")?,
+                    type_: row.get("type")?,
+                    projects: projects.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+                    created: row.get("created")?,
+                    updated: row.get("updated")?,
+                    tags: tags.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+                    status: row.get("status")?,
+                    excerpt: row.get("excerpt")?,
+                },
+                body,
+            ))
+        },
+    )
+    .ok()
+}
+
+/// A representative embedding for a file (its first stored chunk), decoded for
+/// MMR cosine similarity. `None` when the file has no embedded chunk.
+fn representative_embedding(conn: &Connection, path: &str) -> Option<Vec<f32>> {
+    let blob: Vec<u8> = conn
+        .query_row(
+            "SELECT embedding FROM chunks
+             WHERE file_path = ?1 AND embedding IS NOT NULL
+             ORDER BY chunk_idx LIMIT 1",
+            params![path],
+            |r| r.get(0),
+        )
+        .ok()?;
+    Some(blob_to_embedding(&blob))
+}
+
+/// Assemble the full candidate set for hybrid ranking: FTS hits, plus any
+/// vector-only (semantic) hits, with each candidate's best cosine distance and a
+/// representative embedding attached. When `query_vec` is `None` (no API key),
+/// this degrades to the FTS candidates alone — pure BM25.
+fn build_rank_inputs(
+    conn: &Connection,
+    input: &SearchInput,
+    mut candidates: Vec<hybrid::RankInput>,
+    query_vec: Option<&[f32]>,
+) -> rusqlite::Result<Vec<hybrid::RankInput>> {
+    if let Some(qv) = query_vec {
+        // Best (smallest) cosine distance per file across its chunks.
+        let hits = nearest_chunks(conn, qv, CANDIDATE_POOL)?;
+        let mut best: HashMap<String, f64> = HashMap::new();
+        for h in hits {
+            let e = best.entry(h.file_path).or_insert(h.distance);
+            if h.distance < *e {
+                *e = h.distance;
+            }
+        }
+
+        // Attach distances to existing FTS candidates.
+        for c in candidates.iter_mut() {
+            if let Some(d) = best.get(&c.result.path) {
+                c.vec_dist = Some(*d);
+            }
+        }
+
+        // Add vector-only candidates (respecting filters).
+        let known: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.result.path.clone()).collect();
+        for (path, dist) in best.iter() {
+            if known.contains(path) {
+                continue;
+            }
+            if let Some((result, body)) = fetch_meta(conn, path) {
+                if passes_filters(&result, input) {
+                    candidates.push(hybrid::RankInput {
+                        result,
+                        bm25_rank: None,
+                        vec_dist: Some(*dist),
+                        embedding: None,
+                        terms: tokenize(&body),
+                    });
+                }
+            }
+        }
+
+        // Rehydrate a representative embedding for every candidate (for MMR).
+        for c in candidates.iter_mut() {
+            c.embedding = representative_embedding(conn, &c.result.path);
+        }
+    }
+    Ok(candidates)
+}
+
 fn distinct_types(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt =
         conn.prepare("SELECT DISTINCT type FROM memory_files WHERE type != '' ORDER BY type")?;
@@ -534,18 +751,61 @@ fn yaml_list(values: &[String]) -> String {
 // ── Commands ────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn search(
+pub async fn search(
     payload: SearchInput,
     db: State<'_, Db>,
     memory: State<'_, crate::settings::MemoryRoot>,
 ) -> Result<SearchResponse, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    if payload.rebuild {
-        build_index(&memory_root(&memory), &conn).map_err(|e| e.to_string())?;
-    }
-    let results = run_search(&conn, &payload).map_err(|e| e.to_string())?;
-    let types = distinct_types(&conn).map_err(|e| e.to_string())?;
-    let projects = distinct_projects(&conn).map_err(|e| e.to_string())?;
+    let root = memory_root(&memory);
+    let query = payload.q.trim().to_string();
+
+    // ── Phase A: locked DB work (no await) ───────────────────────────────────
+    // Rebuild if asked, gather the FTS candidate pool, and read the filter
+    // facets. The guard is dropped at the end of this block so we never hold it
+    // across the embedding await below.
+    let (fts, types, projects) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if payload.rebuild {
+            build_index(&root, &conn).map_err(|e| e.to_string())?;
+        }
+        let types = distinct_types(&conn).map_err(|e| e.to_string())?;
+        let projects = distinct_projects(&conn).map_err(|e| e.to_string())?;
+        // No text query → recency/filter list, exactly as before. Return early.
+        if query.is_empty() {
+            let results = run_search(&conn, &payload).map_err(|e| e.to_string())?;
+            return Ok(SearchResponse { results, types, projects });
+        }
+        let fts = fts_candidates(&conn, &payload).map_err(|e| e.to_string())?;
+        (fts, types, projects)
+    };
+
+    // ── Phase B: embed the query (async, no lock held) ───────────────────────
+    // Vector retrieval only when an API key is configured; otherwise the
+    // pipeline runs pure BM25. A failed embed degrades to BM25 too — never an
+    // error to the user.
+    let query_vec: Option<Vec<f32>> = match crate::embeddings::resolve_api_key() {
+        Some(key) if query.len() >= 2 => {
+            match crate::embeddings::embed(vec![query.clone()], &key).await {
+                Ok(mut v) => v.pop(),
+                Err(e) => {
+                    log::warn!("[search] query embed failed, BM25-only: {e}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let has_embeddings = query_vec.is_some();
+
+    // ── Phase C: locked DB work — vector arm + candidate assembly ────────────
+    let candidates = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        build_rank_inputs(&conn, &payload, fts, query_vec.as_deref()).map_err(|e| e.to_string())?
+    };
+
+    // ── Phase D: pure ranking ────────────────────────────────────────────────
+    let top_n = payload.limit.unwrap_or(20).max(1) as usize;
+    let results = hybrid::rank(candidates, has_embeddings, Local::now().date_naive(), top_n);
     Ok(SearchResponse { results, types, projects })
 }
 
@@ -822,5 +1082,90 @@ mod tests {
         assert_eq!(hits.len(), 1);
         // And FTS still works after the vector ops.
         assert_eq!(run_search(&conn, &input("rusqlite")).unwrap().len(), 1);
+    }
+
+    // ── hybrid candidate assembly (TIN-1632) ───────────────────────────────────
+    // These exercise the SQL-bearing arms of the pipeline (the `rank` column,
+    // the vector merge, the metadata fetch for semantic-only hits). The pure
+    // ranking math lives in hybrid.rs's own tests.
+
+    #[test]
+    fn fts_candidates_carry_rank_and_terms() {
+        let root = temp_root("fts-cand");
+        write(&root, "studio/a.md", "---\nname: alpha\ntype: feedback\nprojects: studio\n---\nThe rusqlite migration is load-bearing.");
+        write(&root, "studio/b.md", "---\nname: beta\ntype: project\nprojects: studio\n---\nUnrelated note.");
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+
+        let cands = fts_candidates(&conn, &input("rusqlite")).unwrap();
+        assert_eq!(cands.len(), 1, "only the file mentioning rusqlite is an FTS hit");
+        assert!(cands[0].bm25_rank.is_some(), "candidate carries a BM25 rank");
+        assert!(!cands[0].terms.is_empty(), "tokens populated for the MMR fallback");
+        assert_eq!(cands[0].result.name, "alpha");
+    }
+
+    #[test]
+    fn build_rank_inputs_is_bm25_only_without_query_vector() {
+        let root = temp_root("rank-bm25");
+        write(&root, "studio/a.md", "---\nname: alpha\ntype: feedback\nprojects: studio\n---\nrusqlite note");
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+
+        let fts = fts_candidates(&conn, &input("rusqlite")).unwrap();
+        let out = build_rank_inputs(&conn, &input("rusqlite"), fts, None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].vec_dist.is_none(), "no vector arm without a query vector");
+        assert!(out[0].embedding.is_none(), "no embedding rehydration in BM25-only mode");
+    }
+
+    #[test]
+    fn build_rank_inputs_adds_semantic_only_candidate() {
+        // Cascade: a file that is NOT a BM25 hit but IS a vector neighbour must
+        // be pulled into the candidate set with its distance + embedding.
+        let root = temp_root("rank-vec");
+        write(&root, "studio/a.md", "---\nname: alpha\ntype: feedback\nprojects: studio\n---\nrusqlite migration");
+        write(&root, "studio/b.md", "---\nname: beta\ntype: feedback\nprojects: studio\n---\nprose about gardening");
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+
+        // Embed B along axis 0 and query along axis 0 → B is the vector hit,
+        // even though it shares no terms with the FTS query "rusqlite".
+        let b_path = root.join("studio/b.md").to_string_lossy().to_string();
+        insert_chunk(&conn, &b_path, 0, "prose about gardening", "sha-b", &axis_vec(0)).unwrap();
+
+        let fts = fts_candidates(&conn, &input("rusqlite")).unwrap();
+        assert_eq!(fts.len(), 1, "only A is an FTS hit");
+
+        let out = build_rank_inputs(&conn, &input("rusqlite"), fts, Some(&axis_vec(0))).unwrap();
+        let names: Vec<&str> = out.iter().map(|c| c.result.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "FTS hit retained");
+        assert!(names.contains(&"beta"), "semantic-only hit added");
+
+        let b = out.iter().find(|c| c.result.name == "beta").unwrap();
+        assert!(b.vec_dist.is_some(), "vector distance attached to the semantic hit");
+        assert!(b.bm25_rank.is_none(), "B was not a BM25 hit");
+        assert!(b.embedding.is_some(), "representative embedding rehydrated for MMR");
+    }
+
+    #[test]
+    fn build_rank_inputs_respects_filters_on_semantic_hits() {
+        // A vector neighbour that fails the type filter must NOT be added.
+        let root = temp_root("rank-vec-filter");
+        write(&root, "studio/a.md", "---\nname: alpha\ntype: feedback\nprojects: studio\n---\nrusqlite migration");
+        write(&root, "studio/b.md", "---\nname: beta\ntype: project\nprojects: studio\n---\nprose about gardening");
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+
+        let b_path = root.join("studio/b.md").to_string_lossy().to_string();
+        insert_chunk(&conn, &b_path, 0, "prose about gardening", "sha-b", &axis_vec(0)).unwrap();
+
+        let mut q = input("rusqlite");
+        q.type_filter = "feedback".to_string();
+        let fts = fts_candidates(&conn, &q).unwrap();
+        let out = build_rank_inputs(&conn, &q, fts, Some(&axis_vec(0))).unwrap();
+        assert!(
+            out.iter().all(|c| c.result.name != "beta"),
+            "a semantic hit of the wrong type is filtered out"
+        );
     }
 }

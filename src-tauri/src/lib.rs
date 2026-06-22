@@ -1,5 +1,6 @@
 mod embeddings;
 mod git;
+mod hybrid;
 mod launcher;
 mod search;
 mod settings;
