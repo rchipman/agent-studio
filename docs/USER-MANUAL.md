@@ -177,6 +177,21 @@ write.
 
 ---
 
+## 9b. Checking for contradictions — Consistency audit
+
+Press **⌘⇧C** to look for places where two notes seem to say different things (a
+stale price, a reversed decision, divergent duplicates). Studio uses the local
+embeddings to find related notes, then reads each related pair with your local
+model to spot concrete disagreements, and lists them: each finding is a one-line
+summary and the two notes, which you can open side by side to reconcile.
+
+It is calm by design: a finding is "worth a look," never an error, and the happy
+outcome ("Your notes agree.") is the reward. The audit needs a local reasoning
+model: if none is found, it points you to install one (for example
+`ollama pull llama3.1:8b`). Nothing leaves your machine.
+
+---
+
 ## 10. Settings
 
 Press **⌘,** (or the gear). Settings is one calm panel:
@@ -234,6 +249,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘G` | Knowledge graph |
 | `⌘O` | Import Markdown files |
 | `⌘⇧A` | Frontmatter audit |
+| `⌘⇧C` | Consistency audit |
 | `⌘R` | Launcher |
 | `⌘,` | Settings |
 | `⌘Return` | Save / Run (in modals and the launcher) |

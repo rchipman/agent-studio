@@ -1541,3 +1541,243 @@ palette entry (the accelerator), no top-bar glyph, no global shortcut.**
 ---
 
 SELF-REPORT: confidence: high; model-fit: right (palette design with measured WCAG verification, token-name fidelity for a paste-in builder, and the load-bearing nuances — warm-not-cold near-black, light-on-dark overlay inversion, scrim staying dark, terminal nudged below bgApp, and the five cross-surface domain hues surviving the re-tune; a cheaper model would likely have produced a cold slate palette, inverted overlays as dark-on-dark smudges, or broken the no-red / domain-hue constraints).
+
+## Consistency Audit (TIN-1695)
+
+An on-demand scan that reads the whole memory base looking for places where two
+notes quietly disagree, then tells you about them in plain language: "`pricing.md`
+says $9/mo; `pricing-decision.md` says $12/mo." Embeddings cluster related notes, a
+local reasoning model judges each related pair, and the matches come back as
+`Finding[]` (`{ files, names, summary }`) from `consistencyAudit()`, with live
+progress from `onAuditProgress(({ done, total }) => …)`.
+
+The whole design problem is one sentence: **surface contradictions without ever
+sounding the alarm.** A finding is an invitation to look, never an accusation that
+something is broken. We borrow the inverted-alarm grammar the frontmatter audit
+proved (`§ Frontmatter manager audit view`): the thing other tools would paint red,
+we paint calm. Here there is no severity ladder at all, because a contradiction is
+not a defect with a fix; it is two true-sounding notes that deserve a human glance.
+So findings are uniform, quiet, and equal. The reward state is the loud one, the way
+"Every note is described." is the reward in the frontmatter audit.
+
+This surface is a **full view**, same family as the Graph (`§ Graph view`) and
+Frontmatter audit: it replaces the main content column, the top bar persists with
+`← Agent Studio`, and the centre reads **Consistency**. It reuses the shared `Shell`
++ top-bar chrome verbatim (44px bar, `--hair` bottom border, `--bg-app`).
+
+### Entry point
+
+| Shortcut | Surface | Kind |
+| --- | --- | --- |
+| `⌘⇧C` | **Consistency audit** | Full view |
+
+`⌘⇧C` for **C**onsistency. It is free (verified against the live map: `⌘K` `⌘R`
+`⌘T` `⌘G` `⌘D` `⌘,` `⌘\` `⌘F` `⌘W` `⌘N`/`⌘⇧N` `⌘O` `⌘⇧A` `⌃Tab` are all taken),
+and it deliberately rhymes with `⌘⇧A`, the frontmatter audit: both are `⌘⇧`
+deliberate, run-when-you-mean-it library inspections, not constant reaches, so the
+shift-modifier "this is a considered act" reading is correct. Command-palette entry
+label: **`Run consistency audit`**. Both are doors to the same view; the shortcut is
+an accelerator, never the only way in (house rule 7).
+
+### Layout
+
+One centered reading column, matching the search/editor/links geometry so it reads
+as the same app turned to look at itself: `maxWidth: 680`, `width: 100%`,
+`margin: 0 auto`, `padding: ${space[8]}px ${space[7]}px 80px` (the trailing `80px`
+is the established bottom gutter). Inside that column the view is vertical and quiet:
+a short header block (one line of orientation), then the state-dependent body. No
+left rail, no filter chips, no sidebars. A consistency report is a thing you read
+top to bottom once, not a workspace you dwell in.
+
+The top-bar right slot (the 240px region the Frontmatter audit uses for its tally)
+carries a single calm count only in the findings state: `3 worth a look.` in
+`--t-meta` `--ink-soft`. Idle, running, all-clear, and the notice states leave it
+empty, the bar stays calm.
+
+### State 1 — Intro / idle
+
+The resting state when you arrive and have not run a scan yet. Centered in the column,
+generous vertical air:
+
+- A serif orientation line, `--t-display` `--ink`:
+  **`Look for notes that disagree.`**
+- One `--t-body` `--ink-soft` line beneath, `maxWidth: 440`, `lineHeight: 1.5`,
+  setting expectations honestly (it is local, it takes a moment):
+  **`This reads your whole library with the local model and points out places where two notes seem to say different things. It can take a minute.`**
+- The single primary action, the house primary button (`--forest` fill, `--on-accent`
+  text, `radius.md`, `7px ${space[5]}px`, weight 600): **`Run audit`**.
+
+That is the entire idle surface. One sentence of what, one sentence of how long, one
+button. Nothing to configure, because there is nothing to configure.
+
+### State 2 — Running
+
+Triggered by `Run audit`. The button is replaced in place by a calm progress line,
+driven by `onAuditProgress`:
+
+- Before the first progress event arrives (clustering, model warm-up), a single
+  `--ink-soft` `--t-body` line: **`Reading your library…`** (the shared loading voice).
+- Once `{ done, total }` ticks, the line becomes, `--ink-soft` `--t-body`:
+  **`Checking 12 of 40 related notes…`** (`Checking ${done} of ${total} related
+  notes…`). When `total` is 0, fall back to the warm-up line rather than show
+  `0 of 0`.
+- No spinner, no bar graph, no percentage. The moving numerals are motion enough,
+  consistent with house rule 5 and the "no spinners larger than `…`" rule.
+
+**Re-run is disabled while running.** A second concurrent scan would be wasteful
+(local model, many pairs) and would muddle one progress line into two. The button is
+simply absent during the run, replaced by the progress line, so there is nothing to
+double-press. `← Agent Studio` and `Esc` still leave at any time; leaving abandons
+the in-flight scan quietly (no "are you sure", per house rule 1).
+
+### State 3 — Findings
+
+The scan returned one or more `Finding`s. The column shows a quiet header then the
+list:
+
+- **Header**, `--t-display` `--ink`: **`A few notes to look at.`** with a `--t-meta`
+  `--ink-soft` second line: **`Each pair below seems to say different things. Open
+  them side by side and decide.`** This framing is load-bearing: "to look at," "seems
+  to," "you decide." We never say "conflict," "error," "problem," "wrong," or
+  "mismatch." The model found a resemblance worth a human eye, nothing more.
+- A trailing `Run again` text button at the header's right (`--ink-soft`, ghost,
+  hover `--ink`), so a fresh scan after edits is one click. Re-enabled here (we are
+  no longer running).
+
+**The finding row.** A purpose-built calm row rather than a `ResultCard`, because a
+finding is a *pair plus a sentence*, not a single document — but it borrows the
+`ResultCard` rhythm exactly so it reads as kin: `padding: '12px 16px'`,
+`background: color.bgCard` resting / `color.bgFieldStrong` hover,
+`border: 1px solid ${color.hairSoft}` resting / `color.line` hover,
+`borderRadius: radius.card`, `marginBottom: space[2]`, `transition: 'all 0.1s ease'`.
+
+Anatomy, top to bottom inside the row:
+
+1. **The summary**, the hero, in serif `--t-body`-weight reading voice: the
+   `Finding.summary` sentence at `fontSize: 13`, `color: color.ink`, `lineHeight:
+   1.5`. This is the one line the user actually reads: "`pricing.md` says $9/mo;
+   `pricing-decision.md` says $12/mo." It is a statement of fact, not a verdict.
+2. **The two notes**, beneath the summary, `marginTop: space[3]`: a row of exactly
+   two **note pills**, `gap: space[2]`, wrapping. Each pill is a button that opens
+   that file:
+   - Layout: `padding: '3px 10px'`, `borderRadius: radius.chip`, `border: 1px solid
+     ${color.line}`, `background: 'transparent'`, `color: color.inkSoft`,
+     `fontFamily: font.sans`, `fontSize: 11`, `fontWeight: 500`. (Sans, not mono:
+     these are notes you read, identified by `names[i]`, not paths you operate on.
+     This is what separates a note pill from a `TicketChip`.)
+   - Content: the display `names[i]`. The `files[i]` path is the open target and the
+     `title` hint, never shown inline (it is machinery).
+   - Hover (matches `TicketChip`): `background: color.forestWash`, `borderColor:
+     color.forestLine`, `color: color.ink`, `transition: 'all 0.12s ease'`.
+   - Click: opens that file as a tab in the focused panel; `⌘`-click opens it in the
+     other panel, reusing the exact `onOpenResult`/`onOpenFile` routing the search
+     and link cards already use. Title hint: `Open here · ⌘-click to open in the
+     other panel`. Opening the two pills into the two panels is the natural gesture:
+     `pricing.md` left, `pricing-decision.md` right, read them together, decide.
+
+There is **no accept / dismiss / resolve / ignore action on a row.** Deliberately. A
+finding is not a task with a done-state the app can own; resolving it means editing a
+note, which happens in the editor, after which `Run again` re-checks. Adding "Dismiss"
+would imply the app is accusing the note of an error the user must clear, which is
+exactly the accusatory grammar this surface refuses. The row's only verbs are "open
+this note" and "open that note." (Revisit only if real use shows people want to mute a
+known-fine pair; even then it would be a quiet `--ink-faint` `Not a conflict` text
+button, never a red `✗`.)
+
+No severity, no sort by confidence, no count badges per row, no `⚠`. Findings render
+in the order the client returns them. Every finding looks identical, because to the
+app they are equal: all "worth a look."
+
+### State 4 — All clear (the reward)
+
+The scan ran and found nothing contradictory. This is the state we make feel good,
+the way "Every note is described." rewards the frontmatter audit. Centered in the
+column, the same two-line treatment as that view:
+
+- `--t-display` `--ink`: **`Your notes agree.`**
+- `--t-meta` `--ink-faint`: **`Nothing in your library contradicts itself. Run this
+  again whenever you have written a lot.`**
+- A trailing `Run again` text button (`--ink-soft`, ghost), low and quiet, so the
+  reward reads first and the re-run is available without competing with it.
+
+`Your notes agree.` is the inverse of an alarm: the absence of a finding is stated as
+a small, earned calm, not a bland "0 results."
+
+### State 5 — No reasoning model
+
+`consistencyAudit()` rejects because Ollama is not running or no model is pulled. We
+treat this as a setup fact with a named fix, not a failure. The recessive notice block
+(`§C`): `--notice` text on `tanTint`, `radius.md`, no icon, inside the reading column,
+with the fix on its own line in mono so it is copy-pasteable:
+
+> The audit needs a local reasoning model.
+> Start Ollama, or pull one with `ollama pull llama3.1:8b`, then run the audit again.
+
+The model name (`ollama pull llama3.1:8b`) renders in `--t-mono` `--ink-soft` so it
+reads as a command you can copy. A `Run audit` primary button sits beneath the notice
+(not a bare retry link) so the path forward after starting Ollama is the same affordance
+as the idle state. Distinguishing this from a generic error matters: this one has a
+specific, nameable fix, so we name it. (The client should reject with a recognizable
+reason for "no model reachable" vs. a generic failure so the view can pick this state
+over State 6; if it cannot yet, State 6's copy is the safe superset.)
+
+### State 6 — Error
+
+The scan failed for any other reason (the model choked, an IO error mid-scan). The same
+recessive notice block, calm and forward-looking, with a retry:
+
+> The audit could not finish just now.
+
+A `Run audit` primary button beneath it (same affordance as idle), and any findings
+already on screen from a previous successful run are **kept** beneath the notice rather
+than wiped, so a failed re-run never costs you the report you already had. No stack
+trace, no "Oops," no red. A fact and a way forward (house rule 6).
+
+### Named tokens used
+
+| Element | Tokens |
+| --- | --- |
+| Shell / top bar | `--bg-app`, `--hair`, `--t-title` (centre `Consistency`), `--t-body` (`← Agent Studio`), reused `Shell` |
+| Reading column | `maxWidth: 680`, `space[8]`/`space[7]` padding, `80px` bottom gutter |
+| Idle headline | `--t-display` `--ink` |
+| Idle / state body copy | `--t-body` `--ink-soft`, `--t-meta` `--ink-faint` |
+| Primary action (`Run audit`) | `--forest` fill, `--on-accent` text, `radius.md`, weight 600 |
+| `Run again` ghost button | `--t-body` `--ink-soft`, hover `--ink` |
+| Progress line | `--t-body` `--ink-soft` |
+| Finding row | `--bg-card`/`--bg-field-strong`, `--hair-soft`/`--line`, `radius.card`, `space[2]` gap |
+| Finding summary | serif `--t-body` size, `--ink`, `lineHeight: 1.5` |
+| Note pill | `--line` border, `--ink-soft` text, `radius.chip`, hover `--forest-wash`/`--forest-line`/`--ink` |
+| Top-bar count | `--t-meta` `--ink-soft` |
+| All-clear | `--t-display` `--ink`, `--t-meta` `--ink-faint` |
+| Notice (no-model / error) | `--notice` on `--tan-tint`, `radius.md`, mono fix in `--t-mono` `--ink-soft` |
+
+No raw hex, no magic numbers; the two literals (`680`, `80px`) are the established
+reading-column constants already used by search, the editor, and the Links tab.
+
+### Verbatim copy (curly apostrophes, no em-dashes)
+
+- Top-bar title: `Consistency`
+- Command-palette entry: `Run consistency audit`
+- Top-bar count (findings only): `3 worth a look.`
+- Idle headline: `Look for notes that disagree.`
+- Idle body: `This reads your whole library with the local model and points out places where two notes seem to say different things. It can take a minute.`
+- Idle / notice button: `Run audit`
+- Running, warming up: `Reading your library…`
+- Running, with progress: `Checking 12 of 40 related notes…`
+- Findings headline: `A few notes to look at.`
+- Findings subhead: `Each pair below seems to say different things. Open them side by side and decide.`
+- Re-run button: `Run again`
+- Note pill hint: `Open here · ⌘-click to open in the other panel`
+- All-clear headline: `Your notes agree.`
+- All-clear body: `Nothing in your library contradicts itself. Run this again whenever you have written a lot.`
+- No-model notice line 1: `The audit needs a local reasoning model.`
+- No-model notice line 2: `Start Ollama, or pull one with ollama pull llama3.1:8b, then run the audit again.`
+- Error notice: `The audit could not finish just now.`
+
+How this stays calm and non-accusatory, in one line: the surface has **no severity,
+no defect language, and no resolve/dismiss action** — a finding only ever says "these
+two seem to say different things, open them and decide," the reward state ("Your notes
+agree.") is the loud one, and the worst case (a setup gap) is the one with a named,
+copy-pasteable fix. No red, no `⚠`, no `✗`, anywhere.
+
+SELF-REPORT: confidence: high; model-fit: right.
