@@ -41,6 +41,15 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+# TIN-1691: local (in-process) embeddings via candle — pure-Rust BERT inference,
+# no ONNX/Python. Model weights fetched once via hf-hub, then fully offline.
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = "0.20"
+# Sync HTTP for one-time model-weight download (no async runtime needed, so it's
+# safe to call from any thread). Model files cache under the app data dir.
+ureq = "2"
 # E2E only (TIN-1645): embeds a W3C WebDriver server (port 4445) so WebdriverIO
 # can drive the real app. Behind the `webdriver` feature so it is entirely
 # excluded from normal dev/release builds — build E2E with `--features webdriver`.

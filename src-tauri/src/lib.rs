@@ -4,6 +4,7 @@ mod git;
 mod hybrid;
 mod launcher;
 mod links;
+mod local_embed;
 mod search;
 mod settings;
 mod terminal;
@@ -50,25 +51,21 @@ pub fn run() {
         log::error!("[search] initial index build failed: {e}");
       }
 
-      // Spawn the async embedding pass as a background task so FTS5 search
-      // is never blocked on network I/O.  If no API key is set, the pass
-      // exits immediately without error (BM25-only mode).
-      if let Some(api_key) = embeddings::resolve_api_key() {
-        // Spawn the embedding pass on a dedicated OS thread with its own
-        // tokio single-thread runtime.  rusqlite's Connection is Send but
-        // not Sync; giving it its own thread avoids the Send-across-await
-        // constraint imposed by tauri's multi-thread runtime.
-        let bg_root = root.clone();
-        std::thread::spawn(move || {
-          let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("embedding runtime");
-          rt.block_on(embeddings::index_embeddings(bg_root, api_key));
-        });
-      } else {
-        log::info!("[embeddings] no API key — embedding pass skipped (BM25-only mode)");
-      }
+      // Spawn the embedding pass as a background task so FTS5 search is never
+      // blocked on it. Default to the bundled local (candle) model — no API key,
+      // fully offline (TIN-1690). It runs on a dedicated OS thread with its own
+      // single-thread tokio runtime: rusqlite's Connection is Send but not Sync,
+      // so giving it its own thread avoids the Send-across-await constraint, and
+      // the CPU-bound model inference stays off tauri's shared runtime. If the
+      // model can't load, every file is skipped and search stays BM25-only.
+      let bg_root = root.clone();
+      std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+          .enable_all()
+          .build()
+          .expect("embedding runtime");
+        rt.block_on(embeddings::index_embeddings_local(bg_root));
+      });
 
       app.manage(Db(Mutex::new(conn)));
       app.manage(MemoryRoot(Mutex::new(root)));
