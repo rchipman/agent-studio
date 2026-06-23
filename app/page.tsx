@@ -18,7 +18,7 @@ import FrontmatterForm from '@/components/FrontmatterForm'
 import { linkSuggest } from '@/lib/links'
 import { suggestFrontmatter, importMarkdown, type Suggestion } from '@/lib/frontmatter'
 import { initTheme } from '@/lib/theme'
-import { getSettings } from '@/lib/settings'
+import { getSettings, rebuildIndex } from '@/lib/settings'
 
 // Import flow + audit view (TIN-1638), loaded lazily / client-only.
 const ImportModal = dynamic(() => import('@/components/ImportModal'), { ssr: false })
@@ -519,6 +519,61 @@ export default function Home() {
   useEffect(() => {
     initTheme()
   }, [])
+
+  // Latest search args, so the file watcher can refresh the *current* view.
+  const searchArgsRef = useRef({ q: '', type: '', project: '' })
+  useEffect(() => {
+    searchArgsRef.current = { q: searchQuery, type: activeType, project: activeProject }
+  }, [searchQuery, activeType, activeProject])
+
+  // Auto-reindex when memory files change on disk: watch the memory root, and on
+  // any .md create/modify/delete (debounced) rebuild the index and refresh the
+  // current search. Lets files added or edited outside Studio appear without a
+  // manual reindex or relaunch.
+  useEffect(() => {
+    let unwatch: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let cancelled = false
+    ;(async () => {
+      let root = MEMORY_ROOT
+      try {
+        const s = await getSettings()
+        if (s.memoryRoot) root = s.memoryRoot
+      } catch { /* fall back to default root */ }
+      try {
+        const { watchImmediate } = await import('@tauri-apps/plugin-fs')
+        const stop = await watchImmediate(
+          root,
+          (event) => {
+            const paths = Array.isArray(event.paths) ? event.paths : []
+            // Ignore the index db's own writes (they aren't .md) and non-markdown.
+            const touchedMd = paths.some((p) => p.endsWith('.md') && !p.includes('.studio-index'))
+            if (!touchedMd) return
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(async () => {
+              try {
+                await rebuildIndex()
+                const a = searchArgsRef.current
+                runSearch(a.q, a.type, a.project)
+              } catch (err) {
+                console.error('[watch] reindex failed', err)
+              }
+            }, 800)
+          },
+          { recursive: true },
+        )
+        if (cancelled) stop()
+        else unwatch = stop
+      } catch (err) {
+        console.error('[watch] setup failed', err)
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+      if (unwatch) unwatch()
+    }
+  }, [runSearch])
 
   const handleSearchChange = useCallback(
     (q: string) => {
