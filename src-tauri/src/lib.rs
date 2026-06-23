@@ -1,3 +1,4 @@
+mod audit;
 mod embeddings;
 mod frontmatter;
 mod git;
@@ -96,6 +97,7 @@ pub fn run() {
       frontmatter::audit_frontmatter,
       frontmatter::import_markdown,
       frontmatter::update_frontmatter,
+      audit::consistency_audit,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
