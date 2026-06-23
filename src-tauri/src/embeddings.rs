@@ -20,6 +20,12 @@
 //! `resolve_api_key` checks the macOS keychain (via `settings::reveal_embedding_key`
 //! logic) then falls back to `STUDIO_EMBEDDING_API_KEY`. Returns `None` if no
 //! key is available — callers skip embedding silently.
+//!
+//! The OpenAI HTTP path (`embed`, `real_embed`, `resolve_api_key`,
+//! `index_embeddings`) is currently dormant — the app defaults to the bundled
+//! local model (TIN-1690). It is retained as a selectable provider for the
+//! embedding provider abstraction (TIN-1693), hence the module `allow(dead_code)`.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -240,9 +246,16 @@ fn upsert_chunk(
 /// `Vec<f32>` per input.
 pub type EmbedFn = fn(Vec<String>, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>>;
 
-/// Wrapper around the real `embed` function with the `EmbedFn` signature.
+/// Wrapper around the OpenAI `embed` function with the `EmbedFn` signature.
 pub fn real_embed(chunks: Vec<String>, api_key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>> {
     Box::pin(async move { embed(chunks, &api_key).await })
+}
+
+/// Local (candle) embedder with the `EmbedFn` signature — runs the bundled model
+/// in-process; the API-key argument is ignored. CPU-bound, but it runs on the
+/// dedicated background embedding thread (or via `spawn_blocking` for queries).
+pub fn local_real_embed(chunks: Vec<String>, _api_key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>> {
+    Box::pin(async move { crate::local_embed::embed(chunks) })
 }
 
 /// Index a single file: read → chunk → skip cached → embed new → upsert.
@@ -330,6 +343,30 @@ pub async fn index_embeddings(root: PathBuf, api_key: String) {
             log::warn!("[embeddings] skipping {}: {e}", path.display());
         }
     }
+}
+
+/// Background embedding pass using the bundled **local** candle model — no API
+/// key, fully offline. Same shape as [`index_embeddings`] but in-process. The
+/// first call loads (and on first ever run downloads) the model; if that fails,
+/// every file is skipped and search stays BM25-only.
+pub async fn index_embeddings_local(root: PathBuf) {
+    let conn = match crate::search::init_db(&root) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[embeddings] background db open failed: {e}");
+            return;
+        }
+    };
+
+    let mut files = Vec::new();
+    collect_md_files_emb(&root, &mut files);
+
+    for path in files {
+        if let Err(e) = index_file(&path, &conn, "", local_real_embed).await {
+            log::warn!("[embeddings] local skip {}: {e}", path.display());
+        }
+    }
+    log::info!("[embeddings] local pass complete");
 }
 
 /// Recursively collect `.md` files, mirroring search.rs's `collect_md_files`.

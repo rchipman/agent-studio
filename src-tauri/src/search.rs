@@ -126,20 +126,15 @@ const SCHEMA: &str = "
       content_rowid=rowid
     );
 
-    -- Vector store for embeddings (TIN-1631) and hybrid search (TIN-1632).
-    -- `embedding` uses sqlite-vec's F32_BLOB type; 1536 dims = OpenAI
-    -- text-embedding-3-small. Requires sqlite-vec to be registered on the
-    -- connection (see register_sqlite_vec / init_db) before this runs.
-    CREATE TABLE IF NOT EXISTS chunks (
-      id        INTEGER PRIMARY KEY,
-      file_path TEXT NOT NULL,
-      chunk_idx INTEGER NOT NULL,
-      content   TEXT NOT NULL,
-      sha256    TEXT NOT NULL,
-      embedding F32_BLOB(1536),
-      UNIQUE(file_path, chunk_idx)
+    -- Key/value metadata (e.g. the active embedding dimension). Used so the
+    -- vector store can be recreated when the embedding model changes (TIN-1692).
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
     );
-    CREATE INDEX IF NOT EXISTS chunks_path ON chunks(file_path);
+
+    -- The `chunks` vector store (TIN-1631/1632) is created separately by
+    -- `ensure_chunks_table` so its F32_BLOB width can follow the active model.
 
     -- Wiki-linking layer (TIN-1639). `links` is rebuilt from scratch on every
     -- index build (see links::rebuild_links); `ticket_cache` persists resolved
@@ -160,8 +155,49 @@ const SCHEMA: &str = "
     );
 ";
 
-/// Dimensionality of stored embeddings (OpenAI text-embedding-3-small).
-pub const EMBEDDING_DIM: usize = 1536;
+/// Dimensionality of stored embeddings. Tied to the active embedder — the
+/// bundled candle model (TIN-1691). When this changes, `ensure_chunks_table`
+/// recreates the vector store at the new width.
+pub const EMBEDDING_DIM: usize = crate::local_embed::LOCAL_DIM;
+
+/// Create the `chunks` vector table at the current [`EMBEDDING_DIM`]. If an
+/// existing chunks table was built for a different width (e.g. a 1536-d OpenAI
+/// DB), drop and recreate it so stored vectors always match the active model,
+/// recording the dim in `meta`. Safe to call on every startup.
+pub fn ensure_chunks_table(conn: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'embedding_dim'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if stored != Some(EMBEDDING_DIM as i64) {
+        conn.execute("DROP TABLE IF EXISTS chunks", [])?;
+    }
+    conn.execute(
+        &format!(
+            "CREATE TABLE IF NOT EXISTS chunks (
+               id        INTEGER PRIMARY KEY,
+               file_path TEXT NOT NULL,
+               chunk_idx INTEGER NOT NULL,
+               content   TEXT NOT NULL,
+               sha256    TEXT NOT NULL,
+               embedding F32_BLOB({EMBEDDING_DIM}),
+               UNIQUE(file_path, chunk_idx)
+             )"
+        ),
+        [],
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS chunks_path ON chunks(file_path)", [])?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES ('embedding_dim', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![EMBEDDING_DIM.to_string()],
+    )?;
+    Ok(())
+}
 
 /// Register the statically-linked `sqlite-vec` extension as a SQLite
 /// *auto-extension*, so it is initialised on every connection opened afterwards
@@ -203,6 +239,7 @@ pub fn init_db(root: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(SCHEMA)?;
+    ensure_chunks_table(&conn)?;
     Ok(conn)
 }
 
@@ -804,21 +841,26 @@ pub async fn search(
         (fts, types, projects)
     };
 
-    // ── Phase B: embed the query (async, no lock held) ───────────────────────
-    // Vector retrieval only when an API key is configured; otherwise the
-    // pipeline runs pure BM25. A failed embed degrades to BM25 too — never an
-    // error to the user.
-    let query_vec: Option<Vec<f32>> = match crate::embeddings::resolve_api_key() {
-        Some(key) if query.len() >= 2 => {
-            match crate::embeddings::embed(vec![query.clone()], &key).await {
-                Ok(mut v) => v.pop(),
-                Err(e) => {
-                    log::warn!("[search] query embed failed, BM25-only: {e}");
-                    None
-                }
+    // ── Phase B: embed the query (no lock held) ──────────────────────────────
+    // Embed with the bundled local model on a blocking thread (CPU-bound), so
+    // the same vectors as the stored chunks drive semantic recall. If the model
+    // isn't ready yet (still downloading on first run) or fails, the pipeline
+    // degrades to pure BM25 — never an error to the user.
+    let query_vec: Option<Vec<f32>> = if query.len() >= 2 {
+        let q = query.clone();
+        match tokio::task::spawn_blocking(move || crate::local_embed::embed(vec![q])).await {
+            Ok(Ok(mut v)) => v.pop(),
+            Ok(Err(e)) => {
+                log::warn!("[search] local query embed failed, BM25-only: {e}");
+                None
+            }
+            Err(e) => {
+                log::warn!("[search] query embed task failed: {e}");
+                None
             }
         }
-        _ => None,
+    } else {
+        None
     };
     let has_embeddings = query_vec.is_some();
 
@@ -899,6 +941,7 @@ mod tests {
         register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
+        ensure_chunks_table(&conn).unwrap();
         conn
     }
 
@@ -1041,13 +1084,47 @@ mod tests {
 
     // ── sqlite-vec ────────────────────────────────────────────────────────────
 
-    /// A 1536-d unit-ish vector that points mostly along axis `axis`. Cheap way
-    /// to make vectors whose cosine ordering relative to a query is predictable.
+    /// An [`EMBEDDING_DIM`]-wide unit-ish vector pointing mostly along `axis`.
+    /// Cheap way to make vectors whose cosine ordering is predictable.
     fn axis_vec(axis: usize) -> Vec<f32> {
         let mut v = vec![0.0_f32; EMBEDDING_DIM];
         v[axis] = 1.0;
         v[axis + 1] = 0.1; // small off-axis component so it's not degenerate
         v
+    }
+
+    #[test]
+    fn chunks_table_recreated_on_dim_change() {
+        // A DB built for a 1536-d model should have its vector store dropped and
+        // recreated at the current dim (TIN-1692), so no stale-width rows remain.
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute(
+            "CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL,
+               chunk_idx INTEGER NOT NULL, content TEXT NOT NULL, sha256 TEXT NOT NULL,
+               embedding F32_BLOB(1536), UNIQUE(file_path, chunk_idx))",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO meta(key, value) VALUES ('embedding_dim', '1536')", []).unwrap();
+        conn.execute(
+            "INSERT INTO chunks(file_path, chunk_idx, content, sha256, embedding)
+             VALUES ('a.md', 0, 'x', 'sha', ?1)",
+            params![embedding_to_blob(&vec![0.1_f32; 1536])],
+        )
+        .unwrap();
+
+        ensure_chunks_table(&conn).unwrap();
+
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "stale 1536-d rows dropped when the dim changes");
+        // New inserts at the current dim work, and the meta dim is updated.
+        insert_chunk(&conn, "b.md", 0, "y", "sha2", &vec![0.2_f32; EMBEDDING_DIM]).unwrap();
+        let stored: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'embedding_dim'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, EMBEDDING_DIM.to_string());
     }
 
     #[test]
@@ -1066,7 +1143,7 @@ mod tests {
         let conn = mem_db();
         // Chunk 1 sits on axis 0, chunk 2 on axis 500 (orthogonal-ish).
         insert_chunk(&conn, "a.md", 0, "near", "sha-a", &axis_vec(0)).unwrap();
-        insert_chunk(&conn, "b.md", 0, "far", "sha-b", &axis_vec(500)).unwrap();
+        insert_chunk(&conn, "b.md", 0, "far", "sha-b", &axis_vec(200)).unwrap();
 
         // Query points along axis 0, so chunk 1 must come first.
         let query = axis_vec(0);
