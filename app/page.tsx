@@ -27,6 +27,7 @@ const AuditView = dynamic(() => import('@/components/AuditView'), { ssr: false }
 // The graph view pulls in d3-force; load it lazily and client-only so it stays
 // out of the initial bundle and the static-export SSR pass.
 const GraphView = dynamic(() => import('@/components/GraphView'), { ssr: false })
+const ConsistencyView = dynamic(() => import('@/components/ConsistencyView'), { ssr: false })
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
@@ -428,6 +429,7 @@ export default function Home() {
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
+  const [consistencyOpen, setConsistencyOpen] = useState(false)
   // Frontmatter manager (TIN-1638): import queue + audit view + drag affordance.
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
   const [showAudit, setShowAudit] = useState(false)
@@ -1009,6 +1011,12 @@ export default function Home() {
         openImportPicker()
         return
       }
+      if (mod && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+        // Consistency audit (TIN-1695).
+        e.preventDefault()
+        setConsistencyOpen(true)
+        return
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -1339,6 +1347,18 @@ export default function Home() {
             runSearch(searchQuery, activeType, activeProject)
             if (paths.length === 1) openInSide(paths[0], focusedSideRef.current)
           }}
+        />
+      )}
+
+      {/* Consistency audit (⌘⇧C) — TIN-1695 */}
+      {consistencyOpen && (
+        <ConsistencyView
+          onOpenFile={(path, e) => {
+            const side = e.metaKey || e.ctrlKey ? otherSide(focusedSideRef.current) : focusedSideRef.current
+            setConsistencyOpen(false)
+            openInSide(path, side)
+          }}
+          onClose={() => setConsistencyOpen(false)}
         />
       )}
 
