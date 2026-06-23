@@ -4,6 +4,7 @@ mod git;
 mod hybrid;
 mod launcher;
 mod links;
+mod local_embed;
 mod search;
 mod settings;
 mod terminal;
