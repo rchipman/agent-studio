@@ -148,6 +148,20 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }
 
+  // Reindex the current memory root on demand (no root change needed). Lets the
+  // index pick up files added outside Studio without relaunching.
+  async function manualReindex() {
+    setReindex({ kind: 'rebuilding' })
+    try {
+      await rebuildIndex()
+      setReindex({ kind: 'done' })
+      setTimeout(() => setReindex((r) => (r.kind === 'done' ? { kind: 'idle' } : r)), 1800)
+    } catch (err) {
+      console.error('[settings] manual reindex', err)
+      setReindex({ kind: 'stale' })
+    }
+  }
+
   // ── Embedding key ──
   async function toggleReveal() {
     if (revealed) {
@@ -300,6 +314,18 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChange={(v) => setRoot('transcriptsRoot', v)}
                 onChoose={() => chooseFolder('transcriptsRoot', settings.transcriptsRoot)}
               />
+              <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[3] }}>
+                <button
+                  onClick={manualReindex}
+                  disabled={reindex.kind === 'rebuilding'}
+                  style={smallPrimaryBtnStyle}
+                >
+                  {reindex.kind === 'rebuilding' ? 'Reindexing…' : 'Reindex now'}
+                </button>
+                <span style={{ ...type.meta, color: color.inkFaint }}>
+                  Rebuild the search index to pick up files added outside Studio.
+                </span>
+              </div>
             </Section>
 
             {/* ── Embedding ── */}

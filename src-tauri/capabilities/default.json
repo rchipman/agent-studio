@@ -10,6 +10,7 @@
     "fs:allow-home-read-recursive",
     "fs:allow-home-write-recursive",
     "fs:allow-mkdir",
+    "fs:allow-watch",
     {
       "identifier": "fs:scope",
       "allow": [
