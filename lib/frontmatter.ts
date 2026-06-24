@@ -27,6 +27,8 @@ export interface Suggestion {
   tags: string[]
   created: string
   status: string
+  /** One-to-two sentence TLDR from the reasoning model. Absent when not yet generated. */
+  summary?: string
 }
 
 /** Health classification of `'complete' | 'partial' | 'missing'`. */
@@ -65,4 +67,21 @@ export async function importMarkdown(content: string, frontmatter: Suggestion): 
 /** Rewrite an existing file's frontmatter in place (the audit "fix" path). */
 export async function updateFrontmatter(path: string, frontmatter: Suggestion): Promise<void> {
   return invoke('update_frontmatter', { payload: { path, frontmatter } })
+}
+
+/** Result of the `summarize_note` command. */
+export interface SummarizeNoteResult {
+  /** The generated TLDR, or an empty string when degraded. */
+  summary: string
+  /** True when no reasoning model was reachable; `summary` will be empty. */
+  degraded: boolean
+}
+
+/**
+ * Generate a one-to-two sentence TLDR of a note using the local reasoning model.
+ * Degrades gracefully: returns `{ summary: "", degraded: true }` when no model
+ * is available — never throws.
+ */
+export async function summarizeNote(content: string): Promise<SummarizeNoteResult> {
+  return invoke<SummarizeNoteResult>('summarize_note', { payload: { content } })
 }
