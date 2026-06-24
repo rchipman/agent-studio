@@ -21,7 +21,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::search::{blob_to_embedding, Db};
 
 /// Only consider pairs at least this similar (cosine) as "about the same thing".
-const SIM_FLOOR: f32 = 0.45;
+/// Reused by the continuity scorer (TIN-1730) as its candidate similarity floor.
+pub(crate) const SIM_FLOOR: f32 = 0.45;
 /// Bound the LLM work: judge at most this many of the most-similar pairs.
 const MAX_PAIRS: usize = 40;
 /// Per-note text handed to the model (chars). Keeps prompts fast and in-context.
@@ -122,7 +123,7 @@ pub fn candidate_pairs(vectors: &[(String, Vec<f32>)], floor: f32) -> Vec<(usize
 
 // ── Judging ──────────────────────────────────────────────────────────────────
 
-const AUDIT_SYSTEM: &str = "\
+pub(crate) const AUDIT_SYSTEM: &str = "\
 You audit a personal knowledge base for CONTRADICTIONS between two notes. A \
 contradiction is a concrete factual conflict: different numbers, prices, dates, \
 names, statuses, or mutually exclusive decisions about the SAME thing. Do NOT \
@@ -135,7 +136,7 @@ If the notes do not contradict, output exactly:
 NONE";
 
 /// Extract `CONFLICT:` lines from a model response (case-insensitive, lenient).
-fn parse_conflicts(resp: &str) -> Vec<String> {
+pub(crate) fn parse_conflicts(resp: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in resp.lines() {
         let t = line.trim();
@@ -156,7 +157,12 @@ fn truncate(s: &str) -> String {
 
 /// Ask the reasoning model whether two notes contradict; return the conflict
 /// summaries (empty when consistent).
-async fn judge_pair(name_a: &str, body_a: &str, name_b: &str, body_b: &str) -> Result<Vec<String>> {
+pub(crate) async fn judge_pair(
+    name_a: &str,
+    body_a: &str,
+    name_b: &str,
+    body_b: &str,
+) -> Result<Vec<String>> {
     let user = format!(
         "Note A — {name_a}:\n{}\n\n---\n\nNote B — {name_b}:\n{}",
         truncate(body_a),
