@@ -23,6 +23,8 @@ function setupInvoke() {
     if (cmd === 'get_settings') return Promise.resolve(MOCK_SETTINGS)
     if (cmd === 'embedding_key_status') return Promise.resolve('set')
     if (cmd === 'set_settings') return Promise.resolve(undefined)
+    if (cmd === 'linear_key_status') return Promise.resolve('unset')
+    if (cmd === 'list_linear_teams') return Promise.resolve([])
     return Promise.resolve(undefined)
   })
 }
