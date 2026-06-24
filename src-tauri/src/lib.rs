@@ -5,6 +5,7 @@ mod frontmatter;
 mod git;
 mod hybrid;
 mod launcher;
+mod linear;
 mod links;
 mod local_embed;
 mod memory_audit;
@@ -107,6 +108,11 @@ pub fn run() {
       transcript::list_sessions,
       transcript::get_session,
       transcript::search_transcripts,
+      linear::linear_key_status,
+      linear::set_linear_key,
+      linear::reveal_linear_key,
+      linear::list_linear_teams,
+      linear::sync_linear,
       terminal::spawn_agent,
       terminal::terminal_write,
       terminal::terminal_kill,
