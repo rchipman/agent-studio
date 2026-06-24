@@ -90,6 +90,27 @@ npm run tauri build  # static-exports the frontend and bundles a native binary
 
 The bundle (`.app` / `.dmg` on macOS, etc.) lands in `src-tauri/target/release/bundle/`.
 
+### Configuration
+
+On first run, open **Settings** (`⌘,`) to configure:
+
+- **Memory root** — where your `.md` memory files live (default `~/Projects/tfl/memory`). Changing it rebuilds the index.
+- **Embeddings** — semantic search and continuity scoring use a local embedding model ([candle](https://github.com/huggingface/candle), `all-MiniLM-L6-v2`) that downloads once and runs fully offline. No key or setup required. An embedding API key can optionally be set for a hosted model instead (stored in your system keychain).
+- **Local reasoning model (optional)** — the consistency audit, continuity scoring, and note summaries use a local LLM via [Ollama](https://ollama.com). Install Ollama and pull a model, e.g. `ollama pull llama3.1:8b`. Without one, those features degrade gracefully (search and writing still work).
+- **Linear (optional)** — paste a read-scoped Linear API key to ingest your issues and epics into the memory base (searchable, and as nodes in the graph). Stored in your system keychain; read-only.
+
+### Agent memory CLI (the continuity loop)
+
+Agents can write memory through a headless command that scores the note against your existing memory (flagging contradictions with earlier decisions), generates a summary, and records who wrote it:
+
+```bash
+agent-studio-memory add-memory --content "…" --agent <name> [--project <p>] [--type <t>]
+#   → prints { path, continuityScore, conflicts }   (surface conflicts to the human)
+agent-studio-memory supersede --old <path|name> --new <name>   # invalidate, don't delete
+```
+
+It is **headless** (the GUI does not need to be running) and degrades gracefully if no reasoning model is available. A stable `agent-studio-memory` entrypoint on `PATH` is being packaged; until then it is the built binary's `add-memory` / `supersede` subcommand (e.g. `src-tauri/target/release/app add-memory …` after a build). If the command is not available, agents fall back to writing the `.md` file directly — the continuity check is an enhancement, never required.
+
 ## Project structure
 
 ```
