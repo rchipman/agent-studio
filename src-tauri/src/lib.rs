@@ -100,6 +100,7 @@ pub fn run() {
       frontmatter::audit_frontmatter,
       frontmatter::import_markdown,
       frontmatter::update_frontmatter,
+      frontmatter::summarize_note,
       audit::consistency_audit,
       continuity::score_memory,
       memory_audit::record_memory_change,
