@@ -15,9 +15,10 @@ import { useEffect, useState } from 'react'
 import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
 import { getSettings } from '@/lib/settings'
 import { getRecentDirs } from '@/lib/launcher'
-import ViewShell from '@/components/ViewShell'
+import ViewBody from '@/components/ViewBody'
 import DiffView from '@/components/DiffView'
 import Button from '@/components/Button'
+import { useTopBarSlot } from '@/components/TopBarSlot'
 
 const SAVED_KEY = 'agent-studio-changes-dirs'
 
@@ -45,9 +46,12 @@ interface ChangesViewProps {
   onClose: () => void
 }
 
-export default function ChangesView({ onClose }: ChangesViewProps) {
+export default function ChangesView({}: ChangesViewProps) {
   const [dirs, setDirs] = useState<string[]>([])
   const [active, setActive] = useState<string | null>(null)
+  // Bumping this remounts the active directory's DiffView, re-reading its git
+  // status — the calm "Refresh" the top bar offers. (TIN-1708)
+  const [refreshKey, setRefreshKey] = useState(0)
 
   // Seed once: a saved curated list if present, else the agents' working dirs +
   // recent launch dirs. After that the list is the user's to curate.
@@ -101,16 +105,25 @@ export default function ChangesView({ onClose }: ChangesViewProps) {
     })
   }
 
+  // Top-bar right slot: a calm Refresh that re-reads the active diff. (TIN-1708)
+  const { setRight } = useTopBarSlot()
+  useEffect(() => {
+    setRight(
+      <Button
+        variant="tertiary"
+        size="sm"
+        onClick={() => setRefreshKey((k) => k + 1)}
+        title="Refresh"
+        disabled={!active}
+      >
+        Refresh
+      </Button>,
+    )
+    return () => setRight(null)
+  }, [setRight, active])
+
   return (
-    <ViewShell
-      title="Changes"
-      onBack={onClose}
-      right={
-        <Button variant="secondary" size="sm" onClick={addDir} title="Add a working directory">
-          + Directory
-        </Button>
-      }
-    >
+    <ViewBody>
       {/* Working-directory tabs */}
       <div
         role="tablist"
@@ -170,18 +183,47 @@ export default function ChangesView({ onClose }: ChangesViewProps) {
             </button>
           )
         })}
+
+        {/* Add a working directory (moved off the top bar, which now holds Refresh). */}
+        <button
+          onClick={addDir}
+          title="Add a working directory"
+          aria-label="Add a working directory"
+          style={{
+            flexShrink: 0,
+            alignSelf: 'center',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 24,
+            height: 24,
+            marginLeft: space[1],
+            background: 'transparent',
+            border: 'none',
+            borderRadius: radius.md,
+            color: color.inkSoft,
+            fontFamily: font.sans,
+            fontSize: 16,
+            lineHeight: 1,
+            cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.ink }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkSoft }}
+        >
+          +
+        </button>
       </div>
 
       {/* Active directory's diff, or a calm empty state */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', background: color.bgRaised }}>
         {active ? (
-          <DiffView workingDir={active} />
+          <DiffView key={`${active}:${refreshKey}`} workingDir={active} />
         ) : (
           <div style={{ ...typeRamp.body, textAlign: 'center', color: color.inkFaint, paddingTop: 80 }}>
             Add a working directory to see what changed there.
           </div>
         )}
       </div>
-    </ViewShell>
+    </ViewBody>
   )
 }

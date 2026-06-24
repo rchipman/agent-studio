@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import dynamic from 'next/dynamic'
 import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
@@ -11,6 +11,8 @@ import TranscriptBrowser from '@/components/TranscriptBrowser'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
 import NavRail, { type RailDest } from '@/components/NavRail'
+import TopBar from '@/components/TopBar'
+import { TopBarSlotProvider } from '@/components/TopBarSlot'
 import PanelDivider from '@/components/PanelDivider'
 import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
@@ -53,7 +55,18 @@ const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : '
 
 /** The app's top-level destinations — the workspace, or one of the full views
  *  reached from the nav rail. */
-type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
+type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'launch' | 'transcripts' | 'changes'
+
+/** The room name shown in the persistent top bar's title slot (TIN-1708), per
+ *  full view. The workspace uses the serif wordmark instead of a title. */
+const ROOM_TITLE: Record<Exclude<AppView, 'workspace'>, string> = {
+  graph: 'Graph',
+  frontmatter: 'Fields',
+  consistency: 'Check',
+  launch: 'Launch',
+  transcripts: 'Sessions',
+  changes: 'Changes',
+}
 
 /** One entry in the global back/forward trail (TIN-1705): a destination view
  *  plus, in the workspace, the focused panel's active document (null = Search). */
@@ -373,46 +386,6 @@ function loadLayout(): PersistedLayout {
   }
 }
 
-// ── Global history arrows (TIN-1705) ──────────────────────────────────────────
-
-/** A single back/forward chevron for the top bar. Calm and quiet; disabled (and
- *  unclickable) at the ends of the trail. */
-function HistoryArrow({
-  dir, enabled, onClick, title,
-}: { dir: 'back' | 'forward'; enabled: boolean; onClick: () => void; title: string }) {
-  return (
-    <button
-      onClick={enabled ? onClick : undefined}
-      disabled={!enabled}
-      aria-label={title}
-      title={title}
-      style={{
-        flexShrink: 0,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 26,
-        height: 26,
-        background: 'transparent',
-        border: 'none',
-        borderRadius: radius.sm,
-        cursor: enabled ? 'pointer' : 'default',
-        color: enabled ? color.inkSoft : color.inkFaint,
-        opacity: enabled ? 1 : 0.4,
-        transition: 'all 0.1s ease',
-      }}
-      onMouseEnter={(e) => { if (enabled) { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.ink } }}
-      onMouseLeave={(e) => { if (enabled) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkSoft } }}
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-        {dir === 'back'
-          ? <polyline points="10,3 5,8 10,13" />
-          : <polyline points="6,3 11,8 6,13" />}
-      </svg>
-    </button>
-  )
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -459,8 +432,10 @@ export default function Home() {
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
   const [draggingImport, setDraggingImport] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
-  const [showLauncher, setShowLauncher] = useState(false)
   const [, setIsSaving] = useState(false)
+  // The active full view's top-bar right-slot content, registered by the view via
+  // the TopBarSlot context (TIN-1708). The workspace supplies its own slot inline.
+  const [viewRight, setViewRight] = useState<ReactNode>(null)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
   const runRef = useRef<((req: RunRequest) => void) | null>(null)
 
@@ -1070,8 +1045,10 @@ export default function Home() {
         return
       }
       if (mod && (e.key === 'r' || e.key === 'R')) {
+        // Launch is a rail destination now (TIN-1707): ⌘R toggles the Launch view,
+        // mirroring ⌘G / ⌘T, not a modal open.
         e.preventDefault()
-        setShowLauncher(true)
+        setActiveView((v) => (v === 'launch' ? 'workspace' : 'launch'))
         return
       }
       if (mod && (e.key === 't' || e.key === 'T')) {
@@ -1149,55 +1126,31 @@ export default function Home() {
         onOpenSettings={() => setShowSettings(true)}
       />
 
-      {/* Main column — workspace, or the active full view, right of the rail. */}
+      {/* Main column — workspace, or the active full view, right of the rail. The
+          one persistent, context-aware top bar (TIN-1708) is always the first
+          child, above whatever view is active. */}
       <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative' }}>
+        <TopBar
+          variant={activeView === 'workspace' ? 'wordmark' : 'title'}
+          title={activeView === 'workspace' ? undefined : ROOM_TITLE[activeView]}
+          canBack={canBack}
+          canForward={canForward}
+          onBack={goBack}
+          onForward={goForward}
+          right={
+            activeView === 'workspace' ? (
+              <Button variant="primary" size="sm" onClick={() => setShowNewModal(true)} title="New memory file (⌘N)">
+                + New memory
+              </Button>
+            ) : (
+              viewRight
+            )
+          }
+        />
+
+        <TopBarSlotProvider value={{ setRight: setViewRight }}>
         {activeView === 'workspace' && (
           <>
-            {/* Top bar — verbs only; the rail handles destinations. */}
-            <header
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          borderBottom: `1px solid ${color.hair}`,
-          padding: `0 ${space[6]}px`,
-          gap: space[5],
-          flexShrink: 0,
-          background: color.bgApp,
-        }}
-      >
-        {/* Global history — back / forward across every view (TIN-1705). */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: space[1], flexShrink: 0, marginLeft: `-${space[2]}px` }}>
-          <HistoryArrow dir="back" enabled={canBack} onClick={goBack} title="Back (⌘[)" />
-          <HistoryArrow dir="forward" enabled={canForward} onClick={goForward} title="Forward (⌘])" />
-        </div>
-
-        <span
-          style={{
-            fontFamily: "'Fraunces', 'Georgia', serif",
-            fontSize: 15,
-            fontWeight: 600,
-            color: color.forest,
-            letterSpacing: '-0.01em',
-            flexShrink: 0,
-          }}
-        >
-          Agent Studio
-        </span>
-
-        <div style={{ flex: 1 }} />
-
-        {/* Right side — verbs only; Split moved to the doc strip's panel controls. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, justifyContent: 'flex-end' }}>
-          <Button variant="primary" size="sm" onClick={() => setShowNewModal(true)} title="New memory file (⌘N)">
-            + New
-          </Button>
-          <Button variant="primary" size="sm" onClick={() => setShowLauncher(true)} title="Launch (⌘R)">
-            Launch
-          </Button>
-        </div>
-      </header>
-
       {/* Body: one or two panels */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         {/* LEFT panel — always present, flexes to leftWidth when split is open */}
@@ -1326,12 +1279,22 @@ export default function Home() {
             onClose={() => setActiveView('workspace')}
           />
         )}
+        {activeView === 'launch' && (
+          <Launcher
+            asView
+            open
+            onClose={() => setActiveView('workspace')}
+            onRun={handleLaunch}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        )}
         {activeView === 'transcripts' && (
           <TranscriptBrowser onClose={() => setActiveView('workspace')} />
         )}
         {activeView === 'changes' && (
           <ChangesView onClose={() => setActiveView('workspace')} />
         )}
+        </TopBarSlotProvider>
       </div>
 
       {/* Modals / overlays */}
@@ -1411,13 +1374,6 @@ export default function Home() {
       {showSettings && (
         <SettingsModal open onClose={() => setShowSettings(false)} />
       )}
-
-      <Launcher
-        open={showLauncher}
-        onClose={() => setShowLauncher(false)}
-        onRun={handleLaunch}
-        onOpenSettings={() => { setShowLauncher(false); setShowSettings(true) }}
-      />
 
       {showQuickCapture && (
         <QuickCapture
