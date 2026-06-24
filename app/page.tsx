@@ -1055,26 +1055,8 @@ export default function Home() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Right side — verbs only; per-doc context lives in the doc strip. */}
+        {/* Right side — verbs only; Split moved to the doc strip's panel controls. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, justifyContent: 'flex-end' }}>
-          <button
-            onClick={toggleRightPanel}
-            title="Toggle right panel (⌘\)"
-            aria-pressed={rightOpen}
-            style={{
-              background: rightOpen ? color.forestTint : 'transparent',
-              color: rightOpen ? color.forest : color.inkSoft,
-              border: `1px solid ${rightOpen ? color.forestLine : color.line}`,
-              borderRadius: radius.md,
-              padding: '4px 10px',
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: 'pointer',
-              fontFamily: font.sans,
-            }}
-          >
-            Split
-          </button>
           <Button variant="primary" size="sm" onClick={() => setShowNewModal(true)} title="New memory file (⌘N)">
             + New
           </Button>
@@ -1107,6 +1089,8 @@ export default function Home() {
             onSelectDoc={(p) => selectDoc('left', p)}
             onCloseDoc={(p) => closeDoc('left', p)}
             onAddDoc={() => selectSearch('left')}
+            onToggleSplit={toggleRightPanel}
+            splitOpen={rightOpen}
             activePath={leftActiveDoc?.path ?? null}
             loaded={leftLoaded}
             loadedByPath={lookupLoaded}
