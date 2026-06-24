@@ -489,6 +489,8 @@ function DocStrip({
   showClose,
   onClosePanel,
   wordCount,
+  onToggleSplit,
+  splitOpen,
 }: {
   tabs: OpenDoc[]
   activeTabId: string | null
@@ -501,6 +503,10 @@ function DocStrip({
   onClosePanel?: () => void
   /** Active document's word count, shown right-aligned; null when not in a doc. */
   wordCount?: number | null
+  /** Toggle the second panel; rendered as a dual-panel icon at the strip's right
+   *  (the left panel only). `splitOpen` drives the active/pressed state. */
+  onToggleSplit?: () => void
+  splitOpen?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -615,6 +621,37 @@ function DocStrip({
         </span>
       )}
 
+      {/* Split toggle — dual-panel icon, far right of the (left) strip. */}
+      {onToggleSplit && (
+        <button
+          onClick={onToggleSplit}
+          aria-label="Toggle the second panel"
+          aria-pressed={splitOpen}
+          title="Toggle split (⌘\)"
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 24,
+            height: 24,
+            background: splitOpen ? color.forestTint : 'transparent',
+            border: 'none',
+            borderRadius: radius.sm,
+            cursor: 'pointer',
+            color: splitOpen ? color.forest : color.inkFaint,
+            transition: 'all 0.1s ease',
+          }}
+          onMouseEnter={(e) => { if (!splitOpen) { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.ink } }}
+          onMouseLeave={(e) => { if (!splitOpen) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkFaint } }}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+            <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+            <line x1="8" y1="2.5" x2="8" y2="13.5" />
+          </svg>
+        </button>
+      )}
+
       {/* Panel-close ✕ — far right, right panel only (unchanged behaviour) */}
       {showClose && (
         <button
@@ -663,6 +700,11 @@ export interface WorkspacePanelProps {
   showClose?: boolean
   onClose?: () => void
 
+  /** Toggle the second panel (passed to the left panel only); drives the strip's
+   *  dual-panel split icon. */
+  onToggleSplit?: () => void
+  splitOpen?: boolean
+
   // What the active document tab is showing (null when Search is active)
   activePath: string | null
   loaded: LoadedFile | null
@@ -710,6 +752,8 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
     onAddDoc,
     showClose = false,
     onClose,
+    onToggleSplit,
+    splitOpen,
     activePath,
     loaded,
     loadedByPath,
@@ -757,6 +801,8 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
         onAddDoc={onAddDoc}
         showClose={showClose}
         onClosePanel={onClose}
+        onToggleSplit={onToggleSplit}
+        splitOpen={splitOpen}
         wordCount={inEditor && loaded?.content ? loaded.content.trim().split(/\s+/).filter(Boolean).length : null}
       />
 
