@@ -45,12 +45,12 @@ export interface LinkSuggestion {
   slug: string
 }
 
-/** A node in the knowledge graph. `kind` is `'file'` or `'ticket'`. */
+/** A node in the knowledge graph. `kind` is `'file'`, `'ticket'`, or `'epic'`. */
 export interface GraphNode {
   id: string
   label: string
-  kind: 'file' | 'ticket'
-  /** First project, for domain colouring (empty for tickets). */
+  kind: 'file' | 'ticket' | 'epic'
+  /** First project, for domain colouring (empty for tickets/epics). */
   domain: string
   /** Edge count touching this node (drives node size). */
   degree: number
