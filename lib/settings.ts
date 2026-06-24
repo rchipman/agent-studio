@@ -63,3 +63,44 @@ export async function embeddingKeyStatus(): Promise<EmbeddingKeyStatus> {
 export async function revealEmbeddingKey(): Promise<string> {
   return invoke<string>('reveal_embedding_key')
 }
+
+// ── Linear ────────────────────────────────────────────────────────────────────
+
+export type LinearKeyStatus = 'set' | 'unset'
+
+export interface LinearTeam {
+  key: string
+  name: string
+}
+
+export interface LinearSyncResult {
+  issueCount: number
+  epicCount: number
+  commentCount: number
+  lastSynced: string
+}
+
+/** Whether a Linear key is stored, without revealing it. */
+export async function linearKeyStatus(): Promise<LinearKeyStatus> {
+  return invoke<LinearKeyStatus>('linear_key_status')
+}
+
+/** Store the Linear API key in the keychain. An empty key clears it. */
+export async function setLinearKey(key: string): Promise<void> {
+  await invoke('set_linear_key', { payload: { key } })
+}
+
+/** Reveal the plaintext Linear API key. Call only on explicit user action. */
+export async function revealLinearKey(): Promise<string> {
+  return invoke<string>('reveal_linear_key')
+}
+
+/** List Linear teams available with the stored key. */
+export async function listLinearTeams(): Promise<LinearTeam[]> {
+  return invoke<LinearTeam[]>('list_linear_teams')
+}
+
+/** Trigger a Linear sync. Pass teamKey to scope to a specific team. */
+export async function syncLinear(teamKey?: string): Promise<LinearSyncResult> {
+  return invoke<LinearSyncResult>('sync_linear', { payload: { teamKey } })
+}
