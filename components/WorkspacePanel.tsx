@@ -1,11 +1,13 @@
 'use client'
 
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import dynamic from 'next/dynamic'
 import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
 import { MemorySearchResult, OpenDoc, PanelSide, LoadedFile } from '@/lib/types'
 import { fileLinks, type FileLinks, type LinkedFile, type TicketRef } from '@/lib/links'
+import { getMemoryHistory, type AuditEntry } from '@/lib/history'
 import TypeChip from '@/components/TypeChip'
+import Button from '@/components/Button'
 
 const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
 
@@ -21,6 +23,23 @@ function formatDate(iso: string): string {
   }
 }
 
+/** Relative time label: "just now", "5 m ago", "2 h ago", "3 d ago". */
+function relativeTime(iso: string): string {
+  if (!iso) return ''
+  try {
+    const diffMs = Date.now() - new Date(iso).getTime()
+    const diffMin = Math.floor(diffMs / 60000)
+    if (diffMin < 1) return 'just now'
+    if (diffMin < 60) return `${diffMin} m ago`
+    const diffH = Math.floor(diffMin / 60)
+    if (diffH < 24) return `${diffH} h ago`
+    const diffD = Math.floor(diffH / 24)
+    return `${diffD} d ago`
+  } catch {
+    return ''
+  }
+}
+
 /** A document tab's label: frontmatter name, falling back to the filename. */
 function docLabel(path: string, loaded: LoadedFile | null): string {
   const name = loaded?.meta?.name
@@ -30,22 +49,48 @@ function docLabel(path: string, loaded: LoadedFile | null): string {
 
 // ── Presentational primitives (search + editor content) ─────────────────────
 
+// Tag overflow cap for the compact MetaBar (search result cards).
+// Fixed cap: 3 visible tags to prevent date wrapping at narrow widths.
+const META_TAG_CAP = 3
+
 function MetaBar({ result }: { result: MemorySearchResult }) {
   const projects = result.projects.filter(Boolean)
   const dateStr = formatDate(result.updated || result.created)
+  const tags = (result.tags ?? []).filter(Boolean)
+  const visibleTags = tags.slice(0, META_TAG_CAP)
+  const hiddenCount = tags.length - visibleTags.length
+  const isSuperseded = result.status === 'superseded'
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: space[3], flexWrap: 'wrap', marginBottom: space[1] }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: space[3], flexWrap: 'nowrap', marginBottom: space[1], minWidth: 0 }}>
       {result.type && (
-        <span style={{ padding: '1px 7px', borderRadius: radius.chip, background: color.forestTint, color: color.forest, fontSize: 10, fontWeight: 600, letterSpacing: '0.02em' }}>
+        <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: radius.chip, background: color.forestTint, color: color.forest, fontSize: 10, fontWeight: 600, letterSpacing: '0.02em' }}>
           {result.type}
         </span>
       )}
+      {isSuperseded && (
+        <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: radius.chip, background: color.neutralTint, color: color.inkSoft, fontSize: 10 }}>
+          superseded
+        </span>
+      )}
       {projects.map((p) => (
-        <span key={p} style={{ padding: '1px 7px', borderRadius: radius.chip, background: color.tanTint, color: color.tan, fontSize: 10, fontWeight: 500 }}>
+        <span key={p} style={{ flexShrink: 0, padding: '1px 7px', borderRadius: radius.chip, background: color.tanTint, color: color.tan, fontSize: 10, fontWeight: 500 }}>
           {p}
         </span>
       ))}
-      {dateStr && <span style={{ fontSize: 10, color: color.inkFaint, marginLeft: 'auto' }}>{dateStr}</span>}
+      {visibleTags.map((t) => (
+        <span key={t} style={{ flexShrink: 0, padding: '1px 7px', borderRadius: radius.chip, background: color.neutralTint, color: color.inkSoft, fontSize: 10 }}>
+          {t}
+        </span>
+      ))}
+      {hiddenCount > 0 && (
+        <span
+          style={{ flexShrink: 0, ...typeRamp.meta, fontSize: 10, color: color.inkFaint }}
+          title={tags.slice(META_TAG_CAP).join(', ')}
+        >
+          +{hiddenCount} more
+        </span>
+      )}
+      {dateStr && <span style={{ fontSize: 10, color: color.inkFaint, marginLeft: 'auto', flexShrink: 0, whiteSpace: 'nowrap' }}>{dateStr}</span>}
     </div>
   )
 }
@@ -101,28 +146,177 @@ function ResultCard({
   )
 }
 
-function EditorMetaBar({ result }: { result: MemorySearchResult }) {
+// Approximate chip width (px) for tag overflow estimation in EditorMetaBar.
+// Each tag chip is ~(chars * 6.5 + 18)px. We degrade to a fixed cap of 4 tags
+// when the container width is not yet measured (first paint).
+const EDITOR_TAG_CAP_DEFAULT = 4
+
+function EditorMetaBar({
+  result,
+  onOpenFile,
+}: {
+  result: MemorySearchResult
+  onOpenFile?: (path: string, e: React.MouseEvent) => void
+}) {
   const projects = result.projects.filter(Boolean)
   const dateStr = formatDate(result.updated || result.created)
+  const tags = (result.tags ?? []).filter(Boolean)
+  const isSuperseded = result.status === 'superseded'
+  const metaExt = result as MemorySearchResult & { supersedes?: string; superseded_by?: string }
+  const supersedes = metaExt.supersedes
+  const supersededBy = metaExt.superseded_by
+
+  // Tag overflow: measure available width via ResizeObserver.
+  // Fixed chips (type, superseded, projects, date) consume a reserved portion;
+  // tags fill what remains. Degrade to EDITOR_TAG_CAP_DEFAULT on first render.
+  const rowRef = useRef<HTMLDivElement>(null)
+  const [visibleTagCount, setVisibleTagCount] = useState(EDITOR_TAG_CAP_DEFAULT)
+
+  const recalcTagCount = useCallback(() => {
+    if (!rowRef.current || tags.length === 0) {
+      setVisibleTagCount(EDITOR_TAG_CAP_DEFAULT)
+      return
+    }
+    const rowWidth = rowRef.current.offsetWidth
+    // Fixed elements: type chip ~80px, superseded chip ~90px, each project chip
+    // ~(name.length * 6.5 + 22)px, date ~130px, gaps at space[3]=8px each.
+    let reserved = 0
+    if (result.type) reserved += Math.max(80, result.type.length * 6.5 + 22) + space[3]
+    if (isSuperseded) reserved += 90 + space[3]
+    projects.forEach(p => { reserved += Math.max(70, p.length * 6.5 + 22) + space[3] })
+    reserved += 130 + space[3] // date
+    const available = rowWidth - reserved
+    if (available <= 0) {
+      setVisibleTagCount(0)
+      return
+    }
+    let used = 0
+    let count = 0
+    for (const t of tags) {
+      const chipW = Math.max(50, t.length * 6.5 + 22) + space[3]
+      // Reserve space for a "+n more" affordance (~52px) if there will be overflow
+      const overflowReserve = count < tags.length - 1 ? 52 : 0
+      if (used + chipW + overflowReserve > available) break
+      used += chipW
+      count++
+    }
+    setVisibleTagCount(Math.max(0, count))
+  }, [tags, result.type, isSuperseded, projects])
+
+  useEffect(() => {
+    recalcTagCount()
+    if (!rowRef.current) return
+    const observer = new ResizeObserver(recalcTagCount)
+    observer.observe(rowRef.current)
+    return () => observer.disconnect()
+  }, [recalcTagCount])
+
+  const visibleTags = tags.slice(0, visibleTagCount)
+  const hiddenCount = tags.length - visibleTags.length
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: space[3], flexWrap: 'wrap', padding: '8px 0 16px', borderBottom: `1px solid ${color.hairSoft}`, marginBottom: space[7] }}>
-      {result.type && (
-        <span style={{ padding: '2px 9px', borderRadius: radius.chip, background: color.forestTint, color: color.forest, fontSize: 11, fontWeight: 600 }}>
-          {result.type}
-        </span>
+    <>
+      <div
+        ref={rowRef}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: space[3],
+          flexWrap: 'nowrap',
+          padding: '8px 0 16px',
+          borderBottom: `1px solid ${color.hairSoft}`,
+          marginBottom: space[7],
+          minWidth: 0,
+        }}
+      >
+        {result.type && (
+          <span style={{ flexShrink: 0, padding: '2px 9px', borderRadius: radius.chip, background: color.forestTint, color: color.forest, fontSize: 11, fontWeight: 600 }}>
+            {result.type}
+          </span>
+        )}
+        {isSuperseded && (
+          <span style={{ flexShrink: 0, padding: '2px 9px', borderRadius: radius.chip, background: color.neutralTint, color: color.inkSoft, fontSize: 11 }}>
+            superseded
+          </span>
+        )}
+        {projects.map((p) => (
+          <span key={p} style={{ flexShrink: 0, padding: '2px 9px', borderRadius: radius.chip, background: color.tanTint, color: color.tan, fontSize: 11, fontWeight: 500 }}>
+            {p}
+          </span>
+        ))}
+        {visibleTags.map((t) => (
+          <span key={t} style={{ flexShrink: 0, padding: '2px 9px', borderRadius: radius.chip, background: color.neutralTint, color: color.inkSoft, fontSize: 11 }}>
+            {t}
+          </span>
+        ))}
+        {hiddenCount > 0 && (
+          <span
+            style={{ flexShrink: 0, ...typeRamp.meta, color: color.inkFaint }}
+            title={tags.slice(visibleTagCount).join(', ')}
+          >
+            +{hiddenCount} more
+          </span>
+        )}
+        {dateStr && (
+          <span style={{ flexShrink: 0, fontSize: 11, color: color.inkFaint, marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+            Updated {dateStr}
+          </span>
+        )}
+      </div>
+      {isSuperseded && supersedes && onOpenFile && (
+        <div style={{ ...typeRamp.body, color: color.inkSoft, marginTop: `-${space[6]}px`, marginBottom: space[6], lineHeight: 1.5 }}>
+          {'Supersedes '}
+          <NotePillInline name={supersedes} filePath={supersedes} onOpenFile={onOpenFile} />
+          {'.'}
+        </div>
       )}
-      {projects.map((p) => (
-        <span key={p} style={{ padding: '2px 9px', borderRadius: radius.chip, background: color.tanTint, color: color.tan, fontSize: 11, fontWeight: 500 }}>
-          {p}
-        </span>
-      ))}
-      {result.tags?.filter(Boolean).map((t) => (
-        <span key={t} style={{ padding: '2px 9px', borderRadius: radius.chip, background: color.neutralTint, color: color.inkSoft, fontSize: 11 }}>
-          {t}
-        </span>
-      ))}
-      {dateStr && <span style={{ fontSize: 11, color: color.inkFaint, marginLeft: 'auto' }}>Updated {dateStr}</span>}
-    </div>
+      {isSuperseded && supersededBy && onOpenFile && (
+        <div style={{ ...typeRamp.body, color: color.inkSoft, marginTop: supersedes ? 0 : `-${space[6]}px`, marginBottom: space[6], lineHeight: 1.5 }}>
+          {'Superseded by '}
+          <NotePillInline name={supersededBy} filePath={supersededBy} onOpenFile={onOpenFile} />
+          {'.'}
+        </div>
+      )}
+    </>
+  )
+}
+
+// ── Note pill (reuse of ConsistencyView NotePill pattern) ───────────────────
+
+/** Inline note pill — reuses the ConsistencyView NotePill styling.
+ *  Used for "Supersedes {name}." and "Superseded by {name}." lines. */
+function NotePillInline({
+  name,
+  filePath,
+  onOpenFile,
+}: {
+  name: string
+  filePath: string
+  onOpenFile: (path: string, e: React.MouseEvent) => void
+}) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      title={`Open here · ⌘-click to open in the other panel\n${filePath}`}
+      onClick={(e) => onOpenFile(filePath, e)}
+      style={{
+        display: 'inline',
+        padding: '3px 10px',
+        borderRadius: radius.chip,
+        border: `1px solid ${hovered ? color.forestLine : color.line}`,
+        background: hovered ? color.forestWash : 'transparent',
+        color: hovered ? color.ink : color.inkSoft,
+        fontFamily: font.sans,
+        fontSize: 11,
+        fontWeight: 500,
+        cursor: 'pointer',
+        transition: 'all 0.12s ease',
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {name}
+    </button>
   )
 }
 
@@ -367,6 +561,141 @@ function LinksTab({
   }
 
   return <div style={column}>{sections}</div>
+}
+
+// ── History footer (TIN-1728) ────────────────────────────────────────────────
+
+/** A single audit-history row: tan (human) or forest (agent) left rule + actor
+ *  label + relative time + change summary. Reuses the TranscriptBrowser's
+ *  tan/forest left-rule grammar exactly (color, width, opacity). */
+function HistoryRow({ entry }: { entry: AuditEntry }) {
+  const isHuman = entry.actorType === 'human'
+  const ruleColor = isHuman ? color.tan : color.forest
+  const actorLabel = isHuman ? 'you' : entry.actorId
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: space[4],
+        paddingLeft: space[4],
+        paddingTop: space[2],
+        paddingBottom: space[2],
+        borderLeft: `2px solid ${ruleColor}`,
+        marginBottom: space[2],
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
+          <span style={{ ...typeRamp.meta, color: color.inkSoft, fontWeight: 500 }}>
+            {actorLabel}
+          </span>
+          <span style={{ ...typeRamp.meta, color: color.inkFaint }}>
+            {relativeTime(entry.ts)}
+          </span>
+        </div>
+        <div style={{ ...typeRamp.body, color: color.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {entry.changeSummary}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const HISTORY_INITIAL_ROWS = 5
+
+/** The audit history footer section. Renders beneath Links in footer mode.
+ *  Collapsed by default; expands in place. Empty = omitted entirely. */
+function HistoryFooter({ path }: { path: string }) {
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [entries, setEntries] = useState<AuditEntry[]>([])
+  const [expanded, setExpanded] = useState(false)
+  const [showAll, setShowAll] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setStatus('loading')
+    setEntries([])
+    setExpanded(false)
+    setShowAll(false)
+    getMemoryHistory(path)
+      .then((res) => {
+        if (cancelled) return
+        setEntries(res)
+        setStatus('ready')
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('error')
+      })
+    return () => { cancelled = true }
+  }, [path])
+
+  // Loading: render nothing (silent, like empty Links)
+  if (status === 'loading') return null
+
+  // Error: calm faint notice
+  if (status === 'error') {
+    return (
+      <div style={{ marginTop: space[7] }}>
+        <div style={{ ...typeRamp.body, color: color.inkFaint }}>
+          Could not read this note&apos;s history.
+        </div>
+      </div>
+    )
+  }
+
+  // Empty: omit entirely (like empty Links section)
+  if (entries.length === 0) return null
+
+  const visibleEntries = showAll ? entries : entries.slice(0, HISTORY_INITIAL_ROWS)
+  const hasMore = entries.length > HISTORY_INITIAL_ROWS
+
+  return (
+    <div style={{ marginTop: space[7] }}>
+      {/* Collapsed header row: HISTORY {n} — reuses LinkSectionHeader style */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v) }}
+        style={{ cursor: 'pointer', userSelect: 'none' }}
+        aria-expanded={expanded}
+      >
+        <LinkSectionHeader label="HISTORY" count={entries.length} />
+      </div>
+
+      {expanded && (
+        <div style={{ marginTop: space[3] }}>
+          {visibleEntries.map((entry) => (
+            <HistoryRow key={entry.id} entry={entry} />
+          ))}
+          {hasMore && !showAll && (
+            <div style={{ marginTop: space[3] }}>
+              <Button variant="tertiary" onClick={() => setShowAll(true)}>
+                Show full history
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Wraps HistoryFooter in the same column geometry as the Links footer column. */
+function HistoryFooterWrapper({ path }: { path: string }) {
+  return (
+    <div
+      style={{
+        maxWidth: 720,
+        width: '100%',
+        margin: '0 auto',
+        padding: `0 40px 60px`,
+        boxSizing: 'border-box' as const,
+      }}
+    >
+      <HistoryFooter path={path} />
+    </div>
+  )
 }
 
 // ── Shared close glyph (panel-close ✕, reused on doc tabs) ───────────────────
@@ -840,12 +1169,15 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
               onOpenTicket={onOpenTicket}
             />
             {activePath && (
-              <LinksTab
-                path={activePath}
-                onOpenResult={onOpenResult}
-                onOpenTicket={onOpenTicket}
-                footer
-              />
+              <>
+                <LinksTab
+                  path={activePath}
+                  onOpenResult={onOpenResult}
+                  onOpenTicket={onOpenTicket}
+                  footer
+                />
+                <HistoryFooterWrapper path={activePath} />
+              </>
             )}
           </>
         )}
@@ -971,6 +1303,14 @@ function EditorView(props: {
   onOpenTicket: (id: string) => void
 }) {
   const { activePath, loaded, onEditorChange, onEditorSave, onOpenWikiLink, onOpenTicket } = props
+
+  // Adapt onOpenWikiLink to the (path, MouseEvent) signature NotePillInline needs.
+  const handleOpenFile = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    (path: string, _e: React.MouseEvent) => onOpenWikiLink(path),
+    [onOpenWikiLink],
+  )
+
   return (
     <div style={{ maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 40px 80px', boxSizing: 'border-box' }}>
       {loaded?.loading ? (
@@ -979,7 +1319,9 @@ function EditorView(props: {
         </div>
       ) : (
         <>
-          {loaded?.meta && <EditorMetaBar result={loaded.meta} />}
+          {loaded?.meta && (
+            <EditorMetaBar result={loaded.meta} onOpenFile={handleOpenFile} />
+          )}
           <MarkdownEditor
             key={activePath ?? ''}
             initialContent={loaded?.content ?? ''}
