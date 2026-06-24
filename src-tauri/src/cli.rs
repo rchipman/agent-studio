@@ -40,7 +40,7 @@ use serde_json::json;
 use crate::continuity::{score_content, ScoreMemoryInput};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
 use crate::memory_audit::{content_hash, record_change, RecordMemoryChangeInput};
-use crate::search::{build_index, init_db, Db};
+use crate::search::{build_index, init_db, search_core, Db, SearchInput};
 use crate::settings::default_memory_root;
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
@@ -87,6 +87,8 @@ pub fn maybe_run() {
     let result = match cmd.as_str() {
         "add-memory" => run_add_memory(rest),
         "supersede" => run_supersede(rest),
+        "recall" => run_recall(rest),
+        "check" => run_check(rest),
         _ => return, // not a headless command → fall through to the GUI
     };
 
@@ -444,6 +446,111 @@ fn set_frontmatter_fields(raw: &str, fields: &[(&str, &str)]) -> Result<String, 
     Ok(out)
 }
 
+// ── recall (TIN-1739) ────────────────────────────────────────────────────────
+
+/// The `recall` pipeline. Runs the same hybrid BM25+vector search the Tauri
+/// `search` command uses (via `search_core`), applies `derank_superseded`, and
+/// returns a JSON array of the top-k hits with the shape the agent API defines.
+///
+/// Usage: `recall --query "<text>" [--project <p>] [--type <t>] [--k <n>]`
+/// Default k = 8.
+pub fn run_recall(rest: &[String]) -> Result<serde_json::Value, String> {
+    let args = Args::parse(rest);
+    let query = args.get("query").ok_or("--query <text> is required")?;
+    if query.trim().is_empty() {
+        return Err("--query must not be empty".to_string());
+    }
+
+    let project = args.get("project").unwrap_or("").to_string();
+    let type_ = args.get("type").unwrap_or("").to_string();
+    let k: usize = args
+        .get("k")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    let input = SearchInput {
+        q: query.to_string(),
+        type_filter: type_,
+        project_filter: project,
+        limit: Some(k as i64),
+        rebuild: false,
+    };
+
+    let results = search_core(&db, &input, k)?;
+
+    // Build the recall JSON array. `summary` is read from the file's frontmatter
+    // (cheap single-field read per hit); `snippet` is the existing excerpt.
+    let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
+    let items: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            // Read the `summary` frontmatter field cheaply.
+            let summary: String = fs::read_to_string(&r.path)
+                .ok()
+                .and_then(|raw| {
+                    let parsed: gray_matter::ParsedEntity = matter.parse(&raw).ok()?;
+                    let map = parsed.data.as_ref()?.as_hashmap().ok()?;
+                    map.get("summary").and_then(|p| p.as_string().ok())
+                })
+                .unwrap_or_default();
+
+            json!({
+                "name":    r.name,
+                "path":    r.path,
+                "summary": summary,
+                "status":  r.status,
+                "score":   0.0,   // placeholder — hybrid rank is ordinal, not a normalised score
+                "snippet": r.excerpt,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::Value::Array(items))
+}
+
+// ── check (TIN-1740) ─────────────────────────────────────────────────────────
+
+/// The `check` pipeline. Calls `continuity::score_content` — the same read-only
+/// scorer `add-memory` uses — and returns the continuity signal as JSON. No
+/// write, no side effects.
+///
+/// Usage: `check --content "<text>" [--project <p>]`
+/// (The `--project` flag is accepted for symmetry with `recall` but the scorer
+/// itself is project-agnostic; project filtering in continuity scoring is a
+/// future concern.)
+pub fn run_check(rest: &[String]) -> Result<serde_json::Value, String> {
+    let args = Args::parse(rest);
+    let content = args
+        .get("content")
+        .ok_or("--content <text> is required")?
+        .to_string();
+    if content.trim().is_empty() {
+        return Err("--content must not be empty".to_string());
+    }
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let score = rt.block_on(score_content(
+        &db,
+        ScoreMemoryInput { content, path: None },
+    ))?;
+
+    Ok(json!({
+        "continuityScore": score.continuity_score,
+        "conflicts": score.conflicts,
+        "degraded": score.degraded,
+    }))
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -679,5 +786,161 @@ mod tests {
         let after = fs::read_to_string(&old).unwrap();
         assert_eq!(after.matches("status:").count(), 1, "status replaced, not duplicated: {after}");
         assert!(!after.contains("status: active"), "old status value gone");
+    }
+
+    // ── recall (TIN-1739) ─────────────────────────────────────────────────────
+
+    /// Seed two notes into a temp root+DB and return the root + a Db handle that
+    /// backs the on-disk index (so `run_recall` — which reopens the same DB —
+    /// sees them).
+    fn recall_fixture(tag: &str) -> (PathBuf, Db) {
+        let root = temp_root(&format!("recall-{tag}"));
+        let db = fixture_db(&root);
+
+        // Active note — matches "pricing"
+        let active = root.join("studio");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(
+            active.join("current-pricing.md"),
+            "---\nname: current-pricing\ntype: project\nprojects: studio\nstatus: active\nsummary: Attic Pro is priced at $9 per month.\n---\nAttic Pro is priced at $9 per month.\n",
+        )
+        .unwrap();
+
+        // Superseded note — also matches "pricing" but should rank lower
+        fs::write(
+            active.join("old-pricing.md"),
+            "---\nname: old-pricing\ntype: project\nprojects: studio\nstatus: superseded\n---\nAttic Pro was priced at $7 per month.\n",
+        )
+        .unwrap();
+
+        // Rebuild the on-disk index so `run_recall` (which reopens it) can find the notes.
+        {
+            let conn = db.0.lock().unwrap();
+            crate::search::build_index(&root, &conn).unwrap();
+        }
+        (root, db)
+    }
+
+    #[test]
+    fn recall_returns_json_array_with_expected_fields() {
+        let _guard = env_lock();
+        let (root, _db) = recall_fixture("fields");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_recall(&["--query".into(), "pricing".into(), "--k".into(), "8".into()])
+            .expect("recall succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let arr = out.as_array().expect("recall returns a JSON array");
+        assert!(!arr.is_empty(), "at least one hit for 'pricing'");
+
+        // Every element carries the required shape.
+        for item in arr {
+            assert!(item["name"].is_string(), "name field present");
+            assert!(item["path"].is_string(), "path field present");
+            assert!(item["summary"].is_string(), "summary field present");
+            assert!(item["status"].is_string(), "status field present");
+            assert!(item["score"].is_number(), "score field present");
+            assert!(item["snippet"].is_string(), "snippet field present");
+        }
+    }
+
+    #[test]
+    fn recall_active_note_ranks_before_superseded() {
+        let _guard = env_lock();
+        let (root, _db) = recall_fixture("derank");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_recall(&["--query".into(), "pricing".into(), "--k".into(), "8".into()])
+            .expect("recall succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let arr = out.as_array().expect("JSON array");
+        assert!(arr.len() >= 2, "both active and superseded notes are returned");
+
+        // The active note must appear before the superseded one.
+        let pos_active = arr.iter().position(|i| i["status"].as_str() == Some("active"));
+        let pos_superseded = arr.iter().position(|i| i["status"].as_str() == Some("superseded"));
+        assert!(pos_active.is_some(), "active note present in results");
+        assert!(pos_superseded.is_some(), "superseded note present in results (findable)");
+        assert!(
+            pos_active.unwrap() < pos_superseded.unwrap(),
+            "active note must rank before the superseded one"
+        );
+    }
+
+    #[test]
+    fn recall_summary_read_from_frontmatter() {
+        let _guard = env_lock();
+        let (root, _db) = recall_fixture("summary");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_recall(&["--query".into(), "pricing".into()])
+            .expect("recall succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let arr = out.as_array().expect("JSON array");
+        // The active note has `summary:` in its frontmatter.
+        let active_hit = arr.iter().find(|i| i["name"].as_str() == Some("current-pricing"));
+        assert!(active_hit.is_some(), "current-pricing in results");
+        let s = active_hit.unwrap()["summary"].as_str().unwrap_or("");
+        assert_eq!(s, "Attic Pro is priced at $9 per month.", "summary from frontmatter");
+    }
+
+    #[test]
+    fn recall_missing_query_errors_cleanly() {
+        let _guard = env_lock();
+        let root = temp_root("recall-noquery");
+        let _ = fixture_db(&root);
+        std::env::set_var("MEMORY_ROOT", &root);
+        let err = run_recall(&[]).unwrap_err();
+        std::env::remove_var("MEMORY_ROOT");
+        assert!(err.contains("--query"), "error mentions --query: {err}");
+    }
+
+    // ── check (TIN-1740) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn check_returns_expected_json_shape() {
+        let _guard = env_lock();
+        let root = temp_root("check-shape");
+        let _ = fixture_db(&root);
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_check(&["--content".into(), "Attic Pro is priced at $9 per month.".into()])
+            .expect("check succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Shape: { continuityScore, conflicts, degraded }
+        assert!(out["continuityScore"].is_number(), "continuityScore is a number");
+        assert!(out["conflicts"].is_array(), "conflicts is an array");
+        assert!(out["degraded"].is_boolean(), "degraded is a boolean");
+
+        let score = out["continuityScore"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score), "continuityScore in [0, 1]: {score}");
+    }
+
+    #[test]
+    fn check_degraded_path_returns_valid_score() {
+        // With no live model (CI), check must degrade gracefully: score in range,
+        // conflicts empty, degraded true (or false if the model happened to load).
+        let _guard = env_lock();
+        let root = temp_root("check-degrade");
+        let _ = fixture_db(&root);
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_check(&["--content".into(), "A genuinely novel idea with no prior art.".into()])
+            .expect("check still succeeds with no model");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let score = out["continuityScore"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score), "score in [0,1]: {score}");
+        assert!(out["conflicts"].as_array().unwrap().is_empty(), "no conflicts on degraded path");
+    }
+
+    #[test]
+    fn check_missing_content_errors_cleanly() {
+        let _guard = env_lock();
+        let root = temp_root("check-nocontent");
+        let _ = fixture_db(&root);
+        std::env::set_var("MEMORY_ROOT", &root);
+        let err = run_check(&[]).unwrap_err();
+        std::env::remove_var("MEMORY_ROOT");
+        assert!(err.contains("--content"), "error mentions --content: {err}");
     }
 }
