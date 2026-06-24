@@ -25,6 +25,8 @@ dur(s) | outcome | self-report fit | adjustment.
 | 1707/1708 jonny-lite | review | haiku | 78.5k | 20 | 43 | found 1 nit (missing title attr) | right | haiku confirmed for conformance again |
 | Jonny design: Sessions cosmetic cleanup | design | opus | 75.0k | 11 | 145 | BLESSED | right | briefed before user clarified intent; cosmetic spec (slug decode, naming, --notice-wash) still reusable |
 | Jonny design: threaded subagent reader | design | opus | 64.2k | 6 | 121 | BLESSED | right | opus right; nailed the reading model + a complete Rust backend contract a cheaper model would under-spec |
+| Cleo: agent-memory landscape research | research | opus | 31.8k | 13 | 113 | BLESSED | right | honest novelty read; landscape table + steal-list + sources |
+| Jonny design: living-memory epic (6 surfaces) | design | opus | 75.5k | 18 | 175 | BLESSED | right | hit the hard constraint — ZERO new primitives across 6 surfaces, both themes via tokens |
 
 ## Learnings → routing adjustments
 
