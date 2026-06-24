@@ -55,6 +55,10 @@ const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : '
  *  reached from the nav rail. */
 type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
 
+/** One entry in the global back/forward trail (TIN-1705): a destination view
+ *  plus, in the workspace, the focused panel's active document (null = Search). */
+type NavLoc = { view: AppView; doc: string | null }
+
 // ── Tauri fs helpers ──────────────────────────────────────────────────────────
 
 type TauriReadTextFile = (path: string) => Promise<string>
@@ -367,6 +371,46 @@ function loadLayout(): PersistedLayout {
   } catch {
     return fallback
   }
+}
+
+// ── Global history arrows (TIN-1705) ──────────────────────────────────────────
+
+/** A single back/forward chevron for the top bar. Calm and quiet; disabled (and
+ *  unclickable) at the ends of the trail. */
+function HistoryArrow({
+  dir, enabled, onClick, title,
+}: { dir: 'back' | 'forward'; enabled: boolean; onClick: () => void; title: string }) {
+  return (
+    <button
+      onClick={enabled ? onClick : undefined}
+      disabled={!enabled}
+      aria-label={title}
+      title={title}
+      style={{
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 26,
+        height: 26,
+        background: 'transparent',
+        border: 'none',
+        borderRadius: radius.sm,
+        cursor: enabled ? 'pointer' : 'default',
+        color: enabled ? color.inkSoft : color.inkFaint,
+        opacity: enabled ? 1 : 0.4,
+        transition: 'all 0.1s ease',
+      }}
+      onMouseEnter={(e) => { if (enabled) { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.ink } }}
+      onMouseLeave={(e) => { if (enabled) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkSoft } }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        {dir === 'back'
+          ? <polyline points="10,3 5,8 10,13" />
+          : <polyline points="6,3 11,8 6,13" />}
+      </svg>
+    </button>
+  )
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -876,6 +920,76 @@ export default function Home() {
   useEffect(() => { leftPanelRef.current = leftPanel }, [leftPanel])
   useEffect(() => { rightPanelRef.current = rightPanel }, [rightPanel])
 
+  // ── Global history navigation (TIN-1705) ──
+  // A single back/forward trail across the whole app, VS Code style: each visited
+  // location is a destination (a full view) plus, in the workspace, the focused
+  // panel's active document. ⌘[ / ⌘] (and the top-bar arrows) retrace it.
+
+  // The location the focused panel currently shows: in the workspace it's the
+  // focused side's active document (null = Search); other views are the location.
+  const focusedActiveTab =
+    (focusedSide === 'right' && rightOpen ? rightPanel : leftPanel).activeTabId
+
+  const navHistoryRef = useRef<{ stack: NavLoc[]; index: number }>({ stack: [], index: -1 })
+  // Set while a back/forward is being applied so the recording effect doesn't
+  // capture the programmatic navigation as a new location.
+  const navApplyingRef = useRef(false)
+  const [canBack, setCanBack] = useState(false)
+  const [canForward, setCanForward] = useState(false)
+
+  // Apply a recorded location: switch the view and, in the workspace, re-select
+  // the focused side's document (or Search). Suppresses re-recording.
+  const applyNavLoc = useCallback((loc: NavLoc) => {
+    navApplyingRef.current = true
+    setActiveView(loc.view)
+    if (loc.view === 'workspace') {
+      const side = focusedSideRef.current
+      if (loc.doc) openInSide(loc.doc, side)
+      else selectSearch(side)
+    }
+  }, [openInSide, selectSearch])
+
+  // Record each new location as it's reached (dedupe consecutive duplicates,
+  // truncate any forward trail). While applying a back/forward, wait until the
+  // state settles onto the target, then resume recording.
+  useEffect(() => {
+    const loc: NavLoc = { view: activeView, doc: activeView === 'workspace' ? focusedActiveTab : null }
+    const h = navHistoryRef.current
+    if (navApplyingRef.current) {
+      const target = h.stack[h.index]
+      if (target && target.view === loc.view && target.doc === loc.doc) {
+        navApplyingRef.current = false
+      }
+      return
+    }
+    const current = h.stack[h.index]
+    if (current && current.view === loc.view && current.doc === loc.doc) return
+    const stack = h.stack.slice(0, h.index + 1)
+    stack.push(loc)
+    h.stack = stack
+    h.index = stack.length - 1
+    setCanBack(h.index > 0)
+    setCanForward(false)
+  }, [activeView, focusedActiveTab])
+
+  const goBack = useCallback(() => {
+    const h = navHistoryRef.current
+    if (h.index <= 0) return
+    h.index -= 1
+    setCanBack(h.index > 0)
+    setCanForward(h.index < h.stack.length - 1)
+    applyNavLoc(h.stack[h.index])
+  }, [applyNavLoc])
+
+  const goForward = useCallback(() => {
+    const h = navHistoryRef.current
+    if (h.index >= h.stack.length - 1) return
+    h.index += 1
+    setCanBack(h.index > 0)
+    setCanForward(h.index < h.stack.length - 1)
+    applyNavLoc(h.stack[h.index])
+  }, [applyNavLoc])
+
   // ── Keyboard shortcuts ──
 
   // Load the Diff tab's working directory from settings (first agent's cwd).
@@ -907,6 +1021,18 @@ export default function Home() {
       if (mod && e.key === '\\') {
         e.preventDefault()
         toggleRightPanel()
+        return
+      }
+      if (mod && e.key === '[') {
+        // Global history: step back through visited locations (TIN-1705).
+        e.preventDefault()
+        goBack()
+        return
+      }
+      if (mod && e.key === ']') {
+        // Global history: step forward.
+        e.preventDefault()
+        goForward()
         return
       }
       if (mod && e.key === 'f') {
@@ -980,7 +1106,7 @@ export default function Home() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [toggleRightPanel, selectSearch, closeDoc, cycleTab])
+  }, [toggleRightPanel, selectSearch, closeDoc, cycleTab, goBack, goForward])
 
   // The launcher hands a composed run to the terminal: slide it up, then spawn.
   const handleLaunch = useCallback((req: RunRequest) => {
@@ -1040,6 +1166,12 @@ export default function Home() {
           background: color.bgApp,
         }}
       >
+        {/* Global history — back / forward across every view (TIN-1705). */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: space[1], flexShrink: 0, marginLeft: `-${space[2]}px` }}>
+          <HistoryArrow dir="back" enabled={canBack} onClick={goBack} title="Back (⌘[)" />
+          <HistoryArrow dir="forward" enabled={canForward} onClick={goForward} title="Forward (⌘])" />
+        </div>
+
         <span
           style={{
             fontFamily: "'Fraunces', 'Georgia', serif",
