@@ -30,13 +30,13 @@ const AuditView = dynamic(() => import('@/components/AuditView'), { ssr: false }
 // out of the initial bundle and the static-export SSR pass.
 const GraphView = dynamic(() => import('@/components/GraphView'), { ssr: false })
 const ConsistencyView = dynamic(() => import('@/components/ConsistencyView'), { ssr: false })
+const ChangesView = dynamic(() => import('@/components/ChangesView'), { ssr: false })
 import { color, radius, space, font, shadow } from '@/lib/tokens'
 import {
   MemorySearchResult,
   OpenDoc,
   PanelSide,
   PanelState,
-  PanelTab,
   LegacyPanelState,
   LoadedFile,
 } from '@/lib/types'
@@ -53,7 +53,7 @@ const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : '
 
 /** The app's top-level destinations — the workspace, or one of the full views
  *  reached from the nav rail. */
-type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts'
+type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
 
 // ── Tauri fs helpers ──────────────────────────────────────────────────────────
 
@@ -336,11 +336,10 @@ function migratePanel(raw: unknown): PanelState {
     return { tabs, activeTabId }
   }
 
-  // Legacy shape → migrate.
+  // Legacy shape → migrate (the old per-doc surface is dropped).
   const legacy = raw as Partial<LegacyPanelState>
   if (legacy.activePath) {
-    const surface: PanelTab = legacy.activeTab ?? 'content'
-    return { tabs: [{ path: legacy.activePath, surface }], activeTabId: legacy.activePath }
+    return { tabs: [{ path: legacy.activePath }], activeTabId: legacy.activePath }
   }
   return emptyPanel()
 }
@@ -404,7 +403,9 @@ export default function Home() {
   const [toast, setToast] = useState<{ message: string; path: string } | null>(null)
   // Working directory the Diff tab inspects — defaults to the first registered
   // agent's cwd from settings (the launcher updates this when a session starts).
-  const [activeWorkingDir, setActiveWorkingDir] = useState('')
+  // Recorded on launch so it lands in recent dirs (the Changes view seeds from
+  // there); the workspace itself no longer needs the value.
+  const [, setActiveWorkingDir] = useState('')
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // The full-view destinations live behind one `activeView` (the nav rail makes
@@ -663,7 +664,7 @@ export default function Home() {
         return { ...prev, activeTabId: filePath }
       }
       return {
-        tabs: [...prev.tabs, { path: filePath, surface: 'content' }],
+        tabs: [...prev.tabs, { path: filePath }],
         activeTabId: filePath,
       }
     })
@@ -698,18 +699,6 @@ export default function Home() {
         activeTabId = neighbour?.path ?? null
       }
       return { tabs, activeTabId }
-    })
-  }, [])
-
-  // Set the active document tab's surface (Content / Links / Diff) in a panel.
-  const setSurface = useCallback((side: PanelSide, surface: PanelTab) => {
-    const setter = side === 'left' ? setLeftPanel : setRightPanel
-    setter((prev) => {
-      if (prev.activeTabId === null) return prev
-      return {
-        ...prev,
-        tabs: prev.tabs.map((t) => (t.path === prev.activeTabId ? { ...t, surface } : t)),
-      }
     })
   }, [])
 
@@ -862,7 +851,7 @@ export default function Home() {
         const last = lastOpenedPathRef.current ?? leftPanel.activeTabId
         if (last) {
           loadFile(last)
-          return { tabs: [{ path: last, surface: 'content' }], activeTabId: last }
+          return { tabs: [{ path: last }], activeTabId: last }
         }
         return prev
       })
@@ -949,17 +938,9 @@ export default function Home() {
         return
       }
       if (mod && e.key === 'd') {
+        // Open the Changes view (working-directory diffs).
         e.preventDefault()
-        // Show the diff alongside the file: open the right panel and put its
-        // active document tab on the Diff surface.
-        setRightOpen(true)
-        setRightPanel((prev) => {
-          if (prev.activeTabId === null) return prev
-          return {
-            ...prev,
-            tabs: prev.tabs.map((t) => (t.path === prev.activeTabId ? { ...t, surface: 'diff' } : t)),
-          }
-        })
+        setActiveView((v) => (v === 'changes' ? 'workspace' : 'changes'))
         return
       }
       if (mod && (e.key === 'r' || e.key === 'R')) {
@@ -1120,16 +1101,13 @@ export default function Home() {
         >
           <WorkspacePanel
             side="left"
-            workingDir={activeWorkingDir}
             tabs={leftPanel.tabs}
             activeTabId={leftPanel.activeTabId}
             onSelectSearch={() => selectSearch('left')}
             onSelectDoc={(p) => selectDoc('left', p)}
             onCloseDoc={(p) => closeDoc('left', p)}
             onAddDoc={() => selectSearch('left')}
-            onSelectSurface={(s) => setSurface('left', s)}
             activePath={leftActiveDoc?.path ?? null}
-            activeSurface={leftActiveDoc?.surface ?? 'content'}
             loaded={leftLoaded}
             loadedByPath={lookupLoaded}
             searchQuery={searchQuery}
@@ -1175,18 +1153,15 @@ export default function Home() {
         >
           <WorkspacePanel
             side="right"
-            workingDir={activeWorkingDir}
             tabs={rightPanel.tabs}
             activeTabId={rightPanel.activeTabId}
             onSelectSearch={() => selectSearch('right')}
             onSelectDoc={(p) => selectDoc('right', p)}
             onCloseDoc={(p) => closeDoc('right', p)}
             onAddDoc={() => selectSearch('right')}
-            onSelectSurface={(s) => setSurface('right', s)}
             showClose
             onClose={closeRightPanel}
             activePath={rightActiveDoc?.path ?? null}
-            activeSurface={rightActiveDoc?.surface ?? 'content'}
             loaded={rightLoaded}
             loadedByPath={lookupLoaded}
             searchQuery={searchQuery}
@@ -1237,6 +1212,9 @@ export default function Home() {
         )}
         {activeView === 'transcripts' && (
           <TranscriptBrowser onClose={() => setActiveView('workspace')} />
+        )}
+        {activeView === 'changes' && (
+          <ChangesView onClose={() => setActiveView('workspace')} />
         )}
       </div>
 

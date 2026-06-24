@@ -24,8 +24,10 @@ them, the rail is right there.
 
 The **top bar** is just your verbs: **Split**, **+ New**, and **Launch**.
 
-Below the top bar each panel has a small **tab row**: **Content** (the editor or
-search), **Links**, and **Diff**.
+Below the top bar each panel has a **tab row** of open documents (and the pinned
+**Search** tab). A note shows its content, with its connections in a quiet
+**Linked** footer at the bottom. Reviewing an agent's changes is its own place
+now, the **Changes** view (see section 5), not a tab on a document.
 
 ---
 
@@ -73,20 +75,20 @@ compare, or a prompt and its context.
 
 ---
 
-## 5. Reviewing changes — the Diff tab
+## 5. Reviewing changes — the Changes view
 
-When an agent has been working in a directory, you can review what changed without
-leaving Studio.
+When an agent has been working in a directory, review what changed without leaving
+Studio. Changes is its own destination (the **Changes** rail item, or **⌘D**), not
+tied to any note, because a diff is about a repository, not a document.
 
-- Press **⌘D** to open the **Diff** tab in the side panel (so the file you are
-  reading stays visible next to it).
-- You get a `git status` summary, a file list with **M / A / D** markers, and a
-  click-to-expand diff for each file. Additions and removals are shown calmly
-  (forest and heather), never as red alarms. It is read-only — staging and
-  committing stay in the terminal.
-- The working directory comes from your configured agent. If none is set yet, the
-  Diff tab will tell you it could not read git status; set an agent's working
-  directory in Settings.
+- Because you often work across several projects at once, Changes carries a **tab
+  per working directory**, seeded from your configured agents and recent launch
+  directories. Use **+ Directory** to add another; the ✕ on a tab removes it.
+- For the selected directory you get a `git status` summary, a file list with
+  **M / A / D** markers, and a click-to-expand diff for each file. Additions and
+  removals are shown calmly (forest and heather), never as red alarms. It is
+  read-only, staging and committing stay in the terminal.
+- If a directory has no git status, Changes says so calmly; pick or add another.
 
 ---
 
@@ -248,7 +250,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘⇧N` | Quick capture |
 | `⌘\` | Toggle the second panel |
 | `⌘`-click | Open in the other panel |
-| `⌘D` | Diff tab |
+| `⌘D` | Changes |
 | `⌘T` | Transcripts |
 | `⌘G` | Knowledge graph |
 | `⌘O` | Import Markdown files |

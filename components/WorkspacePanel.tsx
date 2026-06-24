@@ -3,10 +3,9 @@
 import { useRef, useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
-import { MemorySearchResult, OpenDoc, PanelSide, PanelTab, LoadedFile } from '@/lib/types'
+import { MemorySearchResult, OpenDoc, PanelSide, LoadedFile } from '@/lib/types'
 import { fileLinks, type FileLinks, type LinkedFile, type TicketRef } from '@/lib/links'
 import TypeChip from '@/components/TypeChip'
-import DiffView from '@/components/DiffView'
 
 const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
 
@@ -205,10 +204,14 @@ function LinksTab({
   path,
   onOpenResult,
   onOpenTicket,
+  footer = false,
 }: {
   path: string
   onOpenResult: (result: MemorySearchResult, e: React.MouseEvent) => void
   onOpenTicket: (id: string) => void
+  /** Footer mode: render beneath the note, hidden entirely while loading,
+   *  on error, or when the note has no links (no noisy empty state). */
+  footer?: boolean
 }) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [links, setLinks] = useState<FileLinks | null>(null)
@@ -240,6 +243,7 @@ function LinksTab({
   }
 
   if (status === 'loading') {
+    if (footer) return null
     return (
       <div style={column}>
         <div style={{ ...typeRamp.body, textAlign: 'center', color: color.inkSoft, paddingTop: 60 }}>
@@ -250,6 +254,7 @@ function LinksTab({
   }
 
   if (status === 'error' || !links) {
+    if (footer) return null
     return (
       <div style={column}>
         <div
@@ -271,11 +276,22 @@ function LinksTab({
   const isEmpty =
     links.tickets.length === 0 && links.outbound.length === 0 && links.backlinks.length === 0
   if (isEmpty) {
+    if (footer) return null
     return (
       <CalmEmpty>
         Nothing links here yet. Mention a note with [[ or a ticket like TIN-1639, and it shows up here.
       </CalmEmpty>
     )
+  }
+
+  // Footer: a calm "Linked" section under the note, with a top divider.
+  const footerColumn = {
+    maxWidth: 720,
+    width: '100%',
+    margin: '0 auto',
+    padding: `${space[6]}px 40px 60px`,
+    borderTop: `1px solid ${color.hairSoft}`,
+    boxSizing: 'border-box' as const,
   }
 
   // Present sections in order, each carrying its own top margin for the section
@@ -341,6 +357,15 @@ function LinksTab({
     )
   }
 
+  if (footer) {
+    return (
+      <div style={footerColumn}>
+        <div style={{ ...typeRamp.label, color: color.inkFaint, marginBottom: space[4] }}>Linked</div>
+        {sections}
+      </div>
+    )
+  }
+
   return <div style={column}>{sections}</div>
 }
 
@@ -391,13 +416,21 @@ function DocTab({
         flexShrink: 0,
         display: 'flex',
         alignItems: 'center',
+        alignSelf: 'flex-end',
         gap: space[1],
-        height: 28,
+        height: 30,
         padding: `0 ${space[3]}px`,
-        borderRadius: radius.md,
+        // Folder tab: the active tab takes the body's raised surface and fuses
+        // with it (forest top seam, hairline sides, square bottom, -1 overlap),
+        // so it reads as a tab belonging to the panel below, not a flat label.
+        background: active ? color.bgRaised : 'transparent',
+        border: active ? `1px solid ${color.hair}` : '1px solid transparent',
+        borderBottom: 'none',
+        borderTop: active ? `2px solid ${color.forest}` : '2px solid transparent',
+        borderTopLeftRadius: radius.md,
+        borderTopRightRadius: radius.md,
+        marginBottom: -1,
         cursor: 'pointer',
-        background: 'transparent',
-        borderBottom: active ? `2px solid ${color.forest}` : '2px solid transparent',
         color: active ? color.ink : color.inkSoft,
         fontFamily: font.sans,
         fontSize: 12,
@@ -608,60 +641,6 @@ function DocStrip({
   )
 }
 
-// ── Surface strip (Content / Links / Diff) — scoped to the active document ───
-
-const SURFACES: { id: PanelTab; label: string }[] = [
-  { id: 'content', label: 'Content' },
-  { id: 'links', label: 'Links' },
-  { id: 'diff', label: 'Diff' },
-]
-
-function SurfaceStrip({
-  surface,
-  onSelect,
-}: {
-  surface: PanelTab
-  onSelect: (s: PanelTab) => void
-}) {
-  return (
-    <div
-      style={{
-        height: 36,
-        flexShrink: 0,
-        display: 'flex',
-        alignItems: 'stretch',
-        gap: space[1],
-        padding: `0 ${space[4]}px`,
-        borderBottom: `1px solid ${color.hairSoft}`,
-      }}
-    >
-      {SURFACES.map((t) => {
-        const isActive = surface === t.id
-        return (
-          <button
-            key={t.id}
-            onClick={() => onSelect(t.id)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              borderBottom: isActive ? `2px solid ${color.forest}` : '2px solid transparent',
-              color: isActive ? color.forest : color.inkSoft,
-              fontSize: 12,
-              fontWeight: isActive ? 600 : 400,
-              fontFamily: font.sans,
-              cursor: 'pointer',
-              padding: '0 6px',
-              marginBottom: -1,
-            }}
-          >
-            {t.label}
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
 // ── Props ───────────────────────────────────────────────────────────────────
 
 export interface WorkspacePanelProps {
@@ -679,8 +658,6 @@ export interface WorkspacePanelProps {
   onCloseDoc: (path: string) => void
   /** The + affordance: go find a document (select Search + focus the field). */
   onAddDoc: () => void
-  /** Change the active document's surface (Content / Links / Diff). */
-  onSelectSurface: (surface: PanelTab) => void
 
   /** Right panel shows a close affordance in its tab strip. */
   showClose?: boolean
@@ -688,7 +665,6 @@ export interface WorkspacePanelProps {
 
   // What the active document tab is showing (null when Search is active)
   activePath: string | null
-  activeSurface: PanelTab
   loaded: LoadedFile | null
   /** Look up any open doc's loaded contents (for tab labels). */
   loadedByPath: (path: string) => LoadedFile | null
@@ -717,13 +693,6 @@ export interface WorkspacePanelProps {
    *  in this panel. Used by the editor's rendered wiki-links (TIN-1639). */
   onOpenWikiLink: (slug: string) => void
 
-  /**
-   * Working directory for the Diff tab. The orchestrator (app/page.tsx) passes
-   * this from settings / agent cwd. Defaults to empty string (DiffView will
-   * surface "not-a-repo" in that case).
-   */
-  workingDir?: string
-
   // Editor
   onEditorChange: (markdown: string) => void
   onEditorSave: () => void
@@ -739,11 +708,9 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
     onSelectDoc,
     onCloseDoc,
     onAddDoc,
-    onSelectSurface,
     showClose = false,
     onClose,
     activePath,
-    activeSurface,
     loaded,
     loadedByPath,
     searchQuery,
@@ -762,7 +729,6 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
     onOpenWikiLink,
     onEditorChange,
     onEditorSave,
-    workingDir = '',
   } = props
 
   const fallbackSearchRef = useRef<HTMLInputElement>(null)
@@ -794,12 +760,10 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
         wordCount={inEditor && loaded?.content ? loaded.content.trim().split(/\s+/).filter(Boolean).length : null}
       />
 
-      {/* Surface strip renders only when a document tab is active. */}
-      {inEditor && <SurfaceStrip surface={activeSurface} onSelect={onSelectSurface} />}
-
-      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {/* Search view when no doc is active, else the active document's surface. */}
-        {!inEditor && (
+      {/* Body sits on the raised surface so the active doc tab fuses with it. */}
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', background: color.bgRaised }}>
+        {/* Search when no doc is active; otherwise the note plus its links footer. */}
+        {!inEditor ? (
           <SearchView
             activePath={activePath}
             searchQuery={searchQuery}
@@ -815,29 +779,25 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
             searchRef={searchRef}
             onOpenResult={onOpenResult}
           />
-        )}
-
-        {inEditor && activeSurface === 'content' && (
-          <EditorView
-            activePath={activePath}
-            loaded={loaded}
-            onEditorChange={onEditorChange}
-            onEditorSave={onEditorSave}
-            onOpenWikiLink={onOpenWikiLink}
-            onOpenTicket={onOpenTicket}
-          />
-        )}
-
-        {inEditor && activeSurface === 'links' && activePath && (
-          <LinksTab
-            path={activePath}
-            onOpenResult={onOpenResult}
-            onOpenTicket={onOpenTicket}
-          />
-        )}
-
-        {inEditor && activeSurface === 'diff' && (
-          <DiffView workingDir={workingDir} />
+        ) : (
+          <>
+            <EditorView
+              activePath={activePath}
+              loaded={loaded}
+              onEditorChange={onEditorChange}
+              onEditorSave={onEditorSave}
+              onOpenWikiLink={onOpenWikiLink}
+              onOpenTicket={onOpenTicket}
+            />
+            {activePath && (
+              <LinksTab
+                path={activePath}
+                onOpenResult={onOpenResult}
+                onOpenTicket={onOpenTicket}
+                footer
+              />
+            )}
+          </>
         )}
       </div>
     </section>
