@@ -156,6 +156,12 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
       <div
         style={{
           height: isOpen ? '280px' : '0',
+          // Mounted as a row sibling of the rail + main column, so a closed panel
+          // must collapse its WIDTH too — otherwise its content min-width (the
+          // "Terminal" header) reserves a ~104px empty band on the right. When open
+          // it docks at its natural width; when closed it takes no space.
+          width: isOpen ? undefined : 0,
+          minWidth: 0,
           flexShrink: 0,
           overflow: 'hidden',
           transition: 'height 0.2s ease',

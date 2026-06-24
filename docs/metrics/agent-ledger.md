@@ -20,6 +20,7 @@ dur(s) | outcome | self-report fit | adjustment.
 | TIN-1633 launcher (north star) | build | opus | 108.6k | 61 | 565 | BLESSED (nits) | right | opus right for the centerpiece + live spawn |
 | 1633 jonny-lite | review | sonnet | 35.6k | 3 | 54 | found nits | right | (haiku would suffice) |
 | 1636 jonny-lite | review | haiku | 31.7k | 3 | 14 | BLESSED | right | haiku ideal |
+| Jonny design: nav chrome (1707/1708/1709) | design | opus | 66.7k | 12 | 176 | BLESSED | right | opus right; caught a doc-rule reversal + terminal token gap a cheaper model would miss |
 
 ## Learnings → routing adjustments
 
