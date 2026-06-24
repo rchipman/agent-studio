@@ -1781,3 +1781,292 @@ agree.") is the loud one, and the worst case (a setup gap) is the one with a nam
 copy-pasteable fix. No red, no `⚠`, no `✗`, anywhere.
 
 SELF-REPORT: confidence: high; model-fit: right.
+
+---
+
+## Navigation redesign (proposal)
+
+The highest-leverage pass on the app so far, and the most restraint-demanding. Every
+surface below already exists and is well-designed in isolation. The failure is not in
+any one surface; it is in the *connective tissue* between them. The app has grown six
+destinations and never grew a way to see them. This section evolves the navigation —
+not the surfaces — entirely inside the existing token set and primitives. No new mood,
+no component library (see the verdict below).
+
+### Diagnosis (confirmed from the code)
+
+Four real problems, in priority order.
+
+**1. The best features are invisible.** Graph, Frontmatter audit, Consistency audit
+are reachable *only* by `⌘G` / `⌘⇧A` / `⌘⇧C`. There is no on-screen affordance for any
+of them. The top bar (`app/page.tsx` lines 1104-1192) exposes exactly five controls:
+`Split`, `+ New`, `Launch`, a transcripts icon, a settings icon. So of the app's eight
+real destinations — Search, Editor, Launcher, Transcripts, Graph, Frontmatter, Consistency,
+Diff — **three are completely undiscoverable** and one (Diff) hides as a per-doc surface
+tab. A first-run user cannot find the knowledge graph that is arguably the product's
+signature view. This violates house rule 7 ("shortcuts are accelerators, never the only
+door") for three whole surfaces.
+
+**2. A pile of unlabeled chords with no home.** The keydown handler binds fourteen
+shortcuts. `⌘G`, `⌘⇧A`, `⌘⇧C`, `⌘T`, `⌘R`, `⌘O`, `⌘D` have no visible glyph, label, or
+list anywhere in the UI. The §B shortcut map and the per-surface specs *say* "every
+shortcut is also a visible affordance," but the implementation never built the
+affordances for the views added after the top bar was designed. There is also no single
+place a user can *see* the shortcut vocabulary — the command palette (`⌘K`) is a file
+opener, not an action launcher.
+
+**3. The top bar is doing two unrelated jobs at once.** It is simultaneously the app's
+global chrome (wordmark, Launch, Settings) *and* the active document's context strip
+(`← Agent Studio` back affordance, centred filename, word count / `Saving…`). The
+wordmark mutates into a back button (line 1096) depending on editor state. This is why
+it cannot also host view navigation: it is already overloaded, and adding five more
+view buttons would turn the calmest strip in the app into busy SaaS chrome — exactly
+what we must not do.
+
+**4. Full views are dead-ends.** GraphView, AuditView, ConsistencyView, TranscriptBrowser
+each hand-roll an *identical* 44px top bar whose only control is a lone `← Agent Studio`
+button (confirmed: no shared `Shell` exists yet; the pattern is copy-pasted four times).
+Once you are in the Graph you cannot move to the Frontmatter audit, or to Transcripts,
+or glance at Consistency — you must go *back* to the workspace and fire another invisible
+chord. The views are islands. There is no answer to "where am I, and where can I go."
+
+The two-tier tab model (DocStrip = Search + docs + `+`; SurfaceStrip = Content / Links /
+Diff) is, by contrast, **correct and should be kept** (see the tab-model decision). It is
+not a problem; it is the one part of the navigation that already reads cleanly.
+
+### The decision: a persistent left nav rail + a shared full-view Shell
+
+The mental model the app is missing is **"the workspace is home; the views are rooms off
+a single quiet hallway."** We give the app one persistent piece of primary navigation —
+a narrow **Nav rail** down the far left — and one shared chrome for the rooms — the
+**Shell** the consistency spec already assumes exists. Together they answer "where am I"
+(the rail's active item) and "where can I go" (the rail is always there, in every view).
+
+I considered three IAs and rejected two:
+
+- **Evolved top bar** (add view buttons to the existing strip) — *rejected.* The top bar
+  is already overloaded (problem 3) and horizontal space is the scarcest, calmest real
+  estate in the app; eight destinations across the top reads as a toolbar, not a calm
+  room. House rule 5.
+- **A "views" switcher / segmented control** (a dropdown or tab set of views) — *rejected.*
+  It hides destinations behind a click (re-creating problem 1 in miniature) and gives no
+  persistent sense of place inside a view. A switcher tells you where you *can* go only
+  while it's open; a rail tells you where you *are*, always.
+- **A persistent left nav rail** — *chosen.* It is always visible, costs ~52px of the
+  calmest axis (vertical-left, where the eye rests least), gives every destination a
+  permanent labelled home, shows the active room at a glance, and — crucially — persists
+  *inside* the full views, which is what turns the dead-end islands into rooms. It is the
+  one piece of chrome that scales to N destinations without getting louder, because it
+  grows *down*, not *across*.
+
+The rail is calm by construction: forest-on-cream, icon + faint label, one active item in
+forest, everything else `--ink-soft`. It is closer to the quiet left edge of Things or
+iA Writer than to a Slack/Linear sidebar — no counts, no badges, no nesting, no section
+headers. Eight items, fixed, forever.
+
+### Named tokens (all existing — nothing new)
+
+| Element | Tokens |
+| --- | --- |
+| Rail surface | `--bg-app` (same as top bar — the rail is chrome, not a raised panel), `--hair` right border |
+| Rail item, resting | icon + label `--ink-soft`, `--t-micro` label, transparent fill |
+| Rail item, hover | `--bg-field-strong` fill, `--ink` text, `radius.md`, `0.1s ease` (matches `ResultCard` / `DocTab`) |
+| Rail item, active | `--forest` icon + label, `--forest-wash` fill, `2px --forest` left rule (the established selected-row treatment, rotated to the rail) |
+| Rail group divider | `--hair` 1px rule, `space[2]` margin |
+| Shell top bar | `height: 44`, `--bg-app`, `--hair` bottom border (verbatim today's full-view bar) |
+| Shell title (centre) | `--t-title` `--ink` (e.g. `Graph`, `Frontmatter`) |
+| Shell context slot (right) | `--t-meta` `--ink-soft` (word count, audit tally, `3 worth a look.`) |
+| Rail width | `52` collapsed (icon + micro-label), no expanded state in phase 1 |
+
+Two literals only — `52` (rail width) and the existing `44` (bar height) — both
+chrome constants in the established family (`leftWidth`, the 36px strips, the 44px bar).
+
+### The layout (ASCII mockup)
+
+The rail is the *outermost* column; the top bar and panels live to its right, so the
+rail persists identically across the workspace and every full view. The per-document
+context (filename, word count, `Saving…`) moves *out* of the global top bar and *into*
+the panel's own DocStrip region, where it belongs — fixing problem 3.
+
+```
+┌────┬──────────────────────────────────────────────────────────────┐
+│ Ag │  Agent Studio                         Split   + New   Launch  │ ← top bar (global chrome only)
+│    ├──────────────────────────────────────────────────────────────┤
+│ ⌕  │  ⌕ Search │ eas-build-gate │ launcher-spec ✕ │ +    1,204 w   │ ← DocStrip (+ doc context, right-aligned)
+│ Srch  ├────────────────────────────────────────────────────────────┤
+│    │  Content   Links   Diff                                       │ ← SurfaceStrip (per active doc)
+│ ▦  ├──────────────────────────────────────────────────────────────┤
+│ Grph │                                                              │
+│    │                  … document body / search …                   │
+│ ◇  │                                                              │
+│ Frnt │                                                              │
+│    │                                                              │
+│ ≈  │                                                              │
+│ Cons │                                                              │
+│ ───  │                                                              │
+│ ▸  │                                                              │
+│ Tran │                                                              │
+│    │                                                              │
+│ ⚙  │                                                              │
+│ Set  │                                                              │
+└────┴──────────────────────────────────────────────────────────────┘
+  ▲ persistent nav rail (52px)              ▲ workspace (unchanged two-panel split)
+```
+
+And the same rail inside a full view (the Graph), so it is no longer a dead-end — note
+the rail is identical and the Graph is simply the active room:
+
+```
+┌────┬──────────────────────────────────────────────────────────────┐
+│ Ag │  ← Agent Studio              Graph              Reset view     │ ← shared Shell top bar
+│    ├──────────────────────────────────────────────────────────────┤
+│ ⌕  │                                                              │
+│ ▦◀ │   [ feedback ] [ project ]  │  [ studio ] [ shared ]  Tickets │ ← Graph's own filter strip
+│ Grph │                          ◯───●                               │
+│ ◇  │                         ╱     ╲       ●──�─◇                   │
+│ Frnt │                       ●        ●────●                        │
+│ ≈  │                                                              │
+│ Cons │              … force-laid knowledge graph …                  │
+│ ▸  │                                                              │
+│ Tran │                                                              │
+│ ⚙  │   ───────────────── NOT YET LINKED ──────────────────         │
+│ Set  │   ● ● ● ● ●                                                   │
+└────┴──────────────────────────────────────────────────────────────┘
+   ▲ Graph rail item active (forest + wash + left rule); rail unchanged across rooms
+```
+
+### Rail contents, order, and grouping
+
+Eight items in three quiet groups, top to bottom. Order is by frequency and kinship,
+not alphabet.
+
+```
+  WORKSPACE        ⌕  Search        (= go home; selects the focused panel's Search tab)
+  ───────────
+  THE LIBRARY      ▦  Graph         ⌘G
+                   ◇  Frontmatter   ⌘⇧A
+                   ≈  Consistency   ⌘⇧C
+  ───────────
+  SESSIONS         ▸  Transcripts   ⌘T
+  ───────────  (pinned to the rail bottom:)
+                   ⚙  Settings      ⌘,
+```
+
+- **Search** is the home/return item. Clicking it = today's wordmark `goHome()`
+  (selects the focused panel's Search tab and focuses the field). It is the rail's
+  always-safe "take me back to my notes."
+- **The Library group** holds the three views that read *across* the whole memory base —
+  Graph, Frontmatter, Consistency. They already rhyme (all whole-library inspections;
+  Frontmatter and Consistency already share the `⌘⇧` "considered act" modifier). Grouping
+  them on the rail makes that kinship visible for the first time.
+- **Transcripts** is its own group — it is about *sessions*, not the library.
+- **Settings** pins to the rail bottom (the conventional, calm home for configuration),
+  separated by the same `--hair` divider.
+- **Launcher (`⌘R`)** deliberately stays a *top-bar primary button*, not a rail item. It
+  is the north star and the app's single most important verb (Run); it earns the loud,
+  forest-filled top-bar button and should not be demoted into the quiet rail row of
+  inspect-y destinations. Same reasoning keeps **+ New** and **Split** in the top bar:
+  they are *acts on your current work*, not *places you go*. The rail is for navigation
+  (rooms); the top bar keeps the three creative verbs (New, Launch, Split). This split —
+  **rail = destinations, top bar = verbs** — is the whole IA in one line.
+- **Diff** is *not* a rail item: it remains a per-document surface tab (`⌘D`), because a
+  diff is always *of the document you're looking at* — it is a face of a note, not a place.
+  This is already correct in the SurfaceStrip and we keep it.
+- **Quick capture (`⌘⇧N`)**, **Import (`⌘O`)**, **Command palette (`⌘K`)** stay
+  keyboard/affordance-driven as today (capture and palette are modal accelerators; import
+  has its drag-drop + `⌘O` door). They are *acts*, not rooms, so they do not take a rail
+  slot. Import gains its missing visible door as a Settings-adjacent affordance or a `⌘K`
+  entry (phase 2), satisfying rule 7 without crowding the rail.
+
+### The shared Shell (fixing the dead-ends)
+
+Extract the four hand-rolled full-view top bars into one `Shell` component (the
+consistency spec already references it as if it exists — this proposal makes it real).
+`Shell` renders: the persistent rail (left), a 44px top bar with `← Agent Studio` (left),
+a centred `--t-title` room name, and a right context slot. Every full view becomes
+`<Shell title="Graph" context={…}>{body}</Shell>`. Because the rail lives in the Shell
+and in the workspace alike, **moving between any two rooms is one click, from anywhere** —
+the islands become a hallway. `← Agent Studio` and `Esc` still return to the workspace
+(unchanged), but they are no longer the *only* way out.
+
+This is also a real de-duplication win: four copies of the same 44px bar collapse to one,
+and the workspace's overloaded top bar sheds its document-context job to the DocStrip.
+
+### Tab model: keep two tiers, unchanged
+
+The DocStrip / SurfaceStrip split is **right and stays**. The TIN-1672 spec already
+argued this correctly: document tabs answer *which note*, surface tabs answer *which face
+of that note* (Content / Links / Diff), and Search is the permanent leftmost document
+tab. Across the two-panel split each panel owns its own DocStrip + SurfaceStrip
+independently (already implemented). The only change here is additive: the per-document
+context that today sits in the *global* top bar (filename, `1,204 words` / `Saving…`)
+moves to the **right end of the active panel's DocStrip**, so it scopes to the panel it
+describes instead of being a single global readout that can only ever reflect one panel.
+This also frees the global top bar to be pure chrome. No new tier, no collapse — the
+two-tier model was never the problem; the *missing third axis (cross-view nav)* was.
+
+### Shortcut ↔ affordance mapping (every chord gets a visible door)
+
+| Shortcut | Destination / act | Visible affordance (new or existing) |
+| --- | --- | --- |
+| `⌘K` | Command palette | (palette is its own door; phase 2 adds an action-launcher mode listing all of the below) |
+| `⌘R` | Launcher | **Launch** button, top bar (exists) |
+| `⌘T` | Transcripts | **Transcripts** rail item (new) — replaces today's lone top-bar icon |
+| `⌘G` | Graph | **Graph** rail item (new — was invisible) |
+| `⌘⇧A` | Frontmatter audit | **Frontmatter** rail item (new — was invisible) |
+| `⌘⇧C` | Consistency audit | **Consistency** rail item (new — was invisible) |
+| `⌘,` | Settings | **Settings** rail item, pinned bottom (was a top-bar icon; moves to rail) |
+| `⌘\` | Split | **Split** button, top bar (exists) |
+| `⌘N` | New file | **+ New** button, top bar (exists) |
+| `⌘⇧N` | Quick capture | `⌘K` entry + (phase 2) `+ New` long-press / menu |
+| `⌘O` | Import | (phase 2) `⌘K` entry + Settings-adjacent affordance; drag-drop door exists |
+| `⌘D` | Diff | **Diff** surface tab (exists) |
+| `⌘F` | Focus search | **Search** rail item + Search doc tab (exists) |
+| `⌃Tab` | Cycle tabs | the DocStrip itself (exists) |
+| `Esc` | Dismiss top surface | (global, unchanged) |
+
+After phase 1, **every navigational destination has a visible home** and house rule 7 is
+satisfied for the whole app for the first time. The three remaining keyboard-only items
+(`⌘⇧N`, `⌘O`, `⌘K`) are *acts*, not rooms, and get their doors via the palette in phase 2.
+
+### Phased build plan
+
+**Phase 1 — the nav rail + view affordances (highest impact, smallest change).**
+The one change that fixes problems 1, 2, and most of 4. Add a `NavRail` component
+(~52px, the eight items above, all existing tokens) as the outermost column in
+`app/page.tsx`'s root flex, left of the top bar and panels. Wire each item to the state
+setter it already has (`setGraphOpen`, `setShowAudit`, `setConsistencyOpen`,
+`setShowTranscripts`, `setShowSettings`, `goHome`). The active item reflects which full
+view (if any) is open, else Search. **No backend, no new tokens, no surface redesign** —
+purely the missing affordance layer over existing wiring. Move the Settings + Transcripts
+icons out of the top bar into the rail in the same pass. Ship this alone and the app is
+already transformed: every feature is now findable.
+
+**Phase 2 — the shared Shell (fixes the remaining dead-end).** Extract the four
+hand-rolled full-view top bars into one `Shell` that *contains the rail*, so the rail
+persists inside Graph / Frontmatter / Consistency / Transcripts and moving room-to-room
+is one click. De-dupes four copies of the 44px bar. Also: move the per-document context
+(filename, word count, `Saving…`) from the global top bar to the active DocStrip's right
+end, making the global top bar pure chrome. Add the `⌘K` action-launcher mode (lists all
+destinations + capture + import + theme), giving the last three keyboard-only acts their
+visible door.
+
+**Phase 3 — polish (optional, only if it earns it).** A rail hover-expand to show full
+labels for first-run discoverability (default collapsed; never a stored toggle that adds
+state). A one-time `⌘K` "press ⌘K for anything" hint. Revisit only against real use — if
+the collapsed rail already reads, phase 3 is silence, which is the house's favourite
+state.
+
+The phase-1 recommendation is the whole point: **a 52px nav rail is a few hours of work,
+no new tokens, no backend, and it single-handedly makes the app's three best hidden
+features discoverable.** It is the smallest possible change with the largest possible
+return on "does this feel inevitable."
+
+---
+
+SELF-REPORT: confidence: high; model-fit: right (a real IA decision argued against two
+alternatives, held entirely within the existing token set and primitives with zero new
+mood, grounded in the actual code — the overloaded top bar, the four copy-pasted dead-end
+bars, the never-built view affordances — and resisting the SaaS-chrome instinct the brief
+warned against; a cheaper model would likely have reached for a component library, a busy
+top toolbar, or invented new tokens).

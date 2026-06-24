@@ -13,12 +13,16 @@ against the running app.
 ## 1. The workspace
 
 When you open Agent Studio you land in the **workspace**: a search field and your
-recent and matching memory files on the left, the markdown editor when a file is
-open, and a top bar across the top.
+recent and matching memory files, with the markdown editor when a file is open.
 
-The **top bar** holds, from left: the wordmark (click it to go back to search from
-the editor), the current filename, and on the right your action buttons —
-**Split**, **+ New**, **Launch**, a transcripts icon, and a settings gear.
+The **nav rail** down the far left is home base. It holds every place you can go,
+always visible, with the current one highlighted: **Search** (the workspace),
+**Graph**, **Fields** (the frontmatter audit), **Check** (the consistency audit),
+**Sessions** (transcripts), and **Settings** pinned at the bottom. Each also has
+a keyboard shortcut (see the table at the end), but you never have to remember
+them, the rail is right there.
+
+The **top bar** is just your verbs: **Split**, **+ New**, and **Launch**.
 
 Below the top bar each panel has a small **tab row**: **Content** (the editor or
 search), **Links**, and **Diff**.
