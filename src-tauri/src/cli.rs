@@ -41,6 +41,7 @@ use crate::continuity::{score_content, ScoreMemoryInput};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
 use crate::memory_audit::{content_hash, record_change, RecordMemoryChangeInput};
 use crate::memory_reads;
+use crate::salience;
 use crate::search::{build_index, init_db, search_core, Db, SearchInput};
 use crate::settings::default_memory_root;
 
@@ -90,6 +91,7 @@ pub fn maybe_run() {
         "supersede" => run_supersede(rest),
         "recall" => run_recall(rest),
         "check" => run_check(rest),
+        "cornerstones" => run_cornerstones(rest),
         _ => return, // not a headless command → fall through to the GUI
     };
 
@@ -568,6 +570,77 @@ pub fn run_check(rest: &[String]) -> Result<serde_json::Value, String> {
         "conflicts": score.conflicts,
         "degraded": score.degraded,
     }))
+}
+
+// ── cornerstones (TIN-1746) ──────────────────────────────────────────────────
+
+/// The `cornerstones` pipeline.  Computes salience for all notes (or one
+/// project), takes the top-k by salience, and prints a JSON array.
+///
+/// Usage: `cornerstones [--project <p>] [--k <n=12>] [--neglected]`
+///
+/// Default mode: top-k notes by salience, JSON array of:
+/// `[{ name, path, summary, salience, readCount, centrality }]`
+///
+/// `--neglected`: instead return notes with near-zero salience (never-read,
+/// low-centrality) — archive candidates.
+pub fn run_cornerstones(rest: &[String]) -> Result<serde_json::Value, String> {
+    let args = Args::parse(rest);
+    let project = args.get("project").filter(|p| !p.trim().is_empty());
+    let k: usize = args.get("k").and_then(|s| s.parse().ok()).unwrap_or(12);
+    let neglected = args.map.contains_key("neglected");
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    let mut entries = salience::salience(&db, project)?;
+
+    let items: Vec<serde_json::Value> = if neglected {
+        // --neglected: return notes with near-zero salience.
+        // Use a threshold of 0.05 so notes with only marginal link degree still
+        // get filtered in (they are not truly "corners" but are not orphans
+        // either). We take up to k results ordered ascending by salience (least
+        // salient first) so the worst candidates are surfaced first.
+        entries.retain(|e| e.salience < salience::NEGLECTED_THRESHOLD);
+        entries.sort_by(|a, b| {
+            a.salience
+                .partial_cmp(&b.salience)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        entries
+            .into_iter()
+            .take(k)
+            .map(|e| {
+                serde_json::json!({
+                    "name":        e.name,
+                    "path":        e.path,
+                    "summary":     e.summary,
+                    "salience":    e.salience,
+                    "readCount":   e.read_count,
+                    "centrality":  e.centrality,
+                })
+            })
+            .collect()
+    } else {
+        // Default: top-k by descending salience (already sorted in salience::compute_salience).
+        entries
+            .into_iter()
+            .take(k)
+            .map(|e| {
+                serde_json::json!({
+                    "name":        e.name,
+                    "path":        e.path,
+                    "summary":     e.summary,
+                    "salience":    e.salience,
+                    "readCount":   e.read_count,
+                    "centrality":  e.centrality,
+                })
+            })
+            .collect()
+    };
+
+    Ok(serde_json::Value::Array(items))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
