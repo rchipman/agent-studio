@@ -75,6 +75,16 @@ compare, or a prompt and its context.
 
 ---
 
+## 4b. Retracing your steps — back and forward
+
+Studio keeps a single trail of everywhere you have been, the way an editor does.
+The two arrows at the top left (or **⌘[** and **⌘]**) step back and forward through
+it: the notes you opened and the views you visited, in order. The arrows dim at
+the ends of the trail, and opening something new from the middle starts a fresh
+forward path from there.
+
+---
+
 ## 5. Reviewing changes — the Changes view
 
 When an agent has been working in a directory, review what changed without leaving
@@ -250,6 +260,8 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘⇧N` | Quick capture |
 | `⌘\` | Toggle the second panel |
 | `⌘`-click | Open in the other panel |
+| `⌘[` | Back (global history) |
+| `⌘]` | Forward (global history) |
 | `⌘D` | Changes |
 | `⌘T` | Transcripts |
 | `⌘G` | Knowledge graph |
