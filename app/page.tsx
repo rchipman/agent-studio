@@ -16,6 +16,7 @@ import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
 import FrontmatterForm from '@/components/FrontmatterForm'
+import Button from '@/components/Button'
 import { linkSuggest } from '@/lib/links'
 import { suggestFrontmatter, importMarkdown, type Suggestion } from '@/lib/frontmatter'
 import { initTheme } from '@/lib/theme'
@@ -275,10 +276,10 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
         )}
 
         <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end', marginTop: space[1] }}>
-          <button onClick={onClose} style={secondaryBtnStyle}>Cancel</button>
-          <button onClick={handleCreate} disabled={creating} style={primaryBtnStyle}>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={handleCreate} disabled={creating}>
             {creating ? 'Creating…' : 'Create file'}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -306,29 +307,6 @@ const labelStyle: React.CSSProperties = {
   color: color.inkSoft,
   textTransform: 'uppercase',
   letterSpacing: '0.04em',
-}
-
-const primaryBtnStyle: React.CSSProperties = {
-  background: color.forest,
-  color: '#fff',
-  border: 'none',
-  borderRadius: radius.md,
-  padding: '7px 16px',
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'pointer',
-  fontFamily: font.sans,
-}
-
-const secondaryBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  color: color.inkSoft,
-  border: `1px solid ${color.line}`,
-  borderRadius: radius.md,
-  padding: '7px 16px',
-  fontSize: 12,
-  cursor: 'pointer',
-  fontFamily: font.sans,
 }
 
 // ── Persisted layout ──────────────────────────────────────────────────────────
@@ -1116,26 +1094,12 @@ export default function Home() {
           >
             Split
           </button>
-          <button onClick={() => setShowNewModal(true)} title="New memory file (⌘N)" style={primaryBtnStyle}>
+          <Button variant="primary" size="sm" onClick={() => setShowNewModal(true)} title="New memory file (⌘N)">
             + New
-          </button>
-          <button
-            onClick={() => setShowLauncher(true)}
-            title="Launch (⌘R)"
-            style={{
-              background: color.forest,
-              color: color.onAccent,
-              border: 'none',
-              borderRadius: radius.md,
-              padding: '4px 12px',
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: 'pointer',
-              fontFamily: font.sans,
-            }}
-          >
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => setShowLauncher(true)} title="Launch (⌘R)">
             Launch
-          </button>
+          </Button>
         </div>
       </header>
 

@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { color, space, radius, font, shadow, type } from '@/lib/tokens'
+import Button from '@/components/Button'
 import { getThemePref, setThemePref, type ThemePref } from '@/lib/theme'
 import {
   getSettings,
@@ -315,13 +316,14 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChoose={() => chooseFolder('transcriptsRoot', settings.transcriptsRoot)}
               />
               <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[3] }}>
-                <button
+                <Button
+                  variant="primary"
+                  size="sm"
                   onClick={manualReindex}
                   disabled={reindex.kind === 'rebuilding'}
-                  style={smallPrimaryBtnStyle}
                 >
                   {reindex.kind === 'rebuilding' ? 'Reindexing…' : 'Reindex now'}
-                </button>
+                </Button>
                 <span style={{ ...type.meta, color: color.inkFaint }}>
                   Rebuild the search index to pick up files added outside Studio.
                 </span>
@@ -355,14 +357,9 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                     fontFamily: font.mono,
                   }}
                 />
-                <button
-                  onClick={toggleReveal}
-                  style={textBtnStyle}
-                  onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-                  onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
-                >
+                <Button variant="tertiary" padding="none" onClick={toggleReveal}>
                   {revealed ? 'Hide' : 'Reveal'}
-                </button>
+                </Button>
               </div>
               <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[2] }}>
                 {keyDraft !== null
@@ -438,22 +435,12 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
             </div>
           )}
           <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end' }}>
-            <button
-              onClick={onClose}
-              style={secondaryBtnStyle}
-              onMouseEnter={(e) => (e.currentTarget.style.background = color.bgFieldStrong)}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
+            <Button variant="secondary" onClick={onClose}>
               Cancel
-            </button>
-            <button
-              onClick={handleDone}
-              style={primaryBtnStyle}
-              onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.92')}
-              onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
-            >
+            </Button>
+            <Button variant="primary" onClick={handleDone}>
               Done
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -562,14 +549,14 @@ function RootField({
           style={{ flex: 1, ...fieldStyle, fontFamily: font.mono }}
           spellCheck={false}
         />
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={onChoose}
-          style={chooseBtnStyle}
-          onMouseEnter={(e) => (e.currentTarget.style.background = color.bgFieldStrong)}
-          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+          style={{ flexShrink: 0 }}
         >
           Choose…
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -595,17 +582,12 @@ function ReindexRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: space[4], marginTop: space[2] }}>
           <span style={{ ...type.body, color: color.inkSoft }}>Rebuild index now?</span>
           <span style={{ display: 'flex', gap: space[3], marginLeft: 'auto' }}>
-            <button
-              onClick={() => setState({ kind: 'stale' })}
-              style={textBtnStyle}
-              onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
-            >
+            <Button variant="tertiary" onClick={() => setState({ kind: 'stale' })}>
               Not now
-            </button>
-            <button onClick={onRebuild} style={smallPrimaryBtnStyle}>
+            </Button>
+            <Button variant="primary" size="sm" onClick={onRebuild}>
               Rebuild
-            </button>
+            </Button>
           </span>
         </div>
       </div>
@@ -632,12 +614,15 @@ function ReindexRow({
   return (
     <div style={reindexNoticeStyle}>
       <span style={{ ...type.body, color: color.notice }}>Index may be out of date.</span>
-      <button
+      <Button
+        variant="tertiary"
+        tone="notice"
+        padding="none"
         onClick={onRebuild}
-        style={{ ...textBtnStyle, color: color.notice, marginLeft: space[3] }}
+        style={{ marginLeft: space[3] }}
       >
         Rebuild
-      </button>
+      </Button>
     </div>
   )
 }
@@ -673,14 +658,14 @@ function AgentRow({
           mono={false}
           onChange={(v) => onChange({ name: v })}
         />
-        <button
+        <Button
+          variant="tertiary"
+          padding="none"
           onClick={onRemove}
-          style={{ ...textBtnStyle, flexShrink: 0, alignSelf: 'flex-end', paddingBottom: space[2] }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
+          style={{ flexShrink: 0, alignSelf: 'flex-end' }}
         >
           Remove
-        </button>
+        </Button>
       </div>
       <AgentField
         label="Command"
@@ -751,55 +736,6 @@ const fieldStyle: React.CSSProperties = {
   fontSize: 13,
   outline: 'none',
   boxSizing: 'border-box',
-}
-
-const chooseBtnStyle: React.CSSProperties = {
-  ...type.body,
-  flexShrink: 0,
-  background: 'transparent',
-  color: color.inkSoft,
-  border: `1px solid ${color.line}`,
-  borderRadius: radius.md,
-  padding: `${space[2]}px ${space[4]}px`,
-  cursor: 'pointer',
-}
-
-const textBtnStyle: React.CSSProperties = {
-  ...type.body,
-  background: 'transparent',
-  border: 'none',
-  color: color.inkSoft,
-  cursor: 'pointer',
-  padding: 0,
-}
-
-const primaryBtnStyle: React.CSSProperties = {
-  background: color.forest,
-  color: '#fff',
-  border: 'none',
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontWeight: 600,
-  fontFamily: font.sans,
-  cursor: 'pointer',
-}
-
-const smallPrimaryBtnStyle: React.CSSProperties = {
-  ...primaryBtnStyle,
-  padding: `${space[1]}px ${space[4]}px`,
-  fontSize: 12,
-}
-
-const secondaryBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  color: color.inkSoft,
-  border: `1px solid ${color.line}`,
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontFamily: font.sans,
-  cursor: 'pointer',
 }
 
 const reindexNoticeStyle: React.CSSProperties = {

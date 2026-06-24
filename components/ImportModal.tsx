@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { color, space, radius, font, shadow, type as type_ } from '@/lib/tokens'
+import Button from '@/components/Button'
 import {
   suggestFrontmatter,
   importMarkdown,
@@ -317,17 +318,12 @@ export default function ImportModal({
     if (single) {
       return (
         <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end' }}>
-          <button style={secondaryBtnStyle} onClick={onClose} {...secHover}>
+          <Button variant="secondary" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            style={primaryBtnStyle}
-            onClick={handleImportThisOne}
-            disabled={!!busy}
-            {...priHover}
-          >
+          </Button>
+          <Button variant="primary" onClick={handleImportThisOne} disabled={!!busy}>
             {busy ? 'Importing…' : allImported ? 'Done' : 'Import'}
-          </button>
+          </Button>
         </div>
       )
     }
@@ -337,22 +333,22 @@ export default function ImportModal({
         : `Import all ${pendingCount}`
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: space[3] }}>
-        <button style={secondaryBtnStyle} onClick={onClose} {...secHover}>
+        <Button variant="secondary" onClick={onClose}>
           Cancel
-        </button>
+        </Button>
         <div style={{ flex: 1 }} />
         {!allImported && pendingCount > 0 && (
-          <button style={secondaryBtnStyle} onClick={handleImportAll} disabled={!!busy} {...secHover}>
+          <Button variant="primary" onClick={handleImportAll} disabled={!!busy}>
             {allLabel}
-          </button>
+          </Button>
         )}
-        <button style={primaryBtnStyle} onClick={handleImportThisOne} disabled={!!busy} {...priHover}>
+        <Button variant="primary" onClick={handleImportThisOne} disabled={!!busy}>
           {busy?.kind === 'one'
             ? 'Importing…'
             : allImported
               ? 'Done'
               : 'Import this one'}
-        </button>
+        </Button>
       </div>
     )
   }
@@ -554,37 +550,3 @@ const noticeStyle: React.CSSProperties = {
   marginBottom: space[4],
 }
 
-const primaryBtnStyle: React.CSSProperties = {
-  background: color.forest,
-  color: '#fff',
-  border: 'none',
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontWeight: 600,
-  fontFamily: font.sans,
-  cursor: 'pointer',
-}
-
-const secondaryBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  color: color.inkSoft,
-  border: `1px solid ${color.line}`,
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontFamily: font.sans,
-  cursor: 'pointer',
-}
-
-const priHover = {
-  onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => (e.currentTarget.style.opacity = '0.92'),
-  onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => (e.currentTarget.style.opacity = '1'),
-}
-
-const secHover = {
-  onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) =>
-    (e.currentTarget.style.background = color.bgFieldStrong),
-  onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) =>
-    (e.currentTarget.style.background = 'transparent'),
-}

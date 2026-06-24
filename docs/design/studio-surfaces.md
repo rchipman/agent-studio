@@ -2070,3 +2070,211 @@ mood, grounded in the actual code — the overloaded top bar, the four copy-past
 bars, the never-built view affordances — and resisting the SaaS-chrome instinct the brief
 warned against; a cheaper model would likely have reached for a component library, a busy
 top toolbar, or invented new tokens).
+
+---
+
+## Button system
+
+One shared `Button` ends the drift. Today `primaryBtnStyle` / `secondaryBtnStyle` /
+`textBtnStyle` / `smallPrimaryBtnStyle` are independently redefined in `AuditView.tsx`,
+`SettingsModal.tsx`, `ImportModal.tsx`, and `app/page.tsx`, the Launcher hand-rolls its
+own Run button, and five primaries hard-code `color: '#fff'` (Launcher, AuditView,
+SettingsModal, ImportModal, page.tsx) — which is the exact pixel that breaks in dark,
+where the forest is a light sage and white text on it reads at ~1.3:1. The fix is three
+variants, two sizes, and a single rule that makes both themes correct for free: **never
+write a literal color on a button; primary text is always `--on-accent`.**
+
+Three variants, by loudness:
+
+- **Primary** — the one loud action on a surface (Run, Save/Done, Create, Launch,
+  Rebuild, Import). Forest fill, `--on-accent` text. There is at most one per surface.
+- **Secondary** — the supporting action beside a primary (Cancel, "Import all"). Outlined,
+  transparent fill, `--ink-soft` text. Reads on both `--bg-raised` and `--bg-app`.
+- **Tertiary** — the quiet text/ghost action (Skip, Not now, Refresh, Run again, Reveal,
+  Remove, Choose…, Start fresh). No fill, no border, `--ink-soft` text.
+
+### New tokens (3)
+
+A primary's hover and active need a *fill* shift, not an opacity fade — opacity over a
+scrim or a textured card lets the background bleed through and reads as a smudge, and a
+fade can't express "pressed." Those two fill values, plus a calm disabled fill, can't be
+composed from the existing set without a raw literal, so they earn tokens. Everything else
+(borders, washes, focus ring, tertiary hover) composes from tokens that already exist.
+
+Paste into `app/globals.css` under `:root`:
+
+```css
+  --forest-hover: #35492F;   /* primary hover — forest darkened ~8% */
+  --forest-active: #2C3D28;  /* primary active/pressed — darker still */
+  --forest-disabled: #B6C0B4; /* primary disabled fill — calm desaturated sage, not mud */
+```
+
+and under `:root[data-theme="dark"]` (a light fill must go *lighter* to read as
+lift/press against the dark, mirroring the light theme's darken):
+
+```css
+  --forest-hover: #9DBC97;   /* sage lifted ~8% */
+  --forest-active: #ABC8A5;  /* lifted further for pressed */
+  --forest-disabled: #3A463A; /* dim sage-grey on the near-black, calm not black-hole */
+```
+
+and into `lib/tokens.ts` under `color`:
+
+```ts
+  forestHover: 'var(--forest-hover)',       // #35492F light / #9DBC97 dark
+  forestActive: 'var(--forest-active)',     // #2C3D28 light / #ABC8A5 dark
+  forestDisabled: 'var(--forest-disabled)', // #B6C0B4 light / #3A463A dark
+```
+
+`--on-accent` already flips (white in light, `#1A1815` near-black in dark), so primary
+text and the disabled-text-on-disabled-fill case both stay legible in both themes with no
+per-theme branching. Disabled primary keeps `--on-accent` at `opacity: 0.5` for the label.
+
+### The three variants — every state, both themes
+
+All buttons share: `--r-md` radius, `--font-sans`, `cursor: pointer` (rest) / `default`
+(disabled), `transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease`,
+and a focus ring `box-shadow: 0 0 0 2px var(--bg-raised), 0 0 0 4px var(--forest-line)`
+shown on `:focus-visible` only (a forest halo held off the control by a surface-colored
+gap, so it reads on app, raised, and card surfaces in both themes; never a browser blue
+outline).
+
+**Primary** (`background` carries the state; text constant):
+
+| State | background | text | other |
+| --- | --- | --- | --- |
+| rest | `--forest` | `--on-accent` | weight 600 |
+| hover | `--forest-hover` | `--on-accent` | — |
+| active | `--forest-active` | `--on-accent` | — |
+| disabled | `--forest-disabled` | `--on-accent` @ `opacity 0.5` | `cursor: default`, no ring |
+| focus-visible | (current bg) | `--on-accent` | + focus ring |
+
+No box-shadow. The Launcher's Run keeps its single soft lift (`0 6px 20px
+var(--forest-wash)` — re-expressed from the literal it uses today) *only* because it is
+the north-star gravity well; it is the documented exception, set via a `glow` prop, not
+the default. House rule: a primary is present, not shouty — no heavy shadows.
+
+**Secondary** (outline; fill is a wash on hover, never a solid):
+
+| State | background | border | text |
+| --- | --- | --- | --- |
+| rest | `transparent` | `1px solid --line` | `--ink-soft` |
+| hover | `--neutral-tint` | `1px solid --ink-faint` | `--ink` |
+| active | `--hair` | `1px solid --ink-faint` | `--ink` |
+| disabled | `transparent` | `1px solid --hair-soft` | `--ink-faint` |
+| focus-visible | (current) | (current) | (current) + focus ring |
+
+`--neutral-tint` and `--hair` are themed overlays (dark-on-light in light, light-on-dark
+in dark per the inversion rule), so the hover wash and the border both read on `--bg-raised`
+(modals) and `--bg-app` without per-theme code.
+
+**Tertiary** (text/ghost; the quietest):
+
+| State | background | text | other |
+| --- | --- | --- | --- |
+| rest | `transparent` | `--ink-soft` | no border |
+| hover | `--neutral-tint` | `--ink` | — |
+| active | `--hair` | `--ink` | — |
+| disabled | `transparent` | `--ink-faint` | `cursor: default` |
+| focus-visible | `transparent` | `--ink-soft` | + focus ring |
+
+A tertiary that is semantically an accent (the `--notice` "Rebuild" link, a `--forest`
+"Fix all") sets its rest text via the `tone` prop (see API) instead of `--ink-soft`;
+hover still goes to `--ink`. This absorbs the existing one-off colored text buttons
+(`SettingsModal` notice link, `AuditView` Fix-all) into the system.
+
+### Sizes
+
+Two sizes, replacing today's ad-hoc `smallPrimaryBtnStyle` and the page's 12px variant.
+
+| size | padding | font | use |
+| --- | --- | --- | --- |
+| `md` (default) | `7px var(--sp-5)` (7px 16px) | 13 / 600 | modal footers, all standard actions |
+| `sm` | `var(--sp-1) var(--sp-4)` (4px 12px) | 12 / 600 | inline/dense rows (Rebuild in the reindex line, top-bar + New, Reveal) |
+
+Tertiary at any size keeps the same vertical padding for hit-area but may set
+`padding-inline: var(--sp-2)` so a bare text action doesn't float in dead space; a
+`padding="none"` escape hatch (page-level `textBtnStyle` had `padding: 0`) covers the
+truly inline link-in-a-sentence case.
+
+### Component API
+
+```tsx
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: 'primary' | 'secondary' | 'tertiary'  // default 'secondary'
+  size?: 'sm' | 'md'                               // default 'md'
+  tone?: 'default' | 'notice' | 'forest'           // tertiary accent text; default 'default'
+  glow?: boolean                                    // primary-only soft lift; the Run exception
+  // disabled, onClick, title, children, type, style, … all pass through
+}
+```
+
+- Hover/active/focus are handled *inside* the component (a tiny `useState` for
+  pointer/press state plus `onFocusVisible`), so call sites stop hand-rolling `priHover` /
+  `secHover` mouse handlers — those get deleted in the migration.
+- `style` merges last, for the rare one-off (e.g. `width: '100%'`, `marginLeft: auto`,
+  `flexShrink: 0`) without re-opening the variant.
+- A primary with `disabled` shows the calm `--forest-disabled` fill — never the
+  grey-to-mud the brief warned against, and never the Launcher's current
+  `rgba(62,86,65,0.40)` literal, which goes muddy in dark.
+
+### Icon-only buttons — a deliberate call
+
+**Icon-only buttons do NOT use `Button`.** The nav-rail items (`NavRail.RailItem`), the
+panel-close `×`, the tab-close `✕`, and the collapsed `+` are not actions-with-labels;
+they are *destinations and chrome glyphs* with their own established treatments — the rail
+item is a selected-row pattern (icon + label + 2px `--forest` left rule), the close glyphs
+are `--ink-faint` hover-to-`--ink`. Forcing them through a label-button API would mean a
+pile of dead props (`variant`, `size`, `tone`) and would blur the line between "do this
+action" and "go to this room / dismiss this surface." They stay as they are. The text `+
+New` and `Launch` in the top bar, by contrast, *are* labeled actions and **do** become
+`Button` (`primary`, `size="sm"`). The rule: has a text label and performs an action →
+`Button`; pure glyph that navigates or dismisses → leave it.
+
+`TypeChip` also stays separate (it is a filter/selection toggle, not an action), but note
+the relationship: chip-active and primary-rest share the `--forest` fill, and chip-rest
+and secondary-rest share the `transparent` + `--line` border. The button and chip systems
+rhyme; they are not merged.
+
+### Which variant when (the real buttons mapped)
+
+| Button (where) | variant | size |
+| --- | --- | --- |
+| Run (Launcher) | primary `glow` | md (15px override via `style`) |
+| Done / Save (Settings, AuditView) | primary | md |
+| Create (New-file modal) | primary | md |
+| Import this one / Import all (ImportModal) | primary / secondary | md |
+| Rebuild (reindex line) | primary | sm |
+| + New, Launch (top bar) | primary | sm |
+| Cancel (every modal) | secondary | md |
+| Choose… (Settings roots) | secondary | sm |
+| Skip / Not now | tertiary | md |
+| Refresh, Run again, Start fresh | tertiary | md |
+| Reveal / Hide, Remove (Settings) | tertiary | sm |
+| Rebuild **link** (out-of-date notice) | tertiary `tone="notice"` | sm |
+| Fix all (AuditView strip) | tertiary `tone="forest"` | md |
+| inline link-in-sentence | tertiary `padding="none"` | — |
+
+### How both themes are guaranteed to read
+
+1. **No literal colors on any button.** Every value above is a token that resolves per
+   theme via the existing `:root` / `:root[data-theme="dark"]` split. The five
+   `color: '#fff'` primaries are replaced by `--on-accent`, which is white in light and
+   `#1A1815` in dark — the single fix for the dark-mode contrast break.
+2. **Primary contrast, dark.** `--on-accent` `#1A1815` on the sage `--forest` `#8FB089`
+   measures **~9.0 : 1** (and on `--forest-hover` `#9DBC97` ~9.7:1, on `--forest-active`
+   ~10.4:1) — all clear AA for UI/large text with wide margin. In light, white on
+   `#3E5641` is ~8.0:1 and stays ≥7:1 across hover/active. Primary reads in both, every
+   state.
+3. **Secondary / tertiary text** is `--ink-soft` (→ `--ink` on hover), already verified in
+   the dark contrast table at **6.9:1 on `bgApp` / 6.3:1 on `bgRaised`** (AA), and ~5:1 in
+   light — legible on app, raised, and card surfaces, both themes.
+4. **Hover/active are themed fills, not opacity**, so they never let a scrim or textured
+   card bleed through. The new forest-state tokens darken in light and lighten in dark,
+   the correct direction for "lift/press" against each base.
+5. **Disabled is calm in both:** `--forest-disabled` is a desaturated sage in each theme
+   (light `#B6C0B4`, dark `#3A463A`) — present, never greyed-to-mud, never a black hole.
+6. **Focus ring** is a `--forest-line` halo held off the control by a `--bg-raised` gap,
+   so it's visible on every surface in both themes and is never the browser's blue.
+
+No red anywhere; no heavy shadows (the lone Run glow is opt-in and soft).

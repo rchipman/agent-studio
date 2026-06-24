@@ -24,6 +24,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
+import Button from '@/components/Button'
 
 // ── Tauri response types ──────────────────────────────────────────────────────
 
@@ -390,22 +391,9 @@ export default function DiffView({ workingDir }: DiffViewProps) {
     return (
       <NoticeBlock>
         Could not read git status.{' '}
-        <button
-          onClick={loadStatus}
-          style={{
-            background: 'none',
-            border: 'none',
-            color: color.notice,
-            cursor: 'pointer',
-            fontFamily: font.sans,
-            fontSize: 12,
-            fontWeight: 600,
-            padding: 0,
-            textDecoration: 'underline',
-          }}
-        >
+        <Button variant="tertiary" tone="notice" padding="none" onClick={loadStatus}>
           Refresh
-        </button>
+        </Button>
         {errorMsg && (
           <div style={{ marginTop: space[1], fontSize: 11, color: color.inkFaint }}>
             {errorMsg}
@@ -604,25 +592,9 @@ function RefreshBar({ branch, onRefresh }: { branch: string; onRefresh: () => vo
           {branch}
         </span>
       )}
-      <button
-        onClick={onRefresh}
-        style={{
-          marginLeft: 'auto',
-          background: 'none',
-          border: 'none',
-          color: color.inkSoft,
-          cursor: 'pointer',
-          fontFamily: font.sans,
-          fontSize: 11,
-          fontWeight: 500,
-          padding: `${space[1]}px ${space[2]}px`,
-          borderRadius: radius.sm,
-        }}
-        onMouseEnter={(e) => { e.currentTarget.style.color = color.ink }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = color.inkSoft }}
-      >
+      <Button variant="tertiary" size="sm" onClick={onRefresh} style={{ marginLeft: 'auto' }}>
         Refresh
-      </button>
+      </Button>
     </div>
   )
 }
