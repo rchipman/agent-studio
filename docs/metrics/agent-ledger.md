@@ -23,6 +23,8 @@ dur(s) | outcome | self-report fit | adjustment.
 | Jonny design: nav chrome (1707/1708/1709) | design | opus | 66.7k | 12 | 176 | BLESSED | right | opus right; caught a doc-rule reversal + terminal token gap a cheaper model would miss |
 | TIN-1707+1708 build (Launch destination + persistent bar) | build | opus | 170.6k | 102 | 657 | BLESSED (1 nit) | right | opus right for the page.tsx keystone refactor (ViewShell retire + slot-context across 5 views + Launcher-as-view) |
 | 1707/1708 jonny-lite | review | haiku | 78.5k | 20 | 43 | found 1 nit (missing title attr) | right | haiku confirmed for conformance again |
+| Jonny design: Sessions cosmetic cleanup | design | opus | 75.0k | 11 | 145 | BLESSED | right | briefed before user clarified intent; cosmetic spec (slug decode, naming, --notice-wash) still reusable |
+| Jonny design: threaded subagent reader | design | opus | 64.2k | 6 | 121 | BLESSED | right | opus right; nailed the reading model + a complete Rust backend contract a cheaper model would under-spec |
 
 ## Learnings → routing adjustments
 
