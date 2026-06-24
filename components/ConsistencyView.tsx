@@ -150,7 +150,9 @@ function FindingRow({
 
 // ── Note pill ─────────────────────────────────────────────────────────────────
 
-function NotePill({
+/** A calm, tappable pill that opens a note (plain click = same panel, ⌘-click =
+ *  the other). Reused by the write-time continuity surfaces (TIN-1730). */
+export function NotePill({
   name,
   filePath,
   onOpenFile,

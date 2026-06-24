@@ -40,7 +40,7 @@ export function suggestionToResult(s: Suggestion): MemorySearchResult {
     updated: '',
     tags: s.tags,
     status: s.status,
-    excerpt: s.title && s.title !== s.name ? s.title : '',
+    excerpt: s.summary || (s.title && s.title !== s.name ? s.title : ''),
   }
 }
 
@@ -274,6 +274,9 @@ export interface FrontmatterFormProps {
   regenerating?: boolean
   /** e.g. "Described from your note." / "From this file's frontmatter." */
   sourceLabel?: string
+  /** True when the body has changed since the summary was generated; surfaces a
+   *  quiet "Summary may be out of date." cue under the Summary field. */
+  summaryStale?: boolean
 }
 
 export default function FrontmatterForm({
@@ -284,6 +287,7 @@ export default function FrontmatterForm({
   onRegenerate,
   regenerating,
   sourceLabel,
+  summaryStale,
 }: FrontmatterFormProps) {
   const types = knownTypes && knownTypes.length ? knownTypes : DEFAULT_TYPES
   const projects = knownProjects && knownProjects.length ? knownProjects : DEFAULT_PROJECTS
@@ -321,6 +325,46 @@ export default function FrontmatterForm({
           onBlur={(e) => (e.currentTarget.style.borderColor = color.line)}
           style={fieldStyle}
         />
+      </FieldRow>
+
+      <FieldRow label="Summary">
+        <textarea
+          value={value.summary ?? ''}
+          onChange={(e) => patch({ summary: e.target.value })}
+          onFocus={(e) => (e.currentTarget.style.borderColor = color.forest)}
+          onBlur={(e) => (e.currentTarget.style.borderColor = color.line)}
+          placeholder="A sentence or two on what this note decides or records."
+          style={{
+            ...fieldStyle,
+            minHeight: space[8] * 2,
+            lineHeight: 1.5,
+            resize: 'vertical',
+          }}
+        />
+        {summaryStale && (
+          <div
+            style={{
+              ...type_.meta,
+              color: color.notice,
+              display: 'flex',
+              alignItems: 'center',
+              gap: space[3],
+              marginTop: space[2],
+            }}
+          >
+            <span>Summary may be out of date.</span>
+            {onRegenerate && !regenerating && (
+              <Button
+                variant="tertiary"
+                padding="none"
+                onClick={onRegenerate}
+                style={{ fontSize: 11, fontWeight: 400 }}
+              >
+                Regenerate
+              </Button>
+            )}
+          </div>
+        )}
       </FieldRow>
 
       <FieldRow label="Type">
