@@ -12,7 +12,8 @@
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/run.mjs",
+    "install-cli": "bash scripts/install-cli.sh"
   },
   "dependencies": {
     "@fontsource-variable/literata": "^5.2.8",

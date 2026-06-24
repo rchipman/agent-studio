@@ -109,7 +109,15 @@ agent-studio-memory add-memory --content "…" --agent <name> [--project <p>] [-
 agent-studio-memory supersede --old <path|name> --new <name>   # invalidate, don't delete
 ```
 
-It is **headless** (the GUI does not need to be running) and degrades gracefully if no reasoning model is available. A stable `agent-studio-memory` entrypoint on `PATH` is being packaged; until then it is the built binary's `add-memory` / `supersede` subcommand (e.g. `src-tauri/target/release/app add-memory …` after a build). If the command is not available, agents fall back to writing the `.md` file directly — the continuity check is an enhancement, never required.
+It is **headless** (the GUI does not need to be running) and degrades gracefully if no reasoning model is available.
+
+Install the `agent-studio-memory` command on your `PATH`:
+
+```bash
+npm run install-cli   # builds the release binary if needed, symlinks the wrapper
+```
+
+This symlinks `bin/agent-studio-memory` into `~/.local/bin` (override with `PREFIX=/usr/local/bin`). The wrapper resolves the built binary (release, then debug; override with `AGENT_STUDIO_BIN`). If the command is not available, agents fall back to writing the `.md` file directly — the continuity check is an enhancement, never required.
 
 ## Project structure
 
