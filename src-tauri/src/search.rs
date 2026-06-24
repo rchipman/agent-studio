@@ -468,6 +468,22 @@ pub fn build_index(root: &Path, conn: &Connection) -> rusqlite::Result<usize> {
     Ok(files.len())
 }
 
+// ── Superseded de-ranking ────────────────────────────────────────────────────
+
+/// Stable secondary sort that demotes `status == "superseded"` notes below all
+/// other statuses. Active notes with better relevance still surface first; a
+/// superseded note only loses its position relative to an equally-ranked active
+/// one. Superseded notes are NEVER removed — they remain reachable via the
+/// supersedes chain and are still displayed (the frontend renders a quiet chip).
+///
+/// Per-query LLM judging of active-vs-active conflicts at retrieval time is
+/// intentionally deferred: it would add one model call per search, which is too
+/// expensive for an interactive query path. Conflict detection at write-time
+/// (TIN-1730/continuity scorer) covers that case instead.
+pub(crate) fn derank_superseded(results: &mut [SearchResult]) {
+    results.sort_by_key(|r| u8::from(r.status.trim() == "superseded"));
+}
+
 // ── Querying ────────────────────────────────────────────────────────────────
 
 fn map_row(row: &rusqlite::Row) -> rusqlite::Result<SearchResult> {
@@ -834,7 +850,8 @@ pub async fn search(
         let projects = distinct_projects(&conn).map_err(|e| e.to_string())?;
         // No text query → recency/filter list, exactly as before. Return early.
         if query.is_empty() {
-            let results = run_search(&conn, &payload).map_err(|e| e.to_string())?;
+            let mut results = run_search(&conn, &payload).map_err(|e| e.to_string())?;
+            derank_superseded(&mut results);
             return Ok(SearchResponse { results, types, projects });
         }
         let fts = fts_candidates(&conn, &payload).map_err(|e| e.to_string())?;
@@ -872,7 +889,8 @@ pub async fn search(
 
     // ── Phase D: pure ranking ────────────────────────────────────────────────
     let top_n = payload.limit.unwrap_or(20).max(1) as usize;
-    let results = hybrid::rank(candidates, has_embeddings, Local::now().date_naive(), top_n);
+    let mut results = hybrid::rank(candidates, has_embeddings, Local::now().date_naive(), top_n);
+    derank_superseded(&mut results);
     Ok(SearchResponse { results, types, projects })
 }
 
@@ -1247,6 +1265,100 @@ mod tests {
         assert!(b.vec_dist.is_some(), "vector distance attached to the semantic hit");
         assert!(b.bm25_rank.is_none(), "B was not a BM25 hit");
         assert!(b.embedding.is_some(), "representative embedding rehydrated for MMR");
+    }
+
+    // ── superseded de-ranking (TIN-1732) ──────────────────────────────────────
+
+    #[test]
+    fn derank_superseded_moves_superseded_after_active() {
+        // An active note and a superseded note in any order — after de-ranking,
+        // the active note must always come first. Superseded notes are never
+        // removed (findable, just ranked lower).
+        let make = |name: &str, status: &str| SearchResult {
+            path: format!("/m/{name}.md"),
+            name: name.to_string(),
+            type_: "project".to_string(),
+            projects: vec![],
+            created: "2026-01-01".to_string(),
+            updated: "2026-01-01".to_string(),
+            tags: vec![],
+            status: status.to_string(),
+            excerpt: String::new(),
+        };
+
+        // Case 1: superseded first in list, active second.
+        let mut results = vec![make("old-decision", "superseded"), make("new-decision", "active")];
+        derank_superseded(&mut results);
+        assert_eq!(results[0].name, "new-decision", "active should come first");
+        assert_eq!(results[1].name, "old-decision", "superseded remains in list (findable)");
+
+        // Case 2: active first already — stable sort keeps it there.
+        let mut results = vec![make("new-decision", "active"), make("old-decision", "superseded")];
+        derank_superseded(&mut results);
+        assert_eq!(results[0].name, "new-decision");
+        assert_eq!(results[1].name, "old-decision");
+
+        // Case 3: multiple active + superseded — all superseded demoted after all active.
+        let mut results = vec![
+            make("sup-a", "superseded"),
+            make("act-b", "active"),
+            make("sup-c", "superseded"),
+            make("act-d", "active"),
+        ];
+        derank_superseded(&mut results);
+        let statuses: Vec<&str> = results.iter().map(|r| r.status.as_str()).collect();
+        assert_eq!(&statuses[..2], &["active", "active"], "active notes first");
+        assert_eq!(&statuses[2..], &["superseded", "superseded"], "superseded notes last");
+    }
+
+    #[test]
+    fn derank_superseded_preserves_internal_order() {
+        // Stability: two active notes A and B in relevance order must stay A, B
+        // after the secondary sort (sort_by_key is stable in Rust).
+        let make = |name: &str, status: &str| SearchResult {
+            path: format!("/m/{name}.md"),
+            name: name.to_string(),
+            type_: "project".to_string(),
+            projects: vec![],
+            created: "2026-01-01".to_string(),
+            updated: "2026-01-01".to_string(),
+            tags: vec![],
+            status: status.to_string(),
+            excerpt: String::new(),
+        };
+
+        let mut results =
+            vec![make("best-active", "active"), make("second-active", "active"), make("sup", "superseded")];
+        derank_superseded(&mut results);
+        assert_eq!(results[0].name, "best-active", "internal order preserved for active notes");
+        assert_eq!(results[1].name, "second-active");
+        assert_eq!(results[2].name, "sup");
+    }
+
+    #[test]
+    fn derank_superseded_superseded_notes_findable_via_index() {
+        // End-to-end: index a superseded and an active note, run a query that
+        // matches both. The superseded note must appear in results (not filtered)
+        // but after the active one.
+        let root = temp_root("derank-e2e");
+        write(
+            &root,
+            "studio/old.md",
+            "---\nname: old-decision\ntype: project\nprojects: studio\nstatus: superseded\n---\nThe pricing for Attic Pro.",
+        );
+        write(
+            &root,
+            "studio/new.md",
+            "---\nname: new-decision\ntype: project\nprojects: studio\nstatus: active\n---\nThe updated pricing for Attic Pro.",
+        );
+        let conn = mem_db();
+        build_index(&root, &conn).unwrap();
+
+        let mut results = run_search(&conn, &input("pricing")).unwrap();
+        derank_superseded(&mut results);
+        assert_eq!(results.len(), 2, "both notes are findable (superseded not filtered)");
+        assert_eq!(results[0].name, "new-decision", "active note ranks first");
+        assert_eq!(results[1].name, "old-decision", "superseded note still findable, ranked second");
     }
 
     #[test]
