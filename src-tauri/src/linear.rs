@@ -87,7 +87,7 @@ const LINEAR_SCHEMA: &str = "
 
 /// Ensure `linear_items` and its indexes exist on the connection. Called lazily
 /// before any read/write, mirroring the `ensure_schema` pattern in `transcript.rs`.
-fn ensure_linear_schema(conn: &Connection) -> rusqlite::Result<()> {
+pub fn ensure_linear_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(LINEAR_SCHEMA)
 }
 

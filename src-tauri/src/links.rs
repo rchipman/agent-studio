@@ -277,9 +277,22 @@ fn links_for(conn: &Connection, path: &str) -> rusqlite::Result<FileLinks> {
     })
 }
 
-/// Build the knowledge graph from the `links` + `memory_files` tables.
+/// Build the knowledge graph from the `links` + `memory_files` tables, and
+/// from `linear_items` (ingested tickets and epics).
+///
+/// Nodes:
+///   - All memory files (kind = "file")
+///   - All ingested Linear tickets (kind = "ticket")
+///   - All ingested Linear epics (kind = "epic")
+///   - Dangling ticket mentions (tickets referenced in notes but not yet ingested)
+///     are still surfaced as kind = "ticket" with no title.
+///
+/// Edges:
+///   - note → ticket/epic  (from `links` table `link_type = 'ticket'`)
+///   - note → note          (from `links` table `link_type = 'wiki'`)
+///   - ticket → epic        (from `linear_items.parent_identifier`)
 fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
-    // File nodes.
+    // ── 1. File nodes ─────────────────────────────────────────────────────────
     let mut nodes: Vec<GraphNode> = Vec::new();
     let mut degree: HashMap<String, usize> = HashMap::new();
 
@@ -297,9 +310,56 @@ fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
         }
     }
 
-    // Edges + ticket nodes, accumulating degree as we go.
+    // ── 2. Ingested Linear nodes (issues + epics) ─────────────────────────────
+    // Map: identifier → (title, kind, parent_identifier)
+    let mut ingested: HashMap<String, (String, String, String)> = HashMap::new();
+    {
+        // linear_items may not exist yet (no sync done). Use IF EXISTS guard via
+        // a query that silently returns nothing if the table is absent.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='linear_items'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
+        if table_exists {
+            let mut stmt = conn.prepare(
+                "SELECT identifier, title, kind, parent_identifier FROM linear_items ORDER BY identifier",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let id: String = row.get("identifier")?;
+                let title: String = row.get("title")?;
+                let kind: String = row.get("kind")?;
+                let parent: String = row.get("parent_identifier")?;
+                Ok((id, title, kind, parent))
+            })?;
+            for (id, title, kind, parent) in rows.filter_map(Result::ok) {
+                ingested.insert(id, (title, kind, parent));
+            }
+        }
+    }
+
+    // Add ingested ticket/epic nodes.
+    for (id, (title, kind, _)) in &ingested {
+        let node_kind = if kind == "epic" { "epic" } else { "ticket" };
+        let label = if title.is_empty() { id.clone() } else { title.clone() };
+        nodes.push(GraphNode {
+            id: id.clone(),
+            label,
+            kind: node_kind.into(),
+            domain: String::new(),
+            degree: 0,
+        });
+    }
+
+    // ── 3. Edges: wiki-links and note→ticket, accumulating degree ────────────
     let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut ticket_ids: HashMap<String, String> = HashMap::new(); // id → title
+    // Track dangling ticket mentions (referenced in notes but not ingested).
+    let mut dangling_tickets: HashMap<String, String> = HashMap::new(); // id → cached title
+
     {
         let mut stmt = conn.prepare(
             "SELECT l.from_path, l.to_path, l.to_ticket_id, l.link_type,
@@ -318,7 +378,10 @@ fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
             let to = match (&to_path, &ticket) {
                 (Some(p), _) => p.clone(),
                 (None, Some(t)) => {
-                    ticket_ids.entry(t.clone()).or_insert(title);
+                    // If not ingested yet, track as dangling (will get a bare-id node).
+                    if !ingested.contains_key(t) {
+                        dangling_tickets.entry(t.clone()).or_insert(title);
+                    }
                     t.clone()
                 }
                 _ => continue,
@@ -329,13 +392,26 @@ fn graph(conn: &Connection) -> rusqlite::Result<GraphData> {
         }
     }
 
-    // Append ticket nodes.
-    for (id, title) in ticket_ids {
+    // Add dangling ticket nodes (not yet ingested).
+    for (id, title) in dangling_tickets {
         let label = if title.is_empty() { id.clone() } else { title };
         nodes.push(GraphNode { id, label, kind: "ticket".into(), domain: String::new(), degree: 0 });
     }
 
-    // Apply degrees.
+    // ── 4. Edges: ticket → epic (parent_identifier) ───────────────────────────
+    for (id, (_title, _kind, parent)) in &ingested {
+        if parent.is_empty() {
+            continue;
+        }
+        // Only emit the edge if the parent epic is itself ingested.
+        if ingested.contains_key(parent) {
+            *degree.entry(id.clone()).or_insert(0) += 1;
+            *degree.entry(parent.clone()).or_insert(0) += 1;
+            edges.push(GraphEdge { from: id.clone(), to: parent.clone() });
+        }
+    }
+
+    // ── 5. Apply degrees ──────────────────────────────────────────────────────
     for n in nodes.iter_mut() {
         if let Some(d) = degree.get(&n.id) {
             n.degree = *d;
@@ -603,5 +679,116 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         assert_eq!(hits, vec!["model-tier-defaults"]);
+    }
+
+    // ── graph + linear_items integration (TIN-1729) ───────────────────────────
+
+    /// A note that mentions TIN-XXXX and that ticket is ingested → the graph
+    /// produces a note→ticket edge (the ref is no longer dangling).
+    #[test]
+    fn ingested_ticket_ref_produces_note_to_ticket_edge() {
+        use crate::linear::{ensure_linear_schema, store_and_index_items, RawIssue};
+        use crate::search::ensure_chunks_table;
+
+        let root = temp_root("graph-ticket-edge");
+        write(&root, "s/a.md", "---\nname: alpha\nprojects: studio\n---\nworks on TIN-1729");
+        let conn = init_db(&root).unwrap();
+        ensure_chunks_table(&conn).unwrap();
+        build_index(&root, &conn).unwrap();
+        ensure_linear_schema(&conn).unwrap();
+
+        // Ingest the ticket that the note mentions.
+        let issue = RawIssue {
+            id: "id-tin-1729".to_string(),
+            identifier: "TIN-1729".to_string(),
+            title: "Graph linear nodes".to_string(),
+            description: "Wire linear_items into the graph.".to_string(),
+            updated_at: "2026-06-20T00:00:00Z".to_string(),
+            url: "https://linear.app/tfl/issue/TIN-1729".to_string(),
+            state_name: "In Progress".to_string(),
+            parent_id: None,
+            parent_identifier: None,
+            project_name: Some("Agent Studio".to_string()),
+            team_key: "TIN".to_string(),
+        };
+        store_and_index_items(&conn, &[issue]).unwrap();
+
+        let g = graph(&conn).unwrap();
+
+        // The note and the ingested ticket both appear as nodes.
+        assert!(g.nodes.iter().any(|n| n.kind == "ticket" && n.id == "TIN-1729"),
+            "ingested ticket node present");
+        let a_path = root.join("s/a.md").to_string_lossy().to_string();
+        assert!(g.nodes.iter().any(|n| n.id == a_path), "note node present");
+
+        // There is a note→ticket edge.
+        let has_edge = g.edges.iter().any(|e| e.from == a_path && e.to == "TIN-1729");
+        assert!(has_edge, "note→ticket edge present for ingested ticket");
+
+        // The ticket node should have degree ≥ 1 (the note edge).
+        let ticket_node = g.nodes.iter().find(|n| n.id == "TIN-1729").unwrap();
+        assert!(ticket_node.degree >= 1, "ingested ticket has non-zero degree");
+    }
+
+    /// A ticket that has a parent_identifier pointing to an ingested epic →
+    /// the graph produces a ticket→epic edge, and the parent is kind="epic".
+    #[test]
+    fn parent_identifier_produces_ticket_to_epic_edge() {
+        use crate::linear::{ensure_linear_schema, store_and_index_items, RawIssue};
+        use crate::search::ensure_chunks_table;
+
+        let root = temp_root("graph-epic-edge");
+        // Note that references both the child ticket and the epic (optional but
+        // tests that the note→ticket edge also works alongside ticket→epic).
+        write(&root, "s/a.md", "---\nname: alpha\nprojects: studio\n---\nsee TIN-1730 and TIN-1729");
+        let conn = init_db(&root).unwrap();
+        ensure_chunks_table(&conn).unwrap();
+        build_index(&root, &conn).unwrap();
+        ensure_linear_schema(&conn).unwrap();
+
+        let epic = RawIssue {
+            id: "id-tin-1729".to_string(),
+            identifier: "TIN-1729".to_string(),
+            title: "Graph epic parent".to_string(),
+            description: "The parent epic.".to_string(),
+            updated_at: "2026-06-20T00:00:00Z".to_string(),
+            url: "https://linear.app/tfl/issue/TIN-1729".to_string(),
+            state_name: "In Progress".to_string(),
+            parent_id: None,
+            parent_identifier: None,
+            project_name: Some("Agent Studio".to_string()),
+            team_key: "TIN".to_string(),
+        };
+        let child = RawIssue {
+            id: "id-tin-1730".to_string(),
+            identifier: "TIN-1730".to_string(),
+            title: "Graph child issue".to_string(),
+            description: "A child issue.".to_string(),
+            updated_at: "2026-06-20T00:00:00Z".to_string(),
+            url: "https://linear.app/tfl/issue/TIN-1730".to_string(),
+            state_name: "Todo".to_string(),
+            parent_id: Some("id-tin-1729".to_string()),
+            parent_identifier: Some("TIN-1729".to_string()),
+            project_name: Some("Agent Studio".to_string()),
+            team_key: "TIN".to_string(),
+        };
+        store_and_index_items(&conn, &[epic, child]).unwrap();
+
+        let g = graph(&conn).unwrap();
+
+        // TIN-1729 must be kind="epic" (it is the parent of TIN-1730).
+        let epic_node = g.nodes.iter().find(|n| n.id == "TIN-1729").unwrap();
+        assert_eq!(epic_node.kind, "epic", "parent is surfaced as epic");
+
+        // TIN-1730 is kind="ticket".
+        let child_node = g.nodes.iter().find(|n| n.id == "TIN-1730").unwrap();
+        assert_eq!(child_node.kind, "ticket", "child is surfaced as ticket");
+
+        // There must be a ticket→epic edge.
+        let has_edge = g.edges.iter().any(|e| e.from == "TIN-1730" && e.to == "TIN-1729");
+        assert!(has_edge, "ticket→epic edge present");
+
+        // The epic should have degree ≥ 1 (from the ticket→epic edge).
+        assert!(epic_node.degree >= 1, "epic has non-zero degree from child edge");
     }
 }
