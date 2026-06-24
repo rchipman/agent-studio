@@ -18,9 +18,11 @@ import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
 import Toast from '@/components/Toast'
 import FrontmatterForm from '@/components/FrontmatterForm'
+import { NotePill } from '@/components/ConsistencyView'
 import Button from '@/components/Button'
 import { linkSuggest } from '@/lib/links'
-import { suggestFrontmatter, importMarkdown, type Suggestion } from '@/lib/frontmatter'
+import { suggestFrontmatter, summarizeNote, importMarkdown, type Suggestion } from '@/lib/frontmatter'
+import { scoreMemory, recordMemoryChange, bodyHash, type Conflict } from '@/lib/continuity'
 import { initTheme } from '@/lib/theme'
 import { getSettings, rebuildIndex } from '@/lib/settings'
 
@@ -120,9 +122,11 @@ interface NewFileModalProps {
   knownProjects: string[]
   onClose: () => void
   onCreated: (filePath: string) => void
+  /** Open a conflicting note (from the continuity notice) into a panel. */
+  onOpenConflict: (path: string) => void
 }
 
-function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFileModalProps) {
+function NewFileModal({ knownTypes, knownProjects, onClose, onCreated, onOpenConflict }: NewFileModalProps) {
   const [content, setContent] = useState('')
   const [fm, setFm] = useState<Suggestion>({
     name: '',
@@ -141,6 +145,13 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Conflicts the note seems to update (TIN-1730), shown as a quiet notice, plus
+  // the continuity score recorded onto the ledger at create time (TIN-1728).
+  const [conflicts, setConflicts] = useState<Conflict[]>([])
+  const continuityScoreRef = useRef<number | undefined>(undefined)
+  // The body hash the current summary was generated from, so we can flag a stale
+  // summary when the note has been written further since (TIN-1727).
+  const [summaryHash, setSummaryHash] = useState<string | null>(null)
 
   const describe = useCallback(async (text: string) => {
     if (!text.trim()) return
@@ -157,15 +168,36 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
           tags: ed.has('tags') ? prev.tags : s.tags,
           created: s.created || prev.created,
           status: ed.has('status') ? prev.status : s.status || prev.status,
+          summary: prev.summary,
         }
       })
       setDescribed(true)
+      // Generate the one-to-two sentence summary (fire-and-forget safe): if the
+      // user has hand-edited it, or the model is degraded, leave the field be.
+      summarizeNote(text)
+        .then((r) => {
+          if (r.degraded || !r.summary || editedRef.current.has('summary')) return
+          setFm((prev) => ({ ...prev, summary: r.summary }))
+          setSummaryHash(bodyHash(text))
+        })
+        .catch(() => { /* fire-and-forget */ })
+      // Look for notes this one seems to update (continuity feedback, TIN-1730).
+      scoreMemory(text)
+        .then((r) => {
+          setConflicts(r.conflicts)
+          continuityScoreRef.current = r.degraded ? undefined : r.continuityScore
+        })
+        .catch(() => { /* calm: no notice on failure */ })
     } catch {
       /* keep the user's manual values */
     } finally {
       setDescribing(false)
     }
   }, [])
+
+  // The summary is stale when the note body has changed since it was generated.
+  const summaryStale =
+    !!fm.summary && summaryHash !== null && bodyHash(content) !== summaryHash
 
   // Debounced auto-describe as the note is written or pasted.
   useEffect(() => {
@@ -205,6 +237,15 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
       const today = new Date().toISOString().slice(0, 10)
       const body = content.trim() ? content : `# ${fm.title || fm.name}\n`
       const path = await importMarkdown(body, { ...fm, created: fm.created || today })
+      // Record this creation on the memory ledger (TIN-1728, human attribution).
+      recordMemoryChange({
+        path,
+        actorType: 'human',
+        actorId: 'studio',
+        continuityScore: continuityScoreRef.current,
+        changeSummary: 'Created this note.',
+        contentHash: bodyHash(body),
+      }).catch(() => { /* the file is written; the ledger is best-effort */ })
       onCreated(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the file. Your work is still here.')
@@ -276,6 +317,27 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
           />
         </div>
 
+        {/* Continuity feedback (TIN-1730): a calm note this seems to update. No
+            score, no red — an invitation to look, mirroring ImportModal. */}
+        {conflicts.length > 0 && (
+          <div style={continuityNoticeStyle}>
+            <span style={{ marginRight: space[2] }}>This seems to update</span>
+            <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: space[2], alignItems: 'center' }}>
+              {conflicts.slice(0, 2).map((c) => (
+                <NotePill
+                  key={c.path}
+                  name={c.name}
+                  filePath={c.path}
+                  onOpenFile={(path) => onOpenConflict(path)}
+                />
+              ))}
+              {conflicts.length > 2 && (
+                <span style={{ color: color.inkFaint }}>and {conflicts.length - 2} more</span>
+              )}
+            </span>
+          </div>
+        )}
+
         <FrontmatterForm
           value={fm}
           onChange={handleFormChange}
@@ -284,6 +346,7 @@ function NewFileModal({ knownTypes, knownProjects, onClose, onCreated }: NewFile
           onRegenerate={content.trim() ? regenerate : undefined}
           regenerating={describing}
           sourceLabel={sourceLabel}
+          summaryStale={summaryStale}
         />
 
         {error && (
@@ -324,6 +387,22 @@ const labelStyle: React.CSSProperties = {
   color: color.inkSoft,
   textTransform: 'uppercase',
   letterSpacing: '0.04em',
+}
+
+// Continuity notice — tan notice on a tan tint, mirroring ImportModal's
+// `noticeStyle` (TIN-1730). Calm, never red.
+const continuityNoticeStyle: React.CSSProperties = {
+  fontFamily: font.sans,
+  fontSize: 13,
+  fontWeight: 400,
+  color: color.notice,
+  background: color.tanTint,
+  borderRadius: radius.md,
+  padding: `${space[3]}px ${space[4]}px`,
+  display: 'flex',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: space[1],
 }
 
 // ── Persisted layout ──────────────────────────────────────────────────────────
@@ -735,7 +814,7 @@ export default function Home() {
 
   // ── Save (routes by path) ──
 
-  const saveFile = useCallback(async (filePath: string, content: string) => {
+  const saveFile = useCallback(async (filePath: string, content: string, opts?: { record?: boolean }) => {
     setIsSaving(true)
     try {
       const rawContent = files[filePath]?.raw ?? ''
@@ -753,6 +832,29 @@ export default function Home() {
         ...prev,
         [filePath]: { ...(prev[filePath] ?? { meta: null, loading: false }), content, raw: toWrite },
       }))
+
+      // On an explicit save of an existing note, score the body for continuity
+      // and record the edit on the ledger (TIN-1730 + TIN-1728). The frequent
+      // autosave path skips this so the reasoning model is not hammered.
+      if (opts?.record) {
+        let score: number | undefined
+        try {
+          const r = await scoreMemory(content, filePath)
+          score = r.degraded ? undefined : r.continuityScore
+          if (r.conflicts.length > 0) {
+            const c = r.conflicts[0]
+            setToast({ message: `This seems to update ${c.name}.`, path: c.path })
+          }
+        } catch { /* calm: no notice on failure */ }
+        recordMemoryChange({
+          path: filePath,
+          actorType: 'human',
+          actorId: 'studio',
+          continuityScore: score,
+          changeSummary: 'Edited the body.',
+          contentHash: bodyHash(content),
+        }).catch(() => { /* the file is written; the ledger is best-effort */ })
+      }
     } finally {
       setIsSaving(false)
     }
@@ -770,7 +872,7 @@ export default function Home() {
     if (!filePath) return
     const timers = saveTimersRef.current
     if (timers[filePath]) clearTimeout(timers[filePath])
-    saveFile(filePath, latestMarkdownRef.current[filePath] ?? '')
+    saveFile(filePath, latestMarkdownRef.current[filePath] ?? '', { record: true })
   }, [saveFile])
 
   // ── Open-result handler (⌘-click routes to the OTHER panel) ──
@@ -1304,6 +1406,7 @@ export default function Home() {
           knownProjects={knownProjects}
           onClose={() => setShowNewModal(false)}
           onCreated={handleFileCreated}
+          onOpenConflict={(path) => openInSide(path, focusedSideRef.current)}
         />
       )}
 

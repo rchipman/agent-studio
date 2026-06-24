@@ -166,10 +166,13 @@ Every memory file has a small frontmatter block (type, projects, tags, dates).
 Studio fills it in for you and keeps it healthy.
 
 - **Smart create.** When you create a note (**⌘N**), paste or write the body and
-  Studio describes it: it suggests a name, type, projects, and tags from the
-  content, with a live preview of how the card will look. Every field stays
-  editable, and **Regenerate** re-describes from your latest text. Anything you
-  edit by hand is kept.
+  Studio describes it: it suggests a name, a one-to-two sentence **summary** of
+  what the note decides or records, a type, projects, and tags from the content,
+  with a live preview of how the card will look. Every field stays editable, and
+  **Regenerate** re-describes from your latest text. If you keep writing after the
+  summary is generated, a quiet "Summary may be out of date." line appears so you
+  can regenerate it. Anything you edit by hand is kept. If the note seems to
+  update an existing one, Studio shows it as a calm note you can open and compare.
 - **Import existing notes.** Drop one or more `.md` files onto the window, or press
   **⌘O** to pick them. Studio reviews each file's frontmatter (or generates it when
   there is none), lets you adjust, and files it into the right project folder.
@@ -245,6 +248,7 @@ A memory file is just markdown with a small YAML frontmatter block:
 ```markdown
 ---
 name: my-note
+summary: A sentence or two on what this note decides or records.
 type: feedback        # feedback | project | user | reference
 projects: studio      # one project, or a list
 created: 2026-06-20
