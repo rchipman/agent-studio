@@ -1,4 +1,5 @@
 mod audit;
+mod continuity;
 mod embeddings;
 mod frontmatter;
 mod git;
@@ -98,6 +99,7 @@ pub fn run() {
       frontmatter::import_markdown,
       frontmatter::update_frontmatter,
       audit::consistency_audit,
+      continuity::score_memory,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
