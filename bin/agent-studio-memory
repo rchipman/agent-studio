@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# agent-studio-memory — stable entrypoint for Agent Studio's headless memory CLI.
+#
+# Resolves the built Agent Studio binary and exec's its `add-memory` / `supersede`
+# subcommands, so agents can write continuity-scored memory from any shell without
+# the GUI running. Install on PATH via `npm run install-cli` (symlinks this script).
+#
+# Binary resolution order:
+#   1. $AGENT_STUDIO_BIN (explicit override)
+#   2. <repo>/src-tauri/target/release/app   (preferred — built by `npm run install-cli`)
+#   3. <repo>/src-tauri/target/debug/app     (fallback — present after `npm run desktop`)
+#
+set -euo pipefail
+
+# Resolve this script's real path, following symlinks (it's symlinked onto PATH).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$(cd -P "$SCRIPT_DIR/.." && pwd)"
+
+candidates=(
+  "${AGENT_STUDIO_BIN:-}"
+  "$REPO_ROOT/src-tauri/target/release/app"
+  "$REPO_ROOT/src-tauri/target/debug/app"
+)
+
+for bin in "${candidates[@]}"; do
+  if [[ -n "$bin" && -x "$bin" ]]; then
+    exec "$bin" "$@"
+  fi
+done
+
+echo "agent-studio-memory: no Agent Studio binary found." >&2
+echo "  Build one with 'npm run tauri build' (release) or 'npm run desktop' (debug)" >&2
+echo "  in $REPO_ROOT, or set AGENT_STUDIO_BIN to the binary path." >&2
+exit 127
