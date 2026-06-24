@@ -40,6 +40,7 @@ use serde_json::json;
 use crate::continuity::{score_content, ScoreMemoryInput};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
 use crate::memory_audit::{content_hash, record_change, RecordMemoryChangeInput};
+use crate::memory_reads;
 use crate::search::{build_index, init_db, search_core, Db, SearchInput};
 use crate::settings::default_memory_root;
 
@@ -480,6 +481,24 @@ pub fn run_recall(rest: &[String]) -> Result<serde_json::Value, String> {
     };
 
     let results = search_core(&db, &input, k)?;
+
+    // Bump read counts for every surfaced note (one UPSERT per hit). The DB
+    // connection is shared with the rest of the pipeline via the same `Db`.
+    // Failures are logged but do NOT abort the recall response — tracking is
+    // best-effort and must never break the agent's retrieval path.
+    {
+        let ts = chrono::Utc::now().to_rfc3339();
+        match db.0.lock() {
+            Ok(conn) => {
+                for r in &results {
+                    if let Err(e) = memory_reads::record_read(&conn, &r.path, &ts) {
+                        log::warn!("[recall] record_read failed for {}: {e}", r.path);
+                    }
+                }
+            }
+            Err(e) => log::warn!("[recall] could not acquire DB lock for read tracking: {e}"),
+        }
+    }
 
     // Build the recall JSON array. `summary` is read from the file's frontmatter
     // (cheap single-field read per hit); `snippet` is the existing excerpt.

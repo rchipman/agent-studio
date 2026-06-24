@@ -10,6 +10,7 @@ mod linear;
 mod links;
 mod local_embed;
 mod memory_audit;
+mod memory_reads;
 mod reason;
 mod search;
 mod settings;
@@ -111,6 +112,7 @@ pub fn run() {
       continuity::score_memory,
       memory_audit::record_memory_change,
       memory_audit::get_memory_history,
+      memory_reads::record_note_open,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,

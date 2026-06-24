@@ -21,6 +21,7 @@ import FrontmatterForm from '@/components/FrontmatterForm'
 import { NotePill } from '@/components/ConsistencyView'
 import Button from '@/components/Button'
 import { linkSuggest } from '@/lib/links'
+import { recordNoteOpen } from '@/lib/reads'
 import { suggestFrontmatter, summarizeNote, importMarkdown, type Suggestion } from '@/lib/frontmatter'
 import { scoreMemory, recordMemoryChange, bodyHash, type Conflict } from '@/lib/continuity'
 import { initTheme } from '@/lib/theme'
@@ -688,6 +689,9 @@ export default function Home() {
   const loadFile = useCallback((filePath: string, meta?: MemorySearchResult) => {
     pushRecent(filePath)
     lastOpenedPathRef.current = filePath
+    // Record this open as a read for the salience signal (TIN-1745). Fire-and-
+    // forget: never blocks or changes loadFile's behaviour on failure.
+    recordNoteOpen(filePath).catch(() => { /* read tracking is best-effort */ })
 
     // Seed a loading entry (or refresh meta if already cached)
     setFiles((prev) => {
