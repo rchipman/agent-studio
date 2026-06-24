@@ -23,9 +23,16 @@ import {
   setEmbeddingKey,
   embeddingKeyStatus,
   revealEmbeddingKey,
+  linearKeyStatus,
+  setLinearKey,
+  revealLinearKey,
+  listLinearTeams,
+  syncLinear,
   type Settings,
   type Agent,
   type EmbeddingKeyStatus,
+  type LinearKeyStatus,
+  type LinearTeam,
 } from '@/lib/settings'
 
 interface SettingsModalProps {
@@ -51,6 +58,13 @@ type Reindex =
   | { kind: 'done' } // "Index rebuilt" for a beat
   | { kind: 'stale' } // deferred: "Index may be out of date."
 
+// Linear sync flow state.
+type LinearSync =
+  | { kind: 'idle' }
+  | { kind: 'syncing' }
+  | { kind: 'done'; lastSynced: string }
+  | { kind: 'error' }
+
 export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [loading, setLoading] = useState(true)
   const [saveError, setSaveError] = useState(false)
@@ -64,6 +78,16 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
 
   const [reindex, setReindex] = useState<Reindex>({ kind: 'idle' })
 
+  // Linear key
+  const [linearStatus, setLinearStatus] = useState<LinearKeyStatus>('unset')
+  const [linearKeyDraft, setLinearKeyDraft] = useState<string | null>(null) // null = untouched
+  const [linearRevealed, setLinearRevealed] = useState(false)
+  // Linear teams
+  const [linearTeams, setLinearTeams] = useState<LinearTeam[]>([])
+  const [linearTeamKey, setLinearTeamKey] = useState<string>('')
+  // Sync state
+  const [linearSync, setLinearSync] = useState<LinearSync>({ kind: 'idle' })
+
   // ── Load on open ──
   useEffect(() => {
     if (!open) return
@@ -73,13 +97,30 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     setReindex({ kind: 'idle' })
     setKeyDraft(null)
     setRevealed(false)
+    setLinearKeyDraft(null)
+    setLinearRevealed(false)
+    setLinearSync({ kind: 'idle' })
     ;(async () => {
       try {
-        const [s, status] = await Promise.all([getSettings(), embeddingKeyStatus()])
+        const [s, status, linStatus] = await Promise.all([
+          getSettings(),
+          embeddingKeyStatus(),
+          linearKeyStatus(),
+        ])
         if (cancelled) return
         setSettingsState(s)
         setInitialMemoryRoot(s.memoryRoot)
         setKeyStatus(status)
+        setLinearStatus(linStatus)
+        // Load teams if key is already set
+        if (linStatus === 'set') {
+          try {
+            const teams = await listLinearTeams()
+            if (!cancelled) setLinearTeams(teams)
+          } catch {
+            // Not fatal — teams list just stays empty
+          }
+        }
       } catch (err) {
         console.error('[settings] load', err)
       } finally {
@@ -183,6 +224,49 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }
 
+  // ── Linear key ──
+  async function toggleLinearReveal() {
+    if (linearRevealed) {
+      setLinearRevealed(false)
+      return
+    }
+    if (linearKeyDraft !== null) {
+      setLinearRevealed(true)
+      return
+    }
+    try {
+      const plain = await revealLinearKey()
+      setLinearKeyDraft(plain)
+      setLinearRevealed(true)
+    } catch (err) {
+      console.error('[settings] linear reveal', err)
+    }
+  }
+
+  // ── Linear sync ──
+  async function doLinearSync() {
+    setLinearSync({ kind: 'syncing' })
+    try {
+      // Persist the key draft first if it has changed
+      if (linearKeyDraft !== null) {
+        await setLinearKey(linearKeyDraft)
+        setLinearStatus(linearKeyDraft.trim() ? 'set' : 'unset')
+      }
+      const result = await syncLinear(linearTeamKey || undefined)
+      // Load teams after first sync
+      try {
+        const teams = await listLinearTeams()
+        setLinearTeams(teams)
+      } catch {
+        // Not fatal
+      }
+      setLinearSync({ kind: 'done', lastSynced: result.lastSynced })
+    } catch (err) {
+      console.error('[settings] linear sync', err)
+      setLinearSync({ kind: 'error' })
+    }
+  }
+
   // ── Agents ──
   function addAgent() {
     setSettingsState((prev) => ({
@@ -211,6 +295,10 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     if (keyDraft !== null) {
       await setEmbeddingKey(keyDraft)
       setKeyStatus(keyDraft.trim() ? 'set' : 'unset')
+    }
+    if (linearKeyDraft !== null) {
+      await setLinearKey(linearKeyDraft)
+      setLinearStatus(linearKeyDraft.trim() ? 'set' : 'unset')
     }
   }
 
@@ -369,6 +457,109 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                   : keyStatus === 'set'
                     ? 'Set'
                     : 'Not set'}
+              </div>
+            </Section>
+
+            {/* ── Linear ── */}
+            <Section label="Linear">
+              <label style={{ ...type.label, color: color.inkSoft }}>API key</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[2] }}>
+                <input
+                  type={linearRevealed ? 'text' : 'password'}
+                  value={linearRevealed ? linearKeyDraft ?? '' : linearKeyDraft !== null ? linearKeyDraft : MASK}
+                  placeholder={linearStatus === 'set' ? MASK : 'lin_api_…'}
+                  onChange={(e) => {
+                    setLinearKeyDraft(e.target.value)
+                  }}
+                  onFocus={(e) => {
+                    if (linearKeyDraft === null) {
+                      setLinearKeyDraft('')
+                    }
+                    e.currentTarget.style.borderColor = color.forest
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = color.line
+                  }}
+                  style={{
+                    flex: 1,
+                    ...fieldStyle,
+                    fontFamily: font.mono,
+                  }}
+                />
+                <Button variant="tertiary" padding="none" onClick={toggleLinearReveal}>
+                  {linearRevealed ? 'Hide' : 'Reveal'}
+                </Button>
+              </div>
+              <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[2] }}>
+                {linearKeyDraft !== null
+                  ? linearKeyDraft.trim()
+                    ? 'Set'
+                    : 'Not set'
+                  : linearStatus === 'set'
+                    ? 'Set'
+                    : 'Not set'}
+              </div>
+              <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[1] }}>
+                Use a read-scoped personal API key. Studio only reads tickets, never writes.
+              </div>
+              <div style={{ marginTop: space[4] }}>
+                <label style={{ ...type.label, color: color.inkSoft }}>Team</label>
+                <select
+                  value={linearTeamKey}
+                  onChange={(e) => setLinearTeamKey(e.target.value)}
+                  style={{
+                    display: 'block',
+                    marginTop: space[2],
+                    ...fieldStyle,
+                    fontFamily: font.sans,
+                  }}
+                >
+                  {linearTeams.length === 0 ? (
+                    <option value="" disabled>
+                      Sync to choose a team
+                    </option>
+                  ) : (
+                    <>
+                      <option value="">Default team</option>
+                      {linearTeams.map((t) => (
+                        <option key={t.key} value={t.key}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[3] }}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={doLinearSync}
+                  disabled={linearSync.kind === 'syncing'}
+                >
+                  {linearSync.kind === 'syncing' ? 'Syncing…' : 'Sync now'}
+                </Button>
+                {linearSync.kind === 'idle' && (
+                  <span style={{ ...type.meta, color: color.inkFaint }}>Not synced yet.</span>
+                )}
+                {linearSync.kind === 'syncing' && null}
+                {linearSync.kind === 'done' && (
+                  <span style={{ ...type.meta, color: color.inkFaint }}>
+                    {isJustNow(linearSync.lastSynced)
+                      ? 'Last synced just now.'
+                      : `Last synced ${relativeTime(linearSync.lastSynced)}.`}
+                  </span>
+                )}
+                {linearSync.kind === 'error' && (
+                  <>
+                    <span style={{ ...type.meta, color: color.notice }}>
+                      Sync could not finish just now.
+                    </span>
+                    <Button variant="tertiary" tone="notice" padding="none" onClick={doLinearSync}>
+                      Try again
+                    </Button>
+                  </>
+                )}
               </div>
             </Section>
 
@@ -722,6 +913,36 @@ function AgentField({
       />
     </div>
   )
+}
+
+// ── Linear time helpers ─────────────────────────────────────────────────────────
+
+/** Returns true if the ISO timestamp is within the last 60 seconds. */
+function isJustNow(iso: string): boolean {
+  try {
+    return Date.now() - new Date(iso).getTime() < 60_000
+  } catch {
+    return false
+  }
+}
+
+/** Human-readable relative time from an ISO timestamp. */
+function relativeTime(iso: string): string {
+  try {
+    const diffMs = Date.now() - new Date(iso).getTime()
+    const diffMin = Math.floor(diffMs / 60_000)
+    if (diffMin < 1) return 'just now'
+    if (diffMin === 1) return '1 minute ago'
+    if (diffMin < 60) return `${diffMin} minutes ago`
+    const diffHr = Math.floor(diffMin / 60)
+    if (diffHr === 1) return '1 hour ago'
+    if (diffHr < 24) return `${diffHr} hours ago`
+    const diffDay = Math.floor(diffHr / 24)
+    if (diffDay === 1) return 'yesterday'
+    return `${diffDay} days ago`
+  } catch {
+    return iso
+  }
 }
 
 // ── Shared inline styles (composed from tokens) ─────────────────────────────────
