@@ -27,6 +27,7 @@ dur(s) | outcome | self-report fit | adjustment.
 | Jonny design: threaded subagent reader | design | opus | 64.2k | 6 | 121 | BLESSED | right | opus right; nailed the reading model + a complete Rust backend contract a cheaper model would under-spec |
 | Cleo: agent-memory landscape research | research | opus | 31.8k | 13 | 113 | BLESSED | right | honest novelty read; landscape table + steal-list + sources |
 | Jonny design: living-memory epic (6 surfaces) | design | opus | 75.5k | 18 | 175 | BLESSED | right | hit the hard constraint — ZERO new primitives across 6 surfaces, both themes via tokens |
+| TIN-1730 continuity scorer | build | opus | 78.7k | 38 | 369 | BLESSED (0 changes) | **over-powered** | **reuse-compose Rust w/ a tight reading list → try sonnet next**; also caught a wrong specta ref in the ticket |
 
 ## Learnings → routing adjustments
 
