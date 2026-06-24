@@ -46,6 +46,8 @@ const NODE_R_MIN = 6
 const NODE_R_MAX = 22
 /** Ticket nodes are a fixed small hollow ring. */
 const TICKET_R = 5
+/** Epic nodes are the same ring at a heavier scale (Jonny spec: × 1.6). */
+const EPIC_R_SCALE = 1.6
 
 /** Force-sim canvas the layout is computed in (world units, before fit-all). */
 const SIM_W = 1200
@@ -419,7 +421,8 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
    * which the payload does provide, so they filter fully.
    */
   function nodeVisible(n: GraphNode): boolean {
-    if (n.kind === 'ticket') return showTickets
+    // Tickets and epics share the single "Tickets" toggle (Jonny spec: one calm chip).
+    if (n.kind === 'ticket' || n.kind === 'epic') return showTickets
     const projOk = activeProjects.size === 0 || activeProjects.has(n.domain)
     // Type is unknown on the payload, so the Type chips never narrow files here
     // (always passes — see note above). Reference activeTypes so the dependency is
@@ -556,7 +559,7 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
             {connected.map(n => {
               const p = positions.get(n.id)
               if (!p) return null
-              if (n.kind === 'ticket' && !showTickets) return null
+              if ((n.kind === 'ticket' || n.kind === 'epic') && !showTickets) return null
               const c = toCanvas(p.x, p.y)
               return renderNode(n, c.x, c.y)
             })}
@@ -586,7 +589,7 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
                 )
               })()}
               {shelf.items.map(it => {
-                if (it.node.kind === 'ticket' && !showTickets) return null
+                if ((it.node.kind === 'ticket' || it.node.kind === 'epic') && !showTickets) return null
                 const c = toCanvas(it.x, it.y)
                 return renderNode(it.node, c.x, c.y)
               })}
@@ -664,6 +667,41 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
             <text
               x={cx}
               y={cy + TICKET_R * zoom + 12}
+              textAnchor="middle"
+              style={{ ...typeToken.mono, fontSize: 10, fill: isHover ? color.ink : color.inkSoft }}
+            >
+              {n.label}
+            </text>
+          )}
+        </g>
+      )
+    }
+
+    if (n.kind === 'epic') {
+      // Epic = same hollow ring × EPIC_R_SCALE, one step heavier stroke (inkSoft / 2px).
+      // No domain hue — epics are domain-agnostic machinery (Jonny spec).
+      const epicR = TICKET_R * EPIC_R_SCALE * zoom
+      return (
+        <g
+          key={n.id}
+          opacity={op}
+          style={{ cursor: 'pointer' }}
+          onPointerEnter={() => setHoverId(n.id)}
+          onPointerLeave={() => setHoverId(prev => (prev === n.id ? null : prev))}
+          onClick={() => onOpenTicket(n.id)}
+        >
+          <circle
+            cx={cx}
+            cy={cy}
+            r={epicR}
+            fill={color.bgRaised}
+            stroke={color.inkSoft}
+            strokeWidth={2}
+          />
+          {(showLabels || isHover) && (
+            <text
+              x={cx}
+              y={cy + epicR + 12}
               textAnchor="middle"
               style={{ ...typeToken.mono, fontSize: 10, fill: isHover ? color.ink : color.inkSoft }}
             >
