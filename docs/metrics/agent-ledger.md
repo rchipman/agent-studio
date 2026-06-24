@@ -21,6 +21,8 @@ dur(s) | outcome | self-report fit | adjustment.
 | 1633 jonny-lite | review | sonnet | 35.6k | 3 | 54 | found nits | right | (haiku would suffice) |
 | 1636 jonny-lite | review | haiku | 31.7k | 3 | 14 | BLESSED | right | haiku ideal |
 | Jonny design: nav chrome (1707/1708/1709) | design | opus | 66.7k | 12 | 176 | BLESSED | right | opus right; caught a doc-rule reversal + terminal token gap a cheaper model would miss |
+| TIN-1707+1708 build (Launch destination + persistent bar) | build | opus | 170.6k | 102 | 657 | BLESSED (1 nit) | right | opus right for the page.tsx keystone refactor (ViewShell retire + slot-context across 5 views + Launcher-as-view) |
+| 1707/1708 jonny-lite | review | haiku | 78.5k | 20 | 43 | found 1 nit (missing title attr) | right | haiku confirmed for conformance again |
 
 ## Learnings → routing adjustments
 

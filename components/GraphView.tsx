@@ -455,7 +455,7 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
   const { setRight } = useTopBarSlot()
   useEffect(() => {
     setRight(
-      <Button variant="secondary" size="sm" onClick={fitAll}>
+      <Button variant="secondary" size="sm" onClick={fitAll} title="Reset view">
         Reset view
       </Button>,
     )
