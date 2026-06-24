@@ -1,4 +1,5 @@
 mod audit;
+mod cli;
 mod continuity;
 mod embeddings;
 mod frontmatter;
@@ -23,6 +24,11 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // Headless write path (TIN-1731): if invoked as `add-memory ...` / `supersede
+  // ...`, run that pipeline, print JSON, and exit — the webview never starts.
+  // Any other argv falls through to launch the GUI exactly as before.
+  cli::maybe_run();
+
   let builder = tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
