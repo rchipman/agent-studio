@@ -18,6 +18,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { color, space, radius, type as typeToken, font } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
+import ViewShell from '@/components/ViewShell'
 
 // ── IPC types (mirror transcript.rs) ─────────────────────────────────────────
 
@@ -355,58 +356,9 @@ export default function TranscriptBrowser({ onClose }: TranscriptBrowserProps) {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: color.bgApp,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Top bar */}
-      <div
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          padding: `0 ${space[5]}px`,
-          borderBottom: `1px solid ${color.hair}`,
-          flexShrink: 0,
-          background: color.bgApp,
-          gap: space[5],
-        }}
-      >
-        {onClose && (
-          <button
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              padding: `${space[2]}px ${space[3]}px`,
-              cursor: 'pointer',
-              ...typeToken.body,
-              color: color.inkSoft,
-              borderRadius: radius.md,
-              display: 'flex',
-              alignItems: 'center',
-              gap: space[2],
-            }}
-          >
-            <span style={{ fontSize: 14 }}>←</span>
-            <span>Agent Studio</span>
-          </button>
-        )}
-        <div style={{ flex: 1, textAlign: 'center', ...typeToken.title, color: color.ink }}>
-          Transcripts
-        </div>
-        {/* spacer to balance back button */}
-        {onClose && <div style={{ width: 100 }} />}
-      </div>
-
-      {/* Three-pane body */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+  // Three-pane browse layout (shared by both the full-view and embedded forms).
+  const body = (
+    <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
         {/* ── Pane 1: Projects rail ── */}
         <div
@@ -670,7 +622,46 @@ export default function TranscriptBrowser({ onClose }: TranscriptBrowserProps) {
           </div>
         </div>
 
+    </div>
+  )
+
+  // Full view: the shared shell supplies the back + centered `Transcripts` bar.
+  if (onClose) {
+    return (
+      <ViewShell title="Transcripts" onBack={onClose}>
+        {body}
+      </ViewShell>
+    )
+  }
+
+  // Embedded (no close handler): a title-only bar, no back button.
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        background: color.bgApp,
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          height: 44,
+          display: 'flex',
+          alignItems: 'center',
+          padding: `0 ${space[5]}px`,
+          borderBottom: `1px solid ${color.hair}`,
+          flexShrink: 0,
+          background: color.bgApp,
+          gap: space[5],
+        }}
+      >
+        <div style={{ flex: 1, textAlign: 'center', ...typeToken.title, color: color.ink }}>
+          Transcripts
+        </div>
       </div>
+      {body}
     </div>
   )
 }

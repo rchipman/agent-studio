@@ -18,6 +18,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
 import { consistencyAudit, onAuditProgress, type Finding } from '@/lib/audit'
+import ViewShell from '@/components/ViewShell'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,68 +28,6 @@ export interface ConsistencyViewProps {
   /** plain click = this panel; ⌘-click = other panel */
   onOpenFile: (path: string, e: React.MouseEvent) => void
   onClose: () => void
-}
-
-// ── Top-bar chrome (44px, matches GraphView / AuditView verbatim) ─────────────
-
-function TopBar({
-  onClose,
-  rightSlot,
-}: {
-  onClose: () => void
-  rightSlot?: React.ReactNode
-}) {
-  return (
-    <div
-      style={{
-        height: 44,
-        display: 'flex',
-        alignItems: 'center',
-        padding: `0 ${space[5]}px`,
-        borderBottom: `1px solid ${color.hair}`,
-        flexShrink: 0,
-        background: color.bgApp,
-        gap: space[5],
-      }}
-    >
-      <button
-        onClick={onClose}
-        style={{
-          background: 'none',
-          border: 'none',
-          padding: `${space[2]}px ${space[3]}px`,
-          cursor: 'pointer',
-          ...typeToken.body,
-          color: color.inkSoft,
-          borderRadius: radius.md,
-          display: 'flex',
-          alignItems: 'center',
-          gap: space[2],
-        }}
-      >
-        <span style={{ fontSize: 14 }} aria-hidden>
-          ←
-        </span>
-        <span>Agent Studio</span>
-      </button>
-
-      <div style={{ flex: 1, textAlign: 'center', ...typeToken.title, color: color.ink }}>
-        Consistency
-      </div>
-
-      {/* Right slot: 240px wide, right-aligned; findings count in findings state */}
-      <div
-        style={{
-          width: 240,
-          textAlign: 'right',
-          ...typeToken.meta,
-          color: color.inkSoft,
-        }}
-      >
-        {rightSlot}
-      </div>
-    </div>
-  )
 }
 
 // ── Reading column wrapper ─────────────────────────────────────────────────────
@@ -345,21 +284,11 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
   // Top-bar right slot: count only in findings state.
   const rightSlot =
     viewState === 'findings' ? (
-      <>{findings.length} worth a look.</>
+      <span style={{ ...typeToken.meta, color: color.inkSoft }}>{findings.length} worth a look.</span>
     ) : undefined
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: color.bgApp,
-        overflow: 'hidden',
-      }}
-    >
-      <TopBar onClose={onClose} rightSlot={rightSlot} />
-
+    <ViewShell title="Consistency" onBack={onClose} right={rightSlot}>
       {/* ── Idle ─────────────────────────────────────────────────────────── */}
       {viewState === 'idle' && (
         <Column>
@@ -537,6 +466,6 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
           </div>
         </Column>
       )}
-    </div>
+    </ViewShell>
   )
 }

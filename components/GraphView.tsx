@@ -33,6 +33,7 @@ import {
 import { color, space, radius, type as typeToken, font } from '@/lib/tokens'
 import { graphData, type GraphNode, type GraphEdge } from '@/lib/links'
 import TypeChip from '@/components/TypeChip'
+import ViewShell from '@/components/ViewShell'
 
 // ── Layout constants (not design tokens — graph geometry per the spec) ─────────
 
@@ -447,47 +448,24 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
     return visibleMap.get(id) ? 1 : DIM
   }
 
-  // ── Chrome (top bar, shared with the transcript browser) ───────────────────────
+  // ── Chrome (top-bar right slot: Reset view) ────────────────────────────────────
 
-  function renderTopBar() {
-    return (
-      <div
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          padding: `0 ${space[5]}px`,
-          borderBottom: `1px solid ${color.hair}`,
-          flexShrink: 0,
-          background: color.bgApp,
-          gap: space[5],
-        }}
-      >
-        <button
-          onClick={onClose}
-          style={{
-            background: 'none',
-            border: 'none',
-            padding: `${space[2]}px ${space[3]}px`,
-            cursor: 'pointer',
-            ...typeToken.body,
-            color: color.inkSoft,
-            borderRadius: radius.md,
-            display: 'flex',
-            alignItems: 'center',
-            gap: space[2],
-          }}
-        >
-          <span style={{ fontSize: 14 }} aria-hidden>
-            ←
-          </span>
-          <span>Agent Studio</span>
-        </button>
-        <div style={{ flex: 1, textAlign: 'center', ...typeToken.title, color: color.ink }}>Graph</div>
-        <div style={{ width: 100 }} />
-      </div>
-    )
-  }
+  const resetControl = (
+    <button
+      onClick={fitAll}
+      style={{
+        background: color.bgField,
+        border: `1px solid ${color.hair}`,
+        borderRadius: radius.md,
+        padding: `${space[2]}px ${space[3]}px`,
+        cursor: 'pointer',
+        ...typeToken.body,
+        color: color.inkSoft,
+      }}
+    >
+      Reset view
+    </button>
+  )
 
   // ── States: loading / error / empty ────────────────────────────────────────────
 
@@ -498,15 +476,15 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
 
   if (loading) {
     return (
-      <Shell topBar={renderTopBar()}>
+      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
         <Centered color={color.inkSoft}>Drawing your graph…</Centered>
-      </Shell>
+      </ViewShell>
     )
   }
 
   if (error) {
     return (
-      <Shell topBar={renderTopBar()}>
+      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
         <div
           style={{
             margin: 'auto',
@@ -521,26 +499,26 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
         >
           Could not load the graph.
         </div>
-      </Shell>
+      </ViewShell>
     )
   }
 
   if (isEmpty) {
     return (
-      <Shell topBar={renderTopBar()}>
+      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
         <Centered color={color.inkFaint}>
           No connections yet. Link notes with{' '}
           <code style={{ ...typeToken.mono, color: color.inkSoft }}>[[</code> or mention a ticket, and your graph
           grows here.
         </Centered>
-      </Shell>
+      </ViewShell>
     )
   }
 
   // ── Main canvas ─────────────────────────────────────────────────────────────────
 
   return (
-    <Shell topBar={renderTopBar()}>
+    <ViewShell title="Graph" onBack={onClose} right={resetControl}>
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         {/* SVG canvas */}
         <svg
@@ -658,27 +636,8 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
           <div style={{ width: 1, background: color.hair, margin: '0 2px', alignSelf: 'stretch' }} />
           <TypeChip label="Tickets" active={showTickets} onClick={() => setShowTickets(v => !v)} />
         </div>
-
-        {/* Reset view (top-right of canvas) */}
-        <button
-          onClick={fitAll}
-          style={{
-            position: 'absolute',
-            top: space[4],
-            right: space[4],
-            background: color.bgField,
-            border: `1px solid ${color.hair}`,
-            borderRadius: radius.md,
-            padding: `${space[2]}px ${space[3]}px`,
-            cursor: 'pointer',
-            ...typeToken.body,
-            color: color.inkSoft,
-          }}
-        >
-          Reset view
-        </button>
       </div>
-    </Shell>
+    </ViewShell>
   )
 
   // ── Node renderer (closure: needs hover + transform state) ─────────────────────
@@ -757,23 +716,6 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
 }
 
 // ── Small shell helpers ──────────────────────────────────────────────────────────
-
-function Shell({ topBar, children }: { topBar: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: color.bgApp,
-        overflow: 'hidden',
-      }}
-    >
-      {topBar}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>{children}</div>
-    </div>
-  )
-}
 
 function Centered({ children, color: c }: { children: React.ReactNode; color: string }) {
   return (

@@ -47,10 +47,6 @@ const LAYOUT_KEY = 'agent-studio-layout'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function countWords(text: string): number {
-  return text.trim().split(/\s+/).filter(Boolean).length
-}
-
 
 const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : 'left')
 
@@ -441,7 +437,7 @@ export default function Home() {
   const [draggingImport, setDraggingImport] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [showLauncher, setShowLauncher] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
+  const [, setIsSaving] = useState(false)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
   const runRef = useRef<((req: RunRequest) => void) | null>(null)
 
@@ -1045,11 +1041,6 @@ export default function Home() {
 
   const lookupLoaded = useCallback((path: string): LoadedFile | null => files[path] ?? null, [files])
 
-  // Top-bar context follows the most relevant panel: the right when open, else left.
-  const focusPanel = rightOpen && rightPanel.activeTabId ? rightPanel : leftPanel
-  const focusLoaded = focusPanel.activeTabId ? files[focusPanel.activeTabId] ?? null : null
-  const inEditor = focusPanel.activeTabId !== null
-  const wordCount = countWords(focusLoaded?.content ?? '')
 
   return (
     <div
@@ -1105,13 +1096,8 @@ export default function Home() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Right side */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, minWidth: 160, justifyContent: 'flex-end' }}>
-          {inEditor && (
-            <span style={{ fontSize: 12, color: color.inkSoft }}>
-              {isSaving ? 'Saving…' : `${wordCount.toLocaleString()} words`}
-            </span>
-          )}
+        {/* Right side — verbs only; per-doc context lives in the doc strip. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, justifyContent: 'flex-end' }}>
           <button
             onClick={toggleRightPanel}
             title="Toggle right panel (⌘\)"
