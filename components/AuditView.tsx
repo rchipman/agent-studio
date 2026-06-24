@@ -29,6 +29,7 @@ import {
 } from '@/lib/frontmatter'
 import TypeChip from '@/components/TypeChip'
 import FrontmatterForm from '@/components/FrontmatterForm'
+import ViewShell from '@/components/ViewShell'
 
 // ── Health vocabulary (the calm dot grammar) ─────────────────────────────────
 
@@ -175,59 +176,15 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
   }, [])
 
   // ── Render ──
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: color.bgApp,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Top bar */}
-      <div
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          padding: `0 ${space[5]}px`,
-          borderBottom: `1px solid ${color.hair}`,
-          flexShrink: 0,
-          background: color.bgApp,
-          gap: space[5],
-        }}
-      >
-        <button
-          onClick={onClose}
-          style={{
-            background: 'none',
-            border: 'none',
-            padding: `${space[2]}px ${space[3]}px`,
-            cursor: 'pointer',
-            ...type_.body,
-            color: color.inkSoft,
-            borderRadius: radius.md,
-            display: 'flex',
-            alignItems: 'center',
-            gap: space[2],
-          }}
-        >
-          <span style={{ fontSize: 14 }}>←</span>
-          <span>Agent Studio</span>
-        </button>
-        <div style={{ flex: 1, textAlign: 'center', ...type_.title, color: color.ink }}>
-          Frontmatter
-        </div>
-        <div style={{ ...type_.meta, color: color.inkSoft, width: 240, textAlign: 'right' }}>
-          {entries && !allHealthy && (
-            <>
-              {counts.complete} described · {counts.partial} need a little · {counts.missing} not yet.
-            </>
-          )}
-        </div>
+  const summary =
+    entries && !allHealthy ? (
+      <div style={{ ...type_.meta, color: color.inkSoft, textAlign: 'right' }}>
+        {counts.complete} described · {counts.partial} need a little · {counts.missing} not yet.
       </div>
+    ) : undefined
 
+  return (
+    <ViewShell title="Frontmatter" onBack={onClose} right={summary}>
       {/* Body */}
       {error ? (
         <div style={{ padding: `${space[8]}px ${space[7]}px`, maxWidth: 680, margin: '0 auto', width: '100%' }}>
@@ -306,7 +263,7 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
           onSkip={advance}
         />
       )}
-    </div>
+    </ViewShell>
   )
 
   function advance() {

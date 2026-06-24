@@ -455,6 +455,7 @@ function DocStrip({
   onAddDoc,
   showClose,
   onClosePanel,
+  wordCount,
 }: {
   tabs: OpenDoc[]
   activeTabId: string | null
@@ -465,6 +466,8 @@ function DocStrip({
   onAddDoc: () => void
   showClose: boolean
   onClosePanel?: () => void
+  /** Active document's word count, shown right-aligned; null when not in a doc. */
+  wordCount?: number | null
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLDivElement>(null)
@@ -571,6 +574,13 @@ function DocStrip({
       >
         +
       </button>
+
+      {/* Active document word count — calm, right of the tabs (TIN nav phase 3). */}
+      {typeof wordCount === 'number' && (
+        <span style={{ ...typeRamp.meta, color: color.inkFaint, paddingLeft: space[3], paddingRight: space[1], flexShrink: 0 }}>
+          {wordCount.toLocaleString()} w
+        </span>
+      )}
 
       {/* Panel-close ✕ — far right, right panel only (unchanged behaviour) */}
       {showClose && (
@@ -781,6 +791,7 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
         onAddDoc={onAddDoc}
         showClose={showClose}
         onClosePanel={onClose}
+        wordCount={inEditor && loaded?.content ? loaded.content.trim().split(/\s+/).filter(Boolean).length : null}
       />
 
       {/* Surface strip renders only when a document tab is active. */}
