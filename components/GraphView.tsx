@@ -33,7 +33,9 @@ import {
 import { color, space, radius, type as typeToken, font } from '@/lib/tokens'
 import { graphData, type GraphNode, type GraphEdge } from '@/lib/links'
 import TypeChip from '@/components/TypeChip'
-import ViewShell from '@/components/ViewShell'
+import Button from '@/components/Button'
+import ViewBody from '@/components/ViewBody'
+import { useTopBarSlot } from '@/components/TopBarSlot'
 
 // ── Layout constants (not design tokens — graph geometry per the spec) ─────────
 
@@ -450,22 +452,15 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
 
   // ── Chrome (top-bar right slot: Reset view) ────────────────────────────────────
 
-  const resetControl = (
-    <button
-      onClick={fitAll}
-      style={{
-        background: color.bgField,
-        border: `1px solid ${color.hair}`,
-        borderRadius: radius.md,
-        padding: `${space[2]}px ${space[3]}px`,
-        cursor: 'pointer',
-        ...typeToken.body,
-        color: color.inkSoft,
-      }}
-    >
-      Reset view
-    </button>
-  )
+  const { setRight } = useTopBarSlot()
+  useEffect(() => {
+    setRight(
+      <Button variant="secondary" size="sm" onClick={fitAll} title="Reset view">
+        Reset view
+      </Button>,
+    )
+    return () => setRight(null)
+  }, [setRight, fitAll])
 
   // ── States: loading / error / empty ────────────────────────────────────────────
 
@@ -476,15 +471,15 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
 
   if (loading) {
     return (
-      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
+      <ViewBody>
         <Centered color={color.inkSoft}>Drawing your graph…</Centered>
-      </ViewShell>
+      </ViewBody>
     )
   }
 
   if (error) {
     return (
-      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
+      <ViewBody>
         <div
           style={{
             margin: 'auto',
@@ -499,26 +494,26 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
         >
           Could not load the graph.
         </div>
-      </ViewShell>
+      </ViewBody>
     )
   }
 
   if (isEmpty) {
     return (
-      <ViewShell title="Graph" onBack={onClose} right={resetControl}>
+      <ViewBody>
         <Centered color={color.inkFaint}>
           No connections yet. Link notes with{' '}
           <code style={{ ...typeToken.mono, color: color.inkSoft }}>[[</code> or mention a ticket, and your graph
           grows here.
         </Centered>
-      </ViewShell>
+      </ViewBody>
     )
   }
 
   // ── Main canvas ─────────────────────────────────────────────────────────────────
 
   return (
-    <ViewShell title="Graph" onBack={onClose} right={resetControl}>
+    <ViewBody>
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         {/* SVG canvas */}
         <svg
@@ -637,7 +632,7 @@ export default function GraphView({ onOpenFile, onOpenTicket, onClose }: GraphVi
           <TypeChip label="Tickets" active={showTickets} onClick={() => setShowTickets(v => !v)} />
         </div>
       </div>
-    </ViewShell>
+    </ViewBody>
   )
 
   // ── Node renderer (closure: needs hover + transform state) ─────────────────────

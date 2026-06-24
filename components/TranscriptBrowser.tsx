@@ -18,7 +18,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { color, space, radius, type as typeToken, font } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
-import ViewShell from '@/components/ViewShell'
+import ViewBody from '@/components/ViewBody'
+import { useTopBarSlot } from '@/components/TopBarSlot'
 
 // ── IPC types (mirror transcript.rs) ─────────────────────────────────────────
 
@@ -192,11 +193,19 @@ function ConversationTurn({ turn, highlight }: ConversationTurnProps) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface TranscriptBrowserProps {
-  /** When used as an overlay / full view, optional close handler. */
+  /** Retained for parity with the other full views; Sessions has no top-bar
+   *  right slot and Esc behaviour is unchanged from before. */
   onClose?: () => void
 }
 
-export default function TranscriptBrowser({ onClose }: TranscriptBrowserProps) {
+export default function TranscriptBrowser({}: TranscriptBrowserProps) {
+  // Sessions has an empty top-bar right slot (its search lives in pane 1).
+  // Clear any slot the previous view registered. (TIN-1708)
+  const { setRight } = useTopBarSlot()
+  useEffect(() => {
+    setRight(null)
+    return () => setRight(null)
+  }, [setRight])
   // ── State ──────────────────────────────────────────────────────────────────
 
   const [projects, setProjects] = useState<TranscriptProject[]>([])
@@ -625,43 +634,7 @@ export default function TranscriptBrowser({ onClose }: TranscriptBrowserProps) {
     </div>
   )
 
-  // Full view: the shared shell supplies the back + centered `Transcripts` bar.
-  if (onClose) {
-    return (
-      <ViewShell title="Transcripts" onBack={onClose}>
-        {body}
-      </ViewShell>
-    )
-  }
-
-  // Embedded (no close handler): a title-only bar, no back button.
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        background: color.bgApp,
-        overflow: 'hidden',
-      }}
-    >
-      <div
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          padding: `0 ${space[5]}px`,
-          borderBottom: `1px solid ${color.hair}`,
-          flexShrink: 0,
-          background: color.bgApp,
-          gap: space[5],
-        }}
-      >
-        <div style={{ flex: 1, textAlign: 'center', ...typeToken.title, color: color.ink }}>
-          Transcripts
-        </div>
-      </div>
-      {body}
-    </div>
-  )
+  // The body fills the content area below the one persistent top bar (which now
+  // owns the `Sessions` title and the history arrows). TIN-1708.
+  return <ViewBody>{body}</ViewBody>
 }

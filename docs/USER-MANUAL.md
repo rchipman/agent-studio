@@ -18,11 +18,19 @@ recent and matching memory files, with the markdown editor when a file is open.
 The **nav rail** down the far left is home base. It holds every place you can go,
 always visible, with the current one highlighted: **Search** (the workspace),
 **Graph**, **Fields** (the frontmatter audit), **Check** (the consistency audit),
-**Sessions** (transcripts), and **Settings** pinned at the bottom. Each also has
-a keyboard shortcut (see the table at the end), but you never have to remember
-them, the rail is right there.
+**Launch** (start a session, in its own slot), **Changes**, **Sessions**
+(transcripts), and **Settings** pinned at the bottom. Each also has a keyboard
+shortcut (see the table at the end), but you never have to remember them, the
+rail is right there.
 
-The **top bar** is just your verbs: **Split**, **+ New**, and **Launch**.
+The **top bar** is one persistent strip, always above whatever you are looking
+at. On the left it has the **history arrows** (back and forward through
+everywhere you have been) and shows **where you are** (the wordmark in the
+workspace, the room name in a full view). On the right it shows that room's
+action: in the workspace, **+ New memory**; in Graph, **Reset view**; in
+Changes, **Refresh**; and so on. There is no back button, the rail shows where
+you are and the arrows (or **Esc**) are how you leave. **Split** is a control on
+each panel's tab row.
 
 Below the top bar each panel has a **tab row** of open documents (and the pinned
 **Search** tab). A note shows its content, with its connections in a quiet
@@ -48,8 +56,8 @@ now, the **Changes** view (see section 5), not a tab on a document.
 
 - **The editor** is a clean WYSIWYG markdown editor. Your file's frontmatter
   (the `---` block) is preserved; you edit the prose. Changes autosave.
-- **New file.** Press **⌘N** (or **+ New**) to create a memory file with its
-  type, project, and frontmatter set up for you.
+- **New file.** Press **⌘N** (or **+ New memory** in the top bar) to create a
+  memory file with its type, project, and frontmatter set up for you.
 - **Quick capture.** Press **⌘⇧N** from anywhere for the fastest path from a
   thought to memory: a small box opens, focused and ready. Type your note, pick a
   type and project, and press **⌘Return** to save. The name and filename are taken
@@ -120,7 +128,9 @@ session.
 
 ## 7. The Launcher — start a session
 
-This is the heart of Agent Studio. Press **⌘R** (or **Launch**).
+This is the heart of Agent Studio. Press **⌘R** (or click **Launch** on the nav
+rail) to open the Launch view. It is a full destination now, a room you go to,
+not a popup; **⌘R** again (or **Esc**) returns you to the workspace.
 
 You get a single composition canvas, three columns:
 
@@ -268,7 +278,7 @@ Studio indexes these for search. `MEMORY.md` and hidden files are skipped.
 | `⌘O` | Import Markdown files |
 | `⌘⇧A` | Frontmatter audit |
 | `⌘⇧C` | Consistency audit |
-| `⌘R` | Launcher |
+| `⌘R` | Launch (open / close the Launch view) |
 | `⌘,` | Settings |
 | `⌘Return` | Save / Run (in modals and the launcher) |
 | `Esc` | Dismiss the top layer |

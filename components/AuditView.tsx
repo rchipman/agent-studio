@@ -30,7 +30,8 @@ import {
 import TypeChip from '@/components/TypeChip'
 import Button from '@/components/Button'
 import FrontmatterForm from '@/components/FrontmatterForm'
-import ViewShell from '@/components/ViewShell'
+import ViewBody from '@/components/ViewBody'
+import { useTopBarSlot } from '@/components/TopBarSlot'
 
 // ── Health vocabulary (the calm dot grammar) ─────────────────────────────────
 
@@ -177,15 +178,21 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
   }, [])
 
   // ── Render ──
-  const summary =
-    entries && !allHealthy ? (
-      <div style={{ ...type_.meta, color: color.inkSoft, textAlign: 'right' }}>
-        {counts.complete} described · {counts.partial} need a little · {counts.missing} not yet.
-      </div>
-    ) : undefined
+  // Register the calm progress readout into the persistent top bar's right slot.
+  const { setRight } = useTopBarSlot()
+  useEffect(() => {
+    const summary =
+      entries && !allHealthy ? (
+        <div style={{ ...type_.meta, color: color.inkSoft, textAlign: 'right' }}>
+          {counts.complete} described · {counts.partial} need a little · {counts.missing} not yet.
+        </div>
+      ) : null
+    setRight(summary)
+    return () => setRight(null)
+  }, [setRight, entries, allHealthy, counts])
 
   return (
-    <ViewShell title="Frontmatter" onBack={onClose} right={summary}>
+    <ViewBody>
       {/* Body */}
       {error ? (
         <div style={{ padding: `${space[8]}px ${space[7]}px`, maxWidth: 680, margin: '0 auto', width: '100%' }}>
@@ -256,7 +263,7 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
           onSkip={advance}
         />
       )}
-    </ViewShell>
+    </ViewBody>
   )
 
   function advance() {

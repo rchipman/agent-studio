@@ -19,7 +19,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
 import Button from '@/components/Button'
 import { consistencyAudit, onAuditProgress, type Finding } from '@/lib/audit'
-import ViewShell from '@/components/ViewShell'
+import ViewBody from '@/components/ViewBody'
+import { useTopBarSlot } from '@/components/TopBarSlot'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -254,14 +255,20 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  // Top-bar right slot: count only in findings state.
-  const rightSlot =
-    viewState === 'findings' ? (
-      <span style={{ ...typeToken.meta, color: color.inkSoft }}>{findings.length} worth a look.</span>
-    ) : undefined
+  // Top-bar right slot: count only in findings state. Registered into the one
+  // persistent top bar (TIN-1708).
+  const { setRight } = useTopBarSlot()
+  useEffect(() => {
+    setRight(
+      viewState === 'findings' ? (
+        <span style={{ ...typeToken.meta, color: color.inkSoft }}>{findings.length} worth a look.</span>
+      ) : null,
+    )
+    return () => setRight(null)
+  }, [setRight, viewState, findings.length])
 
   return (
-    <ViewShell title="Consistency" onBack={onClose} right={rightSlot}>
+    <ViewBody>
       {/* ── Idle ─────────────────────────────────────────────────────────── */}
       {viewState === 'idle' && (
         <Column>
@@ -439,6 +446,6 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
           </div>
         </Column>
       )}
-    </ViewShell>
+    </ViewBody>
   )
 }

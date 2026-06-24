@@ -54,6 +54,9 @@ interface LauncherProps {
   onRun: (req: RunRequest) => void
   /** Open Settings (for the "Settings" links in empty states). */
   onOpenSettings: () => void
+  /** Render as a full view inside the content column (no fixed scrim, no own
+   *  header — the persistent top bar owns the `Launch` title). TIN-1707. */
+  asView?: boolean
 }
 
 // ── Search client (reuse the existing FTS command, same shape as page.tsx) ──────
@@ -152,7 +155,7 @@ type PickerKind = 'skills' | 'memory' | 'files' | null
 
 // ── Main component ──────────────────────────────────────────────────────────────
 
-export default function Launcher({ open, onClose, onRun, onOpenSettings }: LauncherProps) {
+export default function Launcher({ open, onClose, onRun, onOpenSettings, asView = false }: LauncherProps) {
   const [settings, setSettings] = useState<Settings | null>(null)
 
   // Prompts column
@@ -354,56 +357,72 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings }: Launc
 
   // ── Render ──
 
-  return (
-    <div
-      style={{
+  // As a full view (TIN-1707) the launcher fills the content column with no scrim
+  // and no header — the one persistent top bar owns the `Launch` title and the
+  // history arrows. As a modal it keeps its fixed overlay + its own header.
+  const outerStyle: React.CSSProperties = asView
+    ? {
+        height: '100%',
+        width: '100%',
+        minHeight: 0,
+        background: color.bgApp,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }
+    : {
         position: 'fixed',
         inset: 0,
         zIndex: 1500,
         background: color.bgApp,
         display: 'flex',
         flexDirection: 'column',
-      }}
-    >
-      {/* Top bar — persists with ← return; center reads "Launch" */}
-      <header
-        style={{
-          height: 44,
-          display: 'flex',
-          alignItems: 'center',
-          borderBottom: `1px solid ${color.hair}`,
-          padding: '0 20px',
-          gap: space[5],
-          flexShrink: 0,
-          background: color.bgApp,
-        }}
-      >
-        <button
-          onClick={onClose}
+      }
+
+  return (
+    <div style={outerStyle}>
+      {/* Modal-only top bar — persists with ← return; center reads "Launch". As a
+          view this is supplied by the app's one persistent top bar instead. */}
+      {!asView && (
+        <header
           style={{
-            fontFamily: "'Fraunces', 'Georgia', serif",
-            fontSize: 15,
-            fontWeight: 600,
-            color: color.forest,
-            letterSpacing: '-0.01em',
-            background: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 0,
-            minWidth: 120,
-            textAlign: 'left',
+            height: 44,
+            display: 'flex',
+            alignItems: 'center',
+            borderBottom: `1px solid ${color.hair}`,
+            padding: '0 20px',
+            gap: space[5],
+            flexShrink: 0,
+            background: color.bgApp,
           }}
         >
-          ← Agent Studio
-        </button>
-        <div style={{ flex: 1, textAlign: 'center', ...typeRamp.title, color: color.ink }}>
-          Launch
-        </div>
-        <div style={{ minWidth: 120 }} />
-      </header>
+          <button
+            onClick={onClose}
+            style={{
+              fontFamily: "'Fraunces', 'Georgia', serif",
+              fontSize: 15,
+              fontWeight: 600,
+              color: color.forest,
+              letterSpacing: '-0.01em',
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              padding: 0,
+              minWidth: 120,
+              textAlign: 'left',
+            }}
+          >
+            ← Agent Studio
+          </button>
+          <div style={{ flex: 1, textAlign: 'center', ...typeRamp.title, color: color.ink }}>
+            Launch
+          </div>
+          <div style={{ minWidth: 120 }} />
+        </header>
+      )}
 
       {/* Body: three columns */}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
         {/* ── Column 1 — Prompts ── */}
         <div
           style={{

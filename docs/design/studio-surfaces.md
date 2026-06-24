@@ -2057,7 +2057,10 @@ not alphabet.
                    ◇  Frontmatter   ⌘⇧A
                    ≈  Consistency   ⌘⇧C
   ───────────
-  SESSIONS         ▸  Transcripts   ⌘T
+  LAUNCH           ▷  Launch        ⌘R   (its own divider-flanked slot)
+  ───────────
+  SESSIONS         ↩  Changes       ⌘D
+                   ▸  Transcripts   ⌘T
   ───────────  (pinned to the rail bottom:)
                    ⚙  Settings      ⌘,
 ```
@@ -2072,13 +2075,51 @@ not alphabet.
 - **Transcripts** is its own group — it is about *sessions*, not the library.
 - **Settings** pins to the rail bottom (the conventional, calm home for configuration),
   separated by the same `--hair` divider.
-- **Launcher (`⌘R`)** deliberately stays a *top-bar primary button*, not a rail item. It
-  is the north star and the app's single most important verb (Run); it earns the loud,
-  forest-filled top-bar button and should not be demoted into the quiet rail row of
-  inspect-y destinations. Same reasoning keeps **+ New** and **Split** in the top bar:
-  they are *acts on your current work*, not *places you go*. The rail is for navigation
-  (rooms); the top bar keeps the three creative verbs (New, Launch, Split). This split —
-  **rail = destinations, top bar = verbs** — is the whole IA in one line.
+- **Launch (`⌘R`) is now a rail destination** (TIN-1707), in its own divider-flanked slot
+  between Check and Changes. The earlier reasoning — keep the Launcher a loud top-bar verb
+  — was reversed: the Launcher is a *place you go* to compose and start a session (three
+  columns, a reading canvas, per-prompt memory), not a transient act, and giving it a
+  permanent labelled home on the rail makes it reachable in one click from anywhere, the
+  same as every other room. `⌘R` toggles the Launch view (mirroring `⌘G` / `⌘T`); it no
+  longer opens a modal. The Launcher's Run path is unchanged. **+ New memory** stays a
+  verb — but it now lives in the one persistent top bar (below), not a separate workspace
+  header. **Split** is a per-panel control on the doc strip. So the split is no longer
+  "rail = destinations, top bar = verbs"; it is **rail = destinations, top bar = one
+  persistent context-aware strip** (history + where-you-are + this room's actions).
+
+### The one persistent top bar (TIN-1708)
+
+There is exactly one top bar, rendered once, always visible, right of the rail and above
+the per-view content, in every view (the workspace and all full views). It replaces both
+the workspace's old hand-rolled header and the per-view `ViewShell` header (the four
+hand-rolled bars are gone). It is 44px, `--bg-app`, bottom `--hair`, and reads left to
+right:
+
+1. **History arrows** — back / forward across every view (TIN-1705).
+2. A vertical **`--hair` hairline divider**.
+3. A left-aligned **context label**: the serif *Agent Studio* wordmark in the workspace
+   (non-interactive — the rail's Search item is "go home"), else the room name in
+   `--t-title` / `--ink` (`Graph` / `Fields` / `Check` / `Changes` / `Sessions` / `Launch`).
+4. A flex spacer, then a right **contextual slot** whose content is this room's actions.
+
+There is **no explicit back button** anywhere (the old `← Agent Studio` is retired). The
+rail shows where you are; the history arrows (and `Esc`) are how you leave.
+
+Each full view owns its right-slot actions and registers them through a small slot context
+(`TopBarSlot`) on mount, clearing on unmount — so a view's own state (Graph's reset,
+Changes' refresh) stays inside the view and is never lifted to the page. The per-view
+right-slot inventory:
+
+| Room | Right slot |
+| --- | --- |
+| Workspace | **+ New memory** (`primary` `sm`, opens the New modal, `⌘N`) |
+| Graph | **Reset view** (`secondary` `sm`) |
+| Check (Consistency) | a calm count readout in `--ink-soft` (no badge, no red) |
+| Fields (Frontmatter) | a calm progress readout in `--ink-soft` |
+| Changes | **Refresh** (`tertiary` `sm`); add-a-directory moved to a `+` on the tab strip |
+| Sessions (Transcripts) | empty (its search lives in pane 1) |
+| Launch | empty (Run lives in the view body) |
+
 - **Diff** is *not* a rail item: it remains a per-document surface tab (`⌘D`), because a
   diff is always *of the document you're looking at* — it is a face of a note, not a place.
   This is already correct in the SurfaceStrip and we keep it.
@@ -2088,19 +2129,19 @@ not alphabet.
   slot. Import gains its missing visible door as a Settings-adjacent affordance or a `⌘K`
   entry (phase 2), satisfying rule 7 without crowding the rail.
 
-### The shared Shell (fixing the dead-ends)
+### The shell, settled (fixing the dead-ends)
 
-Extract the four hand-rolled full-view top bars into one `Shell` component (the
-consistency spec already references it as if it exists — this proposal makes it real).
-`Shell` renders: the persistent rail (left), a 44px top bar with `← Agent Studio` (left),
-a centred `--t-title` room name, and a right context slot. Every full view becomes
-`<Shell title="Graph" context={…}>{body}</Shell>`. Because the rail lives in the Shell
-and in the workspace alike, **moving between any two rooms is one click, from anywhere** —
-the islands become a hallway. `← Agent Studio` and `Esc` still return to the workspace
-(unchanged), but they are no longer the *only* way out.
+The four hand-rolled full-view top bars (and the workspace's own header) are gone,
+collapsed into the **one persistent top bar** documented above (TIN-1708). Views no longer
+render their own chrome: each is just a body filling the content area below the bar
+(a minimal `ViewBody` wrapper), and registers its right-slot actions through `TopBarSlot`.
+Because the rail and the top bar are present in the workspace and in every full view
+alike, **moving between any two rooms is one click, from anywhere** — the islands became a
+hallway. `Esc` still returns to the workspace (unchanged); the history arrows are the
+calm, always-present second way out. There is no `← Agent Studio` back button anymore.
 
-This is also a real de-duplication win: four copies of the same 44px bar collapse to one,
-and the workspace's overloaded top bar sheds its document-context job to the DocStrip.
+This is also a real de-duplication win: four-plus copies of the same 44px bar collapse to
+one, and the workspace's overloaded header sheds its document-context job to the DocStrip.
 
 ### Tab model: keep two tiers, unchanged
 

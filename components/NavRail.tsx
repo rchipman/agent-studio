@@ -17,7 +17,7 @@
 import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
 
 /** Rail destinations. `search` is the workspace home. */
-export type RailDest = 'search' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
+export type RailDest = 'search' | 'graph' | 'frontmatter' | 'consistency' | 'launch' | 'transcripts' | 'changes'
 
 const RAIL_WIDTH = 52
 
@@ -79,6 +79,12 @@ function Icon({ name }: { name: RailDest | 'settings' }) {
       return (
         <svg {...common}>
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      )
+    case 'launch':
+      return (
+        <svg {...common}>
+          <path d="M8 5.5 18 12 8 18.5 Z" />
         </svg>
       )
     case 'changes':
@@ -216,6 +222,10 @@ export default function NavRail({ active, onSelect, onOpenSettings }: NavRailPro
       <RailItem dest="graph" label="Graph" active={active === 'graph'} onClick={() => onSelect('graph')} title="Knowledge graph (⌘G)" />
       <RailItem dest="frontmatter" label="Fields" active={active === 'frontmatter'} onClick={() => onSelect('frontmatter')} title="Frontmatter audit (⌘⇧A)" />
       <RailItem dest="consistency" label="Check" active={active === 'consistency'} onClick={() => onSelect('consistency')} title="Consistency audit (⌘⇧C)" />
+
+      <Divider />
+
+      <RailItem dest="launch" label="Launch" active={active === 'launch'} onClick={() => onSelect('launch')} title="Launch a session (⌘R)" />
 
       <Divider />
 
