@@ -188,11 +188,11 @@ fn degraded_score(top_similarity: Option<f32>) -> f32 {
 /// for contradiction-with-a-prior-decision with the local reasoning model, and
 /// returns a 0..1 score plus the concrete conflicts. Never writes, never errors
 /// on a missing model — it degrades to a similarity-only estimate instead.
-#[tauri::command]
-pub async fn score_memory(
-    payload: ScoreMemoryInput,
-    db: State<'_, Db>,
-) -> Result<ContinuityScore, String> {
+///
+/// Core logic, callable with a plain `&Db` (no Tauri state). The `score_memory`
+/// command is a thin wrapper around this; the headless `add-memory` endpoint
+/// (TIN-1731) calls it directly with a CLI-constructed `Db`.
+pub async fn score_content(db: &Db, payload: ScoreMemoryInput) -> Result<ContinuityScore, String> {
     let content = payload.content.trim().to_string();
     if content.is_empty() {
         // Nothing to score → trivially continuous.
@@ -276,6 +276,18 @@ pub async fn score_memory(
         conflicts,
         degraded: false,
     })
+}
+
+/// Tauri command wrapper — thin shim over [`score_content`] so the frontend IPC
+/// surface is unchanged.
+#[tauri::command]
+pub async fn score_memory(
+    payload: ScoreMemoryInput,
+    db: State<'_, Db>,
+) -> Result<ContinuityScore, String> {
+    // Deref coercion turns `&State<Db>` into `&Db`, so the core logic never sees
+    // Tauri state.
+    score_content(&db, payload).await
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

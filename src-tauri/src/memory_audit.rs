@@ -96,6 +96,14 @@ pub struct AuditEntry {
 
 // ── Pure DB ops (testable without Tauri state) ───────────────────────────────
 
+/// Ensure the schema then insert one audit row, returning its new id. Free of
+/// Tauri state so the headless `add-memory` endpoint (TIN-1731) can record an
+/// `agent` audit row against a CLI-constructed connection.
+pub fn record_change(conn: &Connection, input: &RecordMemoryChangeInput) -> rusqlite::Result<i64> {
+    ensure_schema(conn)?;
+    insert_change(conn, input)
+}
+
 /// Insert one audit row, returning its new id. `ts` is stamped here (UTC, RFC
 /// 3339) so callers don't have to. Pure of Tauri state for testing.
 fn insert_change(conn: &Connection, input: &RecordMemoryChangeInput) -> rusqlite::Result<i64> {
