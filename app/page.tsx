@@ -10,6 +10,7 @@ import Launcher from '@/components/Launcher'
 import TranscriptBrowser from '@/components/TranscriptBrowser'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
+import NavRail, { type RailDest } from '@/components/NavRail'
 import PanelDivider from '@/components/PanelDivider'
 import SettingsModal from '@/components/SettingsModal'
 import QuickCapture from '@/components/QuickCapture'
@@ -52,6 +53,10 @@ function countWords(text: string): number {
 
 
 const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : 'left')
+
+/** The app's top-level destinations — the workspace, or one of the full views
+ *  reached from the nav rail. */
+type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts'
 
 // ── Tauri fs helpers ──────────────────────────────────────────────────────────
 
@@ -428,15 +433,14 @@ export default function Home() {
   const [activeWorkingDir, setActiveWorkingDir] = useState('')
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [graphOpen, setGraphOpen] = useState(false)
-  const [consistencyOpen, setConsistencyOpen] = useState(false)
-  // Frontmatter manager (TIN-1638): import queue + audit view + drag affordance.
+  // The full-view destinations live behind one `activeView` (the nav rail makes
+  // them visible). 'workspace' is the two-panel home.
+  const [activeView, setActiveView] = useState<AppView>('workspace')
+  // Frontmatter manager (TIN-1638): import queue + drag affordance.
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
-  const [showAudit, setShowAudit] = useState(false)
   const [draggingImport, setDraggingImport] = useState(false)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [showLauncher, setShowLauncher] = useState(false)
-  const [showTranscripts, setShowTranscripts] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
   const runRef = useRef<((req: RunRequest) => void) | null>(null)
@@ -944,7 +948,8 @@ export default function Home() {
       }
       if (mod && e.key === 'f') {
         e.preventDefault()
-        // Select the focused panel's Search tab and focus the field.
+        // Return to the workspace and focus the focused panel's Search tab.
+        setActiveView('workspace')
         selectSearch(focusedSideRef.current)
         return
       }
@@ -990,19 +995,19 @@ export default function Home() {
       }
       if (mod && (e.key === 't' || e.key === 'T')) {
         e.preventDefault()
-        setShowTranscripts(true)
+        setActiveView((v) => (v === 'transcripts' ? 'workspace' : 'transcripts'))
         return
       }
       if (mod && (e.key === 'g' || e.key === 'G')) {
         // Toggle the knowledge graph view (TIN-1639).
         e.preventDefault()
-        setGraphOpen((open) => !open)
+        setActiveView((v) => (v === 'graph' ? 'workspace' : 'graph'))
         return
       }
       if (mod && e.shiftKey && (e.key === 'a' || e.key === 'A')) {
         // Frontmatter audit view (TIN-1638).
         e.preventDefault()
-        setShowAudit(true)
+        setActiveView((v) => (v === 'frontmatter' ? 'workspace' : 'frontmatter'))
         return
       }
       if (mod && !e.shiftKey && (e.key === 'o' || e.key === 'O')) {
@@ -1014,7 +1019,7 @@ export default function Home() {
       if (mod && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
         // Consistency audit (TIN-1695).
         e.preventDefault()
-        setConsistencyOpen(true)
+        setActiveView((v) => (v === 'consistency' ? 'workspace' : 'consistency'))
         return
       }
     }
@@ -1046,15 +1051,11 @@ export default function Home() {
   const inEditor = focusPanel.activeTabId !== null
   const wordCount = countWords(focusLoaded?.content ?? '')
 
-  const goHome = useCallback(() => {
-    selectSearch('left')
-  }, [selectSearch])
-
   return (
     <div
       style={{
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
         height: '100vh',
         background: color.bgApp,
         color: color.ink,
@@ -1062,22 +1063,34 @@ export default function Home() {
         overflow: 'hidden',
       }}
     >
-      {/* Top bar */}
-      <header
+      {/* Persistent nav rail — destinations (rooms); the top bar holds verbs. */}
+      <NavRail
+        active={activeView === 'workspace' ? 'search' : (activeView as RailDest)}
+        onSelect={(d) => {
+          if (d === 'search') { setActiveView('workspace'); selectSearch(focusedSideRef.current) }
+          else setActiveView(d)
+        }}
+        onOpenSettings={() => setShowSettings(true)}
+      />
+
+      {/* Main column — workspace, or the active full view, right of the rail. */}
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, overflow: 'hidden', position: 'relative' }}>
+        {activeView === 'workspace' && (
+          <>
+            {/* Top bar — verbs only; the rail handles destinations. */}
+            <header
         style={{
           height: 44,
           display: 'flex',
           alignItems: 'center',
           borderBottom: `1px solid ${color.hair}`,
-          padding: '0 20px',
+          padding: `0 ${space[6]}px`,
           gap: space[5],
           flexShrink: 0,
           background: color.bgApp,
         }}
       >
-        {/* Wordmark / back button */}
-        <button
-          onClick={goHome}
+        <span
           style={{
             fontFamily: "'Fraunces', 'Georgia', serif",
             fontSize: 15,
@@ -1085,21 +1098,12 @@ export default function Home() {
             color: color.forest,
             letterSpacing: '-0.01em',
             flexShrink: 0,
-            minWidth: 120,
-            background: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 0,
-            textAlign: 'left',
           }}
         >
-          {inEditor ? '← Agent Studio' : 'Agent Studio'}
-        </button>
+          Agent Studio
+        </span>
 
-        {/* Center: filename when in editor */}
-        <div style={{ flex: 1, textAlign: 'center', fontSize: 12, color: color.inkSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {inEditor && focusLoaded?.meta?.name}
-        </div>
+        <div style={{ flex: 1 }} />
 
         {/* Right side */}
         <div style={{ display: 'flex', alignItems: 'center', gap: space[4], flexShrink: 0, minWidth: 160, justifyContent: 'flex-end' }}>
@@ -1134,7 +1138,7 @@ export default function Home() {
             title="Launch (⌘R)"
             style={{
               background: color.forest,
-              color: '#fff',
+              color: color.onAccent,
               border: 'none',
               borderRadius: radius.md,
               padding: '4px 12px',
@@ -1145,49 +1149,6 @@ export default function Home() {
             }}
           >
             Launch
-          </button>
-          <button
-            onClick={() => setShowTranscripts(true)}
-            title="Transcripts (⌘T)"
-            aria-label="Transcripts"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: 28,
-              height: 28,
-              background: 'transparent',
-              color: color.inkSoft,
-              border: `1px solid ${color.line}`,
-              borderRadius: radius.md,
-              cursor: 'pointer',
-            }}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-          </button>
-          <button
-            onClick={() => setShowSettings(true)}
-            title="Settings (⌘,)"
-            aria-label="Settings"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: 28,
-              height: 28,
-              background: 'transparent',
-              color: color.inkSoft,
-              border: `1px solid ${color.line}`,
-              borderRadius: radius.md,
-              cursor: 'pointer',
-            }}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
           </button>
         </div>
       </header>
@@ -1296,6 +1257,38 @@ export default function Home() {
           />
         </div>
       </div>
+          </>
+        )}
+
+        {activeView === 'graph' && (
+          <GraphView
+            onOpenFile={(path) => { setActiveView('workspace'); openInSide(path, focusedSideRef.current) }}
+            onOpenTicket={(id) => { setActiveTicket(id) }}
+            onClose={() => setActiveView('workspace')}
+          />
+        )}
+        {activeView === 'frontmatter' && (
+          <AuditView
+            onClose={() => setActiveView('workspace')}
+            onOpenFile={(path) => { setActiveView('workspace'); openInSide(path, focusedSideRef.current) }}
+            knownTypes={knownTypes}
+            knownProjects={knownProjects}
+          />
+        )}
+        {activeView === 'consistency' && (
+          <ConsistencyView
+            onOpenFile={(path, e) => {
+              const side = e.metaKey || e.ctrlKey ? otherSide(focusedSideRef.current) : focusedSideRef.current
+              setActiveView('workspace')
+              openInSide(path, side)
+            }}
+            onClose={() => setActiveView('workspace')}
+          />
+        )}
+        {activeView === 'transcripts' && (
+          <TranscriptBrowser onClose={() => setActiveView('workspace')} />
+        )}
+      </div>
 
       {/* Modals / overlays */}
       {showNewModal && (
@@ -1326,15 +1319,6 @@ export default function Home() {
         onClose={() => setActiveTicket(null)}
       />
 
-      {/* Knowledge graph (⌘G) — TIN-1639 */}
-      {graphOpen && (
-        <GraphView
-          onOpenFile={(path) => { setGraphOpen(false); openInSide(path, focusedSideRef.current) }}
-          onOpenTicket={(id) => { setActiveTicket(id) }}
-          onClose={() => setGraphOpen(false)}
-        />
-      )}
-
       {/* Frontmatter import flow (⌘O / drag-drop) — TIN-1638 */}
       {importFiles && importFiles.length > 0 && (
         <ImportModal
@@ -1347,28 +1331,6 @@ export default function Home() {
             runSearch(searchQuery, activeType, activeProject)
             if (paths.length === 1) openInSide(paths[0], focusedSideRef.current)
           }}
-        />
-      )}
-
-      {/* Consistency audit (⌘⇧C) — TIN-1695 */}
-      {consistencyOpen && (
-        <ConsistencyView
-          onOpenFile={(path, e) => {
-            const side = e.metaKey || e.ctrlKey ? otherSide(focusedSideRef.current) : focusedSideRef.current
-            setConsistencyOpen(false)
-            openInSide(path, side)
-          }}
-          onClose={() => setConsistencyOpen(false)}
-        />
-      )}
-
-      {/* Frontmatter audit (⌘⇧A) — TIN-1638 */}
-      {showAudit && (
-        <AuditView
-          onClose={() => setShowAudit(false)}
-          onOpenFile={(path) => { setShowAudit(false); openInSide(path, focusedSideRef.current) }}
-          knownTypes={knownTypes}
-          knownProjects={knownProjects}
         />
       )}
 
@@ -1412,10 +1374,6 @@ export default function Home() {
         onRun={handleLaunch}
         onOpenSettings={() => { setShowLauncher(false); setShowSettings(true) }}
       />
-
-      {showTranscripts && (
-        <TranscriptBrowser onClose={() => setShowTranscripts(false)} />
-      )}
 
       {showQuickCapture && (
         <QuickCapture
