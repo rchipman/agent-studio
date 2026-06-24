@@ -13,7 +13,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" style={{ height: '100%' }}>
+    <html lang="en" style={{ height: '100%' }} suppressHydrationWarning>
       <head>
         {/* Apply the saved theme before first paint to avoid a light flash
             (TIN-1673). Mirrors lib/theme.ts; runs synchronously in <head>. */}

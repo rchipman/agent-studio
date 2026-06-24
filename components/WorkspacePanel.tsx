@@ -552,11 +552,12 @@ function DocStrip({
         onSelect={onSelectSearch}
       />
 
-      {/* Document tabs — scroll horizontally under the pinned ends, edge fades */}
+      {/* Document tabs — size to content, grouped with the + at the left, and
+          scroll horizontally (shrinking) only when they overflow the strip. */}
       <div
         ref={scrollRef}
         style={{
-          flex: 1,
+          flexShrink: 1,
           minWidth: 0,
           display: 'flex',
           alignItems: 'center',
@@ -613,6 +614,9 @@ function DocStrip({
       >
         +
       </button>
+
+      {/* Spacer pushes the panel controls to the far right; tabs + ＋ stay left. */}
+      <div style={{ flex: 1, minWidth: space[3] }} />
 
       {/* Active document word count — calm, right of the tabs (TIN nav phase 3). */}
       {typeof wordCount === 'number' && (
