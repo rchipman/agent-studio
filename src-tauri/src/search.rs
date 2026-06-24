@@ -103,7 +103,7 @@ fn memory_root(root: &State<'_, crate::settings::MemoryRoot>) -> PathBuf {
 
 // ── Schema / connection ─────────────────────────────────────────────────────
 
-const SCHEMA: &str = "
+pub(crate) const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS memory_files (
       path      TEXT PRIMARY KEY,
       name      TEXT NOT NULL,
