@@ -447,6 +447,193 @@ mod tests {
         }
     }
 
+    // ── Continuity eval fixture (TIN-1732) ────────────────────────────────────
+    //
+    // Deterministic yardstick for the scorer's behaviour under the four named
+    // MemConflict / STALE taxonomy cases. All cases use the seeded in-memory
+    // index + axis_vec synthetic embeddings + the pure score math — no live
+    // model. Cases that require a live reasoning model are #[ignore]d (same
+    // convention as the audit's live-model tests).
+    //
+    // Score bands:
+    //   high  ≥ 0.80   (consistent or novel)
+    //   low   ≤ 0.50   (reversal / cascading conflicts)
+
+    /// Seed `n` notes into `conn` at successive axes so they are each individually
+    /// above the similarity floor when queried along their own axis, but well
+    /// below the floor from any other axis (orthogonal).
+    fn seed_notes(root: &std::path::Path, conn: &Connection, n: usize) -> Vec<String> {
+        let mut paths = Vec::new();
+        for i in 0..n {
+            let rel = format!("studio/note{i}.md");
+            write(
+                root,
+                &rel,
+                &format!(
+                    "---\nname: note{i}\ntype: project\nprojects: studio\n---\nDecision content {i}."
+                ),
+            );
+            paths.push(root.join(&rel).to_string_lossy().to_string());
+        }
+        build_index(root, conn).unwrap();
+        for (i, p) in paths.iter().enumerate() {
+            insert_chunk(conn, p, 0, &format!("Decision content {i}."), "sha", &axis_vec(i * 20))
+                .unwrap();
+        }
+        paths
+    }
+
+    // ── Case: RESTATE (agrees / duplicate) → high band (≥ 0.80) ─────────────
+    //
+    // A candidate whose embedding is close to an existing note but carries ZERO
+    // LLM-judged conflicts (it agrees) should score 1.0 from `score_from_conflicts`.
+    // We test the pure scoring math here; the full pipeline with LLM requires
+    // #[ignore].
+    #[test]
+    fn eval_restate_zero_conflicts_is_high() {
+        // RESTATE: the candidate agrees with (restates) the prior note.
+        // Zero conflicts → score_from_conflicts(0) == 1.0 ≥ 0.80.
+        let score = score_from_conflicts(0);
+        assert!(
+            score >= 0.80,
+            "RESTATE (zero conflicts) must be in the high band (≥ 0.80), got {score}"
+        );
+        assert_eq!(score, 1.0, "zero conflicts → perfect continuity score");
+    }
+
+    // ── Case: NOVEL (no near neighbour) → high band (≥ 0.80) ────────────────
+    //
+    // A candidate whose query vector is orthogonal to all stored embeddings
+    // produces no candidates → zero conflicts → score 1.0.
+    #[test]
+    fn eval_novel_no_near_neighbour_is_high() {
+        let root = temp_root("eval-novel");
+        let conn = mem_db();
+        // Seed a note on axis 0; query on a completely different axis (400).
+        seed_notes(&root, &conn, 1);
+
+        // Query orthogonal to the only stored note (axis 0) → no neighbours above floor.
+        // Use axis 200 (well within EMBEDDING_DIM = 384) which is nearly orthogonal to axis 0.
+        let got = select_candidates(&conn, &axis_vec(200), None).unwrap();
+        assert!(got.is_empty(), "NOVEL: orthogonal query has no near neighbours: {got:?}");
+
+        // No candidates → zero conflicts → high score.
+        let n_conflicts = 0; // novel = nothing to contradict
+        let score = score_from_conflicts(n_conflicts);
+        assert!(
+            score >= 0.80,
+            "NOVEL (no neighbours) must be in the high band (≥ 0.80), got {score}"
+        );
+    }
+
+    // ── Case: REVERSE (contradicts a prior decision) → low band (≤ 0.50) ────
+    //
+    // Two LLM-judged conflicts (a direct reversal typically surfaces one conflict
+    // per affected note; two contradictions is a clear reversal). We test the
+    // scoring math: 2 conflicts → score ≤ 0.50.
+    #[test]
+    fn eval_reverse_two_conflicts_is_low() {
+        // REVERSE: the candidate directly contradicts a prior decision.
+        // Two conflicts (1 per contradicted note in a reversal scenario) → low.
+        let score = score_from_conflicts(2);
+        assert!(
+            score <= 0.50,
+            "REVERSE (2 conflicts) must be in the low band (≤ 0.50), got {score}"
+        );
+        assert!(score >= 0.0, "score must not go negative: {score}");
+    }
+
+    #[test]
+    fn eval_single_conflict_is_between_bands() {
+        // One conflict: weaker than a full reversal, still signals a problem.
+        // Explicitly documents the single-conflict band: below 1.0, above 0.
+        let score = score_from_conflicts(1);
+        assert!(score < 1.0, "one conflict must lower the score below 1.0: {score}");
+        assert!(score > 0.0, "one conflict must not bottom out to 0: {score}");
+        // With CONFLICT_PENALTY = 0.35, one conflict → 0.65; two → 0.30.
+        // Assert the concrete value so the eval catches regressions to the constant.
+        assert!(
+            (score - (1.0 - CONFLICT_PENALTY)).abs() < 1e-5,
+            "one conflict: expected 1 - CONFLICT_PENALTY = {}, got {score}",
+            1.0 - CONFLICT_PENALTY
+        );
+    }
+
+    // ── Case: CASCADING (Type II — multi-conflict) → lower as conflicts grow ──
+    //
+    // Each additional conflict subtracts CONFLICT_PENALTY. This exercises the
+    // scoring math across the full cascade: score is monotonically decreasing and
+    // eventually bottoms at 0.
+    #[test]
+    fn eval_cascading_score_monotonically_decreases() {
+        // CASCADING: each additional conflict in the neighbourhood lowers the score.
+        let scores: Vec<f32> = (0..=4).map(score_from_conflicts).collect();
+        // Monotonically non-increasing: score[n] >= score[n+1].
+        for (i, window) in scores.windows(2).enumerate() {
+            assert!(
+                window[0] >= window[1],
+                "CASCADING: score must decrease (or stay) as conflicts grow \
+                 (conflict {i} → {i}+1): {} → {}",
+                window[0],
+                window[1]
+            );
+        }
+        // The 3+ conflict case is firmly in the low band — documents that the
+        // cascading / Type-II case is flagged aggressively.
+        assert!(
+            scores[3] <= 0.50,
+            "CASCADING (3 conflicts) must be in the low band (≤ 0.50), got {}",
+            scores[3]
+        );
+        // Eventually hits 0 (clamped) — no negative scores.
+        assert!(scores.iter().all(|&s| s >= 0.0), "no negative scores: {scores:?}");
+    }
+
+    #[test]
+    fn eval_cascading_candidate_selection_grows_with_seeded_neighbours() {
+        // Exercise select_candidates directly: seed multiple notes on the same
+        // broad axis cluster and confirm the selection grows (simulating how more
+        // neighbours → more potential conflicts → lower cascading score).
+        let root = temp_root("eval-cascade");
+        let conn = mem_db();
+
+        // Seed 3 notes, all on nearby axes (0, 1, 2 — each separated by 1 step
+        // so they remain above the cosine similarity floor from axis 0 query).
+        for i in 0..3usize {
+            let rel = format!("studio/c{i}.md");
+            write(
+                &root,
+                &rel,
+                &format!("---\nname: c{i}\ntype: project\nprojects: studio\n---\nconflicting content"),
+            );
+        }
+        build_index(&root, &conn).unwrap();
+        for i in 0..3usize {
+            let p = root.join(format!("studio/c{i}.md")).to_string_lossy().to_string();
+            // All on axis 0 so they are all very close to the query → all above floor.
+            insert_chunk(&conn, &p, 0, "conflicting content", "sha", &axis_vec(0)).unwrap();
+        }
+
+        let got = select_candidates(&conn, &axis_vec(0), None).unwrap();
+        assert!(
+            got.len() >= 2,
+            "CASCADING: multiple near neighbours all surface as candidates: got {}",
+            got.len()
+        );
+        // Simulate: if the LLM found one conflict per neighbour, cascading score.
+        let cascading_score = score_from_conflicts(got.len());
+        assert!(
+            cascading_score < 1.0,
+            "CASCADING: multi-conflict score below 1.0: {cascading_score}"
+        );
+        if got.len() >= 3 {
+            assert!(
+                cascading_score <= 0.50,
+                "CASCADING: 3+ conflicts firmly in the low band: {cascading_score}"
+            );
+        }
+    }
+
     // ── Degraded path through the real command (no Ollama in CI) ──────────────
     // The test env has no reasoning model, so `score_memory` takes the degraded
     // branch. We assert it returns a similarity-only score with `degraded: true`
