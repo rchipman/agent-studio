@@ -468,6 +468,57 @@ pub fn build_index(root: &Path, conn: &Connection) -> rusqlite::Result<usize> {
     Ok(files.len())
 }
 
+// ── search_core (headless CLI entry point, TIN-1739) ─────────────────────────
+
+/// Core search pipeline, callable with a plain `&Db` (no Tauri state). Used by
+/// the headless `recall` CLI subcommand (TIN-1739); the `search` Tauri command
+/// is a thin async wrapper around the same steps.
+///
+/// When `top_n` is 0 the default of 20 is used. The function runs the async
+/// embedding step on a fresh current-thread tokio runtime so it can be called
+/// from synchronous CLI code — matching the pattern used by `add-memory`.
+pub fn search_core(db: &Db, input: &SearchInput, top_n: usize) -> Result<Vec<SearchResult>, String> {
+    let top_n = if top_n == 0 { 20 } else { top_n };
+    let query = input.q.trim().to_string();
+
+    // ── Phase A: locked FTS pass ─────────────────────────────────────────────
+    let fts = if query.is_empty() {
+        // No text query — recency / filter list.
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut results = run_search(&conn, input).map_err(|e| e.to_string())?;
+        derank_superseded(&mut results);
+        return Ok(results);
+    } else {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        fts_candidates(&conn, input).map_err(|e| e.to_string())?
+    };
+
+    // ── Phase B: embed the query ─────────────────────────────────────────────
+    // Called synchronously from the CLI — the embedder is CPU-bound (candle),
+    // so we call it directly rather than spawning a blocking task. The Tauri
+    // command wraps the same step with spawn_blocking to avoid blocking the
+    // async runtime; here we are already on a plain OS thread.
+    let query_vec: Option<Vec<f32>> = if query.len() >= 2 {
+        crate::local_embed::embed(vec![query.clone()])
+            .ok()
+            .and_then(|mut v| v.pop())
+    } else {
+        None
+    };
+    let has_embeddings = query_vec.is_some();
+
+    // ── Phase C: vector arm + candidate assembly ─────────────────────────────
+    let candidates = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        build_rank_inputs(&conn, input, fts, query_vec.as_deref()).map_err(|e| e.to_string())?
+    };
+
+    // ── Phase D: rank ────────────────────────────────────────────────────────
+    let mut results = crate::hybrid::rank(candidates, has_embeddings, chrono::Local::now().date_naive(), top_n);
+    derank_superseded(&mut results);
+    Ok(results)
+}
+
 // ── Superseded de-ranking ────────────────────────────────────────────────────
 
 /// Stable secondary sort that demotes `status == "superseded"` notes below all
