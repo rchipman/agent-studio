@@ -6,6 +6,7 @@ mod hybrid;
 mod launcher;
 mod links;
 mod local_embed;
+mod memory_audit;
 mod reason;
 mod search;
 mod settings;
@@ -98,6 +99,8 @@ pub fn run() {
       frontmatter::import_markdown,
       frontmatter::update_frontmatter,
       audit::consistency_audit,
+      memory_audit::record_memory_change,
+      memory_audit::get_memory_history,
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
