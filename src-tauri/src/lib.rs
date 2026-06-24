@@ -12,6 +12,7 @@ mod local_embed;
 mod memory_audit;
 mod memory_reads;
 mod reason;
+mod salience;
 mod search;
 mod settings;
 mod terminal;
