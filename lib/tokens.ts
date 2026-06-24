@@ -27,6 +27,9 @@ export const color = {
   forestTint: 'var(--forest-tint)', // rgba(62,86,65,0.10)
   forestLine: 'var(--forest-line)', // rgba(62,86,65,0.30)
   forestWash: 'var(--forest-wash)', // rgba(62,86,65,0.06)
+  forestHover: 'var(--forest-hover)', // #35492F light / #9DBC97 dark
+  forestActive: 'var(--forest-active)', // #2C3D28 light / #ABC8A5 dark
+  forestDisabled: 'var(--forest-disabled)', // #B6C0B4 light / #3A463A dark
   tan: 'var(--tan)', // #9B7B5A
   tanTint: 'var(--tan-tint)', // rgba(155,123,90,0.10)
   hair: 'var(--hair)', // rgba(38,35,32,0.10)

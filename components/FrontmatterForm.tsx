@@ -19,6 +19,7 @@ import { color, space, radius, font, type as type_ } from '@/lib/tokens'
 import type { MemorySearchResult } from '@/lib/types'
 import type { Suggestion } from '@/lib/frontmatter'
 import TypeChip from '@/components/TypeChip'
+import Button from '@/components/Button'
 
 // ── Defaults that mirror the rest of the app's known vocabulary ──────────────
 
@@ -377,21 +378,14 @@ export default function FrontmatterForm({
         >
           {sourceLabel && <span>{regenerating ? 'Describing…' : sourceLabel}</span>}
           {onRegenerate && !regenerating && (
-            <button
+            <Button
+              variant="tertiary"
+              padding="none"
               onClick={onRegenerate}
-              style={{
-                ...type_.meta,
-                background: 'none',
-                border: 'none',
-                padding: 0,
-                cursor: 'pointer',
-                color: color.inkSoft,
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
+              style={{ fontSize: 11, fontWeight: 400 }}
             >
               Regenerate
-            </button>
+            </Button>
           )}
         </div>
       )}

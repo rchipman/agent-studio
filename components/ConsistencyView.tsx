@@ -17,6 +17,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
+import Button from '@/components/Button'
 import { consistencyAudit, onAuditProgress, type Finding } from '@/lib/audit'
 import ViewShell from '@/components/ViewShell'
 
@@ -71,24 +72,9 @@ function NoticeBlock({ children }: { children: React.ReactNode }) {
 
 function RunButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        background: color.forest,
-        color: color.onAccent,
-        border: 'none',
-        borderRadius: radius.md,
-        padding: `7px ${space[5]}px`,
-        fontSize: 13,
-        fontWeight: 600,
-        fontFamily: font.sans,
-        cursor: 'pointer',
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.92')}
-      onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
-    >
+    <Button variant="primary" onClick={onClick}>
       Run audit
-    </button>
+    </Button>
   )
 }
 
@@ -96,22 +82,9 @@ function RunButton({ onClick }: { onClick: () => void }) {
 
 function RunAgainButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        background: 'none',
-        border: 'none',
-        padding: 0,
-        cursor: 'pointer',
-        ...typeToken.body,
-        color: color.inkSoft,
-        fontFamily: font.sans,
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-      onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
-    >
+    <Button variant="tertiary" padding="none" onClick={onClick}>
       Run again
-    </button>
+    </Button>
   )
 }
 

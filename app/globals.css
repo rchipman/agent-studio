@@ -19,6 +19,9 @@
   --forest-tint: rgba(62, 86, 65, 0.10);
   --forest-line: rgba(62, 86, 65, 0.30);
   --forest-wash: rgba(62, 86, 65, 0.06);
+  --forest-hover: #35492F;
+  --forest-active: #2C3D28;
+  --forest-disabled: #B6C0B4;
   --tan: #9B7B5A;
   --tan-tint: rgba(155, 123, 90, 0.10);
   --hair: rgba(38, 35, 32, 0.10);
@@ -85,6 +88,9 @@
   --forest-tint: rgba(143, 176, 137, 0.16);
   --forest-line: rgba(143, 176, 137, 0.36);
   --forest-wash: rgba(143, 176, 137, 0.10);
+  --forest-hover: #9DBC97;
+  --forest-active: #ABC8A5;
+  --forest-disabled: #3A463A;
   --tan: #C9A57E;
   --tan-tint: rgba(201, 165, 126, 0.16);
   --hair: rgba(255, 250, 242, 0.10);

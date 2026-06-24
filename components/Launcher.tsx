@@ -20,6 +20,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import MarkdownContent from './MarkdownContent'
+import Button from '@/components/Button'
 import { color, radius, space, font, type as typeRamp, shadow } from '@/lib/tokens'
 import { getSettings, type Settings, type Agent } from '@/lib/settings'
 import {
@@ -523,9 +524,9 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings }: Launc
                     }}
                   >
                     Restored your last setup.
-                    <button onClick={startFresh} style={linkBtn}>
+                    <Button variant="tertiary" padding="none" onClick={startFresh} style={{ fontSize: 'inherit', fontWeight: 400 }}>
                       Start fresh
-                    </button>
+                    </Button>
                   </div>
                 )}
               </div>
@@ -697,26 +698,19 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings }: Launc
 
           {/* Run — the gravity well */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
-            <button
+            <Button
+              variant="primary"
+              glow
               onClick={handleRun}
               disabled={!canRun}
               style={{
                 width: '100%',
                 padding: '14px 16px',
-                borderRadius: radius.md,
-                border: 'none',
-                background: canRun ? color.forest : 'rgba(62,86,65,0.40)',
-                color: '#fff',
-                fontFamily: font.sans,
                 fontSize: 15,
-                fontWeight: 600,
-                cursor: canRun ? 'pointer' : 'default',
-                boxShadow: canRun ? '0 6px 20px rgba(62,86,65,0.30)' : 'none',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: space[3],
-                transition: 'background 0.15s ease, box-shadow 0.15s ease',
               }}
             >
               {launching ? 'Starting…' : 'Run'}
@@ -732,7 +726,7 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings }: Launc
               >
                 ⌘↩
               </span>
-            </button>
+            </Button>
           </div>
         </div>
       </div>

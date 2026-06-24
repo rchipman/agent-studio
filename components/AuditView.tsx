@@ -19,7 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { color, space, radius, font, shadow, type as type_ } from '@/lib/tokens'
+import { color, space, radius, shadow, type as type_ } from '@/lib/tokens'
 import {
   auditFrontmatter,
   updateFrontmatter,
@@ -28,6 +28,7 @@ import {
   type Suggestion,
 } from '@/lib/frontmatter'
 import TypeChip from '@/components/TypeChip'
+import Button from '@/components/Button'
 import FrontmatterForm from '@/components/FrontmatterForm'
 import ViewShell from '@/components/ViewShell'
 
@@ -190,14 +191,9 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
         <div style={{ padding: `${space[8]}px ${space[7]}px`, maxWidth: 680, margin: '0 auto', width: '100%' }}>
           <div style={noticeStyle}>
             Could not read the library just now.
-            <button
-              onClick={load}
-              style={{ ...type_.body, background: 'none', border: 'none', color: color.inkSoft, cursor: 'pointer', marginLeft: space[3], padding: 0 }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = color.ink)}
-              onMouseLeave={(e) => (e.currentTarget.style.color = color.inkSoft)}
-            >
+            <Button variant="tertiary" padding="none" onClick={load} style={{ marginLeft: space[3] }}>
               Refresh
-            </button>
+            </Button>
           </div>
         </div>
       ) : entries === null ? (
@@ -227,12 +223,9 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
             <TypeChip label="Need a little" active={filter === 'partial'} onClick={() => setFilter('partial')} />
             <TypeChip label="Not yet" active={filter === 'missing'} onClick={() => setFilter('missing')} />
             <div style={{ flex: 1 }} />
-            <button
-              onClick={openFixAll}
-              style={{ ...type_.body, fontWeight: 600, background: 'none', border: 'none', color: color.forest, cursor: 'pointer', padding: `${space[1]}px ${space[2]}px` }}
-            >
+            <Button variant="tertiary" tone="forest" size="sm" onClick={openFixAll}>
               Fix all
-            </button>
+            </Button>
           </div>
 
           {/* List */}
@@ -477,21 +470,21 @@ function EditorModal({
           <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end' }}>
             {stepping ? (
               <>
-                <button style={secondaryBtnStyle} onClick={onSkip} {...secHover}>
+                <Button variant="tertiary" onClick={onSkip}>
                   Skip
-                </button>
-                <button style={primaryBtnStyle} onClick={save} disabled={saving} {...priHover}>
+                </Button>
+                <Button variant="primary" onClick={save} disabled={saving}>
                   {saving ? 'Saving…' : 'Save and next →'}
-                </button>
+                </Button>
               </>
             ) : (
               <>
-                <button style={secondaryBtnStyle} onClick={onClose} {...secHover}>
+                <Button variant="secondary" onClick={onClose}>
                   Cancel
-                </button>
-                <button style={primaryBtnStyle} onClick={save} disabled={saving} {...priHover}>
+                </Button>
+                <Button variant="primary" onClick={save} disabled={saving}>
                   {saving ? 'Saving…' : 'Save'}
-                </button>
+                </Button>
               </>
             )}
           </div>
@@ -523,37 +516,3 @@ const noticeStyle: React.CSSProperties = {
   padding: `${space[3]}px ${space[4]}px`,
 }
 
-const primaryBtnStyle: React.CSSProperties = {
-  background: color.forest,
-  color: '#fff',
-  border: 'none',
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontWeight: 600,
-  fontFamily: font.sans,
-  cursor: 'pointer',
-}
-
-const secondaryBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  color: color.inkSoft,
-  border: `1px solid ${color.line}`,
-  borderRadius: radius.md,
-  padding: `7px ${space[5]}px`,
-  fontSize: 13,
-  fontFamily: font.sans,
-  cursor: 'pointer',
-}
-
-const priHover = {
-  onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => (e.currentTarget.style.opacity = '0.92'),
-  onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => (e.currentTarget.style.opacity = '1'),
-}
-
-const secHover = {
-  onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) =>
-    (e.currentTarget.style.background = color.bgFieldStrong),
-  onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) =>
-    (e.currentTarget.style.background = 'transparent'),
-}
