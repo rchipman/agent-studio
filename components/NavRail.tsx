@@ -17,7 +17,7 @@
 import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
 
 /** Rail destinations. `search` is the workspace home. */
-export type RailDest = 'search' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts'
+export type RailDest = 'search' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
 
 const RAIL_WIDTH = 52
 
@@ -79,6 +79,16 @@ function Icon({ name }: { name: RailDest | 'settings' }) {
       return (
         <svg {...common}>
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      )
+    case 'changes':
+      return (
+        <svg {...common}>
+          <circle cx="6" cy="6" r="2.2" />
+          <circle cx="6" cy="18" r="2.2" />
+          <circle cx="18" cy="15" r="2.2" />
+          <path d="M6 8.2v7.6" />
+          <path d="M6 9c0 4 3 5 6 5h2" />
         </svg>
       )
     case 'settings':
@@ -209,6 +219,7 @@ export default function NavRail({ active, onSelect, onOpenSettings }: NavRailPro
 
       <Divider />
 
+      <RailItem dest="changes" label="Changes" active={active === 'changes'} onClick={() => onSelect('changes')} title="Changes — working-directory diffs (⌘D)" />
       <RailItem dest="transcripts" label="Sessions" active={active === 'transcripts'} onClick={() => onSelect('transcripts')} title="Transcripts (⌘T)" />
 
       <div style={{ flex: 1 }} />

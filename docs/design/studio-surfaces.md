@@ -498,18 +498,50 @@ doc. Content is now always a document surface; search has graduated to its own p
 tab. Links and Diff are unchanged in meaning, they now simply scope to the active
 document tab.
 
-**Tab-strip anatomy** (the new top row of each panel, height 36, `--hair-soft`
-bottom border, `--bg-app`, horizontal, `--sp-1` gap):
+**The redesign, in one line.** The old treatment was an underline-on-a-pill:
+rounded corners said *chip*, a 2px forest bottom-rule said *underline tab*, and the
+two fought; the active tab floated free of the body, and inactive tabs had no shape,
+so the row read as a line of text. We replace it with one honest move — a **folder
+tab that lifts onto the panel surface and fuses with the body below it.** The strip
+sits on `--bg-app`; the body sits on `--bg-raised`; the **active tab takes
+`--bg-raised`** with a hairline cap (top + sides, top corners only), and the strip's
+bottom hairline **breaks under it** so the active tab and the body read as one
+continuous raised plane the inactive tabs sit *in front of*. Forest is demoted from a
+border to a 2px **top** accent on the active tab — a quiet seam where the tab meets
+the strip, not a competing underline. One treatment, no pill, no mixed metaphor.
+
+This requires one structural change the builder must make: **the document body
+region renders on `--bg-raised`, not `--bg-app`.** Today `WorkspacePanel`'s body sits
+on `--bg-app`; for the folder-tab fusion to exist there must be a surface for the
+active tab to join. The strip stays `--bg-app`; everything from the active tab down
+(surface strip + body) is `--bg-raised`. This also aligns the workspace body with the
+right-panel/modal cream the rest of the app already uses for "content you're working
+*in*," so it is a coherence win, not just a tab trick.
+
+**Tab-strip anatomy** (the new top row of each panel, height 36, sits on `--bg-app`,
+horizontal, `--sp-1` gap). The strip has **no continuous bottom border**; instead the
+inactive region of the strip carries a 1px `--hair-soft` baseline that **breaks for
+the width of the active tab**, where the tab's own fill and side hairlines take over
+(the folder-tab notch). Geometry: each tab is **30px tall** (a touch taller than the
+old 28, to seat the cap), seated to the strip's bottom edge; **radius `--r-md` (6px)
+on the top two corners only**, square bottoms so the tab meets the body with no
+rounding:
 
 ```
-┌ left panel ──────────────────────────────────────────────┐
-│ ⌕ Search │ eas-build-gate │ launcher-spec ✕ │  + │      ✕ │
-│ ───────── │  ▔▔▔▔▔▔▔▔▔▔▔▔▔ active                          │
-├───────────────────────────────────────────────────────────┤
-│ Content   Links   Diff                  ← surface strip    │
-├───────────────────────────────────────────────────────────┤
-│ … document body …                                          │
+┌ left panel ───────────────────────────────────────────────┐   ← --bg-app strip
+│           ╭───────────────╮                                │
+│  ⌕ Search │ launcher-spec✕│  eas-build-gate    +        ✕ │
+│ ──────────╯               ╰────────────────────────────────│   ← baseline breaks
+├───────────╮               ╭────────────────────────────────┤      under active tab
+│ Content · Links · Diff                  ← surface strip     │   ← --bg-raised body
+│                                                             │      begins here
+│ … document body, on --bg-raised, fused with the active tab… │
 ```
+
+The active tab above is `launcher-spec`: it is filled `--bg-raised` (same as the body),
+capped by a 2px `--forest` top seam and 1px `--hair` left/right sides, its top corners
+rounded, its bottom open to the body. `⌕ Search` and `eas-build-gate` are inactive:
+quiet, seated *in* the strip, no fill until hover.
 
 - **Order:** `[ ⌕ Search ] [ doc-a ] [ doc-b ] … [ + ]`, then the panel-close `✕`
   pushed to the far right (right panel only, unchanged behaviour).
@@ -524,16 +556,53 @@ bottom border, `--bg-app`, horizontal, `--sp-1` gap):
   It selects the Search tab and focuses the search field — "add a document" means
   "go find one." (It does not open the New-file modal; that stays on `⌘N`. The `+`
   is about *opening*, not *creating*, matching what the row holds.)
-- **Active / inactive / hover:**
-  - *Active* — `--ink` text weight 600, a 2px `--forest` bottom rule (reuses the
-    existing surface-tab active treatment, lifted to this row), background transparent.
-  - *Inactive* — `--ink-soft` weight 400, transparent, no rule.
-  - *Hover (inactive)* — background `--bg-field-strong`, text `--ink`. 0.1s ease,
-    matching `ResultCard`.
-  - The Search tab uses the same three states; it simply can't show a close `✕`.
-- **Close `✕`:** `--ink-faint`, 12px, reusing the panel-close glyph. Shown on the
-  active tab always and on any tab while hovered (so closing is discoverable without
-  cluttering the resting row). Closing the active tab selects its **right neighbour**,
+- **Active / inactive / hover** (the folder-tab, every state, both themes — all values
+  are theme-reactive tokens, so a single set of rules reads correctly in light and
+  dark; see the per-state table below):
+  - *Active* — the tab **becomes the body**: `background --bg-raised`; a **2px
+    `--forest` top seam** (`border-top: 2px solid --forest`); **1px `--hair`
+    left/right** sides; **no bottom border** (the tab opens onto the body); top corners
+    `--r-md`, bottom corners square; text `--ink` weight 600. The strip's `--hair-soft`
+    baseline does not run under it (the builder draws the baseline on the strip's
+    inactive segments, or draws it full-width and lets the active tab's `--bg-raised`
+    fill plus a 1px `--bg-raised` overlap at the seam cover it — either reads as the
+    notch). The active tab's `marginBottom: -1` lets its open bottom overlap the
+    body's top so no hairline slips between them.
+  - *Inactive (rest)* — `background transparent`, **no border, no rule**, text
+    `--ink-soft` weight 400. Shape comes from the row, not from a box: inactive tabs are
+    separated by the `--sp-1` gap and read as seats in the strip. Quiet, never noisy.
+  - *Hover (inactive)* — `background --bg-field-strong`, text `--ink`, top corners
+    `--r-md` (the same cap shape as active, so hovering previews "this will become a
+    tab"), **no top seam, no side hairlines** (those are the active-only signal), 0.1s
+    ease, matching `ResultCard`. This is a soft seat-fill, distinctly lighter than the
+    active tab's full `--bg-raised` + forest seam, so hover and active never collide.
+  - The Search tab uses the same three states (and the same folder-tab fusion when
+    active — its body is the search view, also on `--bg-raised`); it simply can't show a
+    close `✕`. As the leftmost tab its **left** side hairline is omitted when it would
+    sit flush to the panel edge, so the row doesn't open with a stray vertical line.
+
+  **Per-state token table — document tabs (identical rules, both themes):**
+
+  | State | Background | Top seam | Sides | Text | Corners |
+  | --- | --- | --- | --- | --- | --- |
+  | Active | `--bg-raised` | 2px `--forest` | 1px `--hair` L/R | `--ink` / 600 | top `--r-md`, bottom square |
+  | Inactive (rest) | transparent | none | none | `--ink-soft` / 400 | — |
+  | Inactive (hover) | `--bg-field-strong` | none | none | `--ink` / 400 | top `--r-md` |
+  | Active ✕ (rest) | — | — | — | `--ink-faint` | — |
+  | Any ✕ (hover) | `--bg-field-strong` round | — | — | `--ink-soft` | `--r-sm` |
+
+  *Why it works in both themes:* light lifts `#F2F0ED` (strip) to `#FCFAF4` (active
+  tab/body) — a warm, lighter card; dark lifts `#1A1815` to `#23211D` — a lighter
+  panel. In both, the active tab is a real, legible step *up* off the strip, and the
+  `--forest` seam reads as accent (dark forest on light, sage on dark) without becoming
+  a heavy border. Hairlines are `rgba(38,35,32,·)` in light and `rgba(255,250,242,·)`
+  in dark, so the side seams read on either ground.
+- **Close `✕`:** `--ink-faint`, 12px, reusing the panel-close glyph, sitting inside the
+  tab after the label (`--sp-1` gap). Shown on the active tab always and on any tab
+  while hovered (so closing is discoverable without cluttering the resting row).
+  Hovering the `✕` itself gives it a small `--bg-field-strong` round (`--r-sm`) and
+  lifts the glyph to `--ink-soft` — a target without alarm, never red. Closing the
+  active tab selects its **right neighbour**,
   or its left if it was last, falling back to the Search tab when no documents remain.
   Never red, never a confirm — the editor autosaves, so closing a tab loses nothing.
 - **Overflow (many tabs):** the strip **scrolls horizontally**, it does not wrap and
@@ -550,12 +619,53 @@ bottom border, `--bg-app`, horizontal, `--sp-1` gap):
   Search is active, the body is the search view. This is the default and the empty
   state in one — identical in feel to today's clean search-first panel. No regression.
 
-**Surface strip (Content / Links / Diff).** Unchanged visually — same 36px row, same
-forest underline — but it now renders **only when a document tab is active**, directly
-beneath the document strip, and it scopes to that document. When Search is active the
-surface strip is absent (search has no surfaces), so a fresh panel shows exactly one
-strip, as today. Each document tab remembers its own active surface, so a doc opened
-to its Diff stays on Diff when you tab away and back.
+**Surface strip (Content / Links / Diff) — the *secondary* level.** The two rows must
+read as two levels, not the same control twice. The document strip is "*which note*"
+(a folder tab that owns a surface); the surface strip is "*which face of this note*" (a
+quiet selector that belongs to the active document). So the surface strip is
+**deliberately lighter and smaller**, and it does **not** use the folder-tab fusion —
+it would be wrong for a sub-selector to also claim to be a tab that owns the body.
+
+Treatment: a **compact segmented underline** that sits *on* the raised body (the strip
+is `--bg-raised`, the same plane as the active document tab and the body, so it reads
+as part of the document, not as panel chrome). It is **28px tall** (shorter than the
+36px document strip, reinforcing the hierarchy), with a 1px `--hair-soft` bottom
+border that *is* continuous (a sub-tab does not break the body — only the top-level
+folder tab earns the notch).
+
+- *Active surface* — text `--forest` weight 600, `--t-meta` (11px, one step **smaller**
+  than the document tabs' `--t-body` 13px), with a **1.5px `--forest` bottom rule**
+  (thinner than the old 2px, and an underline not a fill — clearly secondary). No
+  background fill.
+- *Inactive surface* — text `--ink-soft` weight 400, `--t-meta`, no rule.
+- *Hover (inactive)* — text `--ink`; **no** background plate (a sub-selector stays
+  flat); 0.1s ease. The hover signal is text-darken only, lighter than the document
+  tabs' seat-fill, so the levels never look alike.
+- The three labels are separated by a thin `--ink-faint` middot (`Content · Links ·
+  Diff`) rather than wide gaps, so the group reads as one segmented control, not three
+  loose words.
+
+  **Per-state token table — surface tabs (28px row on `--bg-raised`, both themes):**
+
+  | State | Text | Bottom rule | Size/weight |
+  | --- | --- | --- | --- |
+  | Active | `--forest` | 1.5px `--forest` | `--t-meta` 11px / 600 |
+  | Inactive (rest) | `--ink-soft` | none | `--t-meta` 11px / 400 |
+  | Inactive (hover) | `--ink` | none | `--t-meta` 11px / 400 |
+
+It renders **only when a document tab is active**, directly beneath the document strip,
+and it scopes to that document. When Search is active the surface strip is absent
+(search has no surfaces), so a fresh panel shows exactly one strip, as today. Each
+document tab remembers its own active surface, so a doc opened to its Diff stays on
+Diff when you tab away and back.
+
+**The two rows together** (so the levels are unmistakable): the document strip is a row
+of **36px folder tabs** on `--bg-app`, the active one a `--bg-raised` card with a 2px
+`--forest` top seam that fuses into the body; the surface strip is a **28px row of
+smaller `--t-meta` text** on `--bg-raised`, the active one a 1.5px `--forest`
+underline. Top level = fill + tab shape + seam; sub level = text + thin underline.
+Different size, different plane, different mechanism — they cannot be mistaken for one
+busy stripe.
 
 **Per-panel independence.** Each panel owns its own `tabs` list and its own
 `activeTabId`. Opening, closing, reordering (future), and surface selection in the

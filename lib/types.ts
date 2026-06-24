@@ -29,15 +29,11 @@ export interface MemoryFileMeta {
 /** Which side of the split a panel is. */
 export type PanelSide = 'left' | 'right'
 
-/** The per-document surface tabs (Content / Links / Diff). Scoped to the active
- *  document tab; Content is always available, Links/Diff scope to that doc. */
-export type PanelTab = 'content' | 'links' | 'diff'
-
-/** One open document tab in a panel. Carries its own active surface so a doc
- *  opened to its Diff stays on Diff when you tab away and back. */
+/** One open document tab in a panel — just its path. A note is its content; its
+ *  links live in a footer, and changes (diff) are a separate destination, so a
+ *  document no longer has per-document surface tabs. */
 export interface OpenDoc {
   path: string
-  surface: PanelTab
 }
 
 /** Independent state for a single panel: the open document tabs (left→right
@@ -53,7 +49,9 @@ export interface PanelState {
  *  the persisted layout into the new {@link PanelState}. */
 export interface LegacyPanelState {
   activePath: string | null
-  activeTab: PanelTab
+  /** Legacy surface ('content' | 'links' | 'diff'); ignored on migration now
+   *  that documents have no surface tabs. */
+  activeTab?: string
 }
 
 /** Cached, parsed contents of a loaded file, shared across both panels so a
