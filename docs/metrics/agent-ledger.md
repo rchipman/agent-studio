@@ -28,6 +28,8 @@ dur(s) | outcome | self-report fit | adjustment.
 | Cleo: agent-memory landscape research | research | opus | 31.8k | 13 | 113 | BLESSED | right | honest novelty read; landscape table + steal-list + sources |
 | Jonny design: living-memory epic (6 surfaces) | design | opus | 75.5k | 18 | 175 | BLESSED | right | hit the hard constraint — ZERO new primitives across 6 surfaces, both themes via tokens |
 | TIN-1730 continuity scorer | build | opus | 78.7k | 38 | 369 | BLESSED (0 changes) | **over-powered** | **reuse-compose Rust w/ a tight reading list → try sonnet next**; also caught a wrong specta ref in the ticket |
+| TIN-1728 audit-trail backend | build | opus | 89.8k | 19 | 233 | BLESSED (0 changes) | over-powered | same class — drop to sonnet |
+| TIN-1729 Linear ingest backend | build | **sonnet** | 85.7k | 23 | 349 | BLESSED (0 changes) | **right** | downgrade validated — sonnet nailed the GraphQL+keychain+index integration to a precise spec |
 
 ## Learnings → routing adjustments
 
