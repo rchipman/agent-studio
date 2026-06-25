@@ -18,6 +18,7 @@ export default function TypeChip({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       style={{
         padding: '3px 10px',
         borderRadius: radius.chip,

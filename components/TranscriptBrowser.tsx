@@ -28,6 +28,7 @@ import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
+import TypeChip from '@/components/TypeChip'
 import { disambiguate } from '@/lib/decodeProjectLabel'
 import {
   estimateCost,
@@ -1032,10 +1033,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
           </button>
         </>
       ) : (
-        <>
-          <span>All sessions</span>
-          <span style={{ color: color.inkFaint, flexShrink: 0 }}>{visibleSessions.length}</span>
-        </>
+        <span>All sessions · {visibleSessions.length}</span>
       )}
     </div>
   )
@@ -1115,26 +1113,11 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
                   ))}
                 </select>
 
-                <button
+                <TypeChip
+                  label="With subagents"
+                  active={withSubagents}
                   onClick={() => setWithSubagents(v => !v)}
-                  aria-pressed={withSubagents}
-                  style={{
-                    flexShrink: 0,
-                    ...typeToken.meta,
-                    padding: `${space[2]}px ${space[3]}px`,
-                    borderRadius: radius.chip,
-                    cursor: 'pointer',
-                    background: withSubagents ? color.forest : 'transparent',
-                    border: `1px solid ${withSubagents ? color.forest : color.line}`,
-                    color: withSubagents ? color.onAccent : color.inkSoft,
-                    transition: 'background 0.12s ease, color 0.12s ease, border-color 0.12s ease',
-                    whiteSpace: 'nowrap',
-                  }}
-                  onMouseEnter={e => { if (!withSubagents) e.currentTarget.style.color = color.ink }}
-                  onMouseLeave={e => { if (!withSubagents) e.currentTarget.style.color = color.inkSoft }}
-                >
-                  With subagents
-                </button>
+                />
               </div>
             </div>
 
