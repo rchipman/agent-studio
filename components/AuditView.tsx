@@ -475,7 +475,7 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
             {/* Calm degrade / after-bulk lines. */}
             {degraded && !busy && (
               <div style={{ ...type_.meta, color: color.inkSoft, lineHeight: 1.5 }}>
-                Working from folders and rules just now — the local model is not running, so notes that
+                Working from folders and rules just now. The local model isn&rsquo;t running, so notes that
                 need a closer read are left for you.
               </div>
             )}
@@ -592,7 +592,7 @@ function BulkBar({
           background: 'transparent',
           border: `1px solid ${color.line}`,
           borderRadius: radius.md,
-          padding: `2px ${space[2]}px`,
+          padding: `${space[1]}px ${space[2]}px`,
           fontFamily: type_.meta.fontFamily,
           cursor: 'pointer',
         }}
@@ -756,7 +756,7 @@ function Row({
               <>
                 <span style={{ fontSize: 8, color: dot.tone }}>{dot.glyph}</span>
                 <span style={{ color: color.inkSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {bandSummary(suggestion)} — {dot.word}
+                  {bandSummary(suggestion)} · <span style={{ color: dot.tone }}>{dot.word}</span>
                 </span>
               </>
             ) : (
@@ -807,7 +807,9 @@ function SuggestionPanel({
   return (
     <div
       style={{
-        margin: `0 16px ${space[3]}px 50px`,
+        // Left inset (space[8]+space[4]+space[2] = 50) aligns the panel under the
+        // row's text, past the dot + chevron gutter.
+        margin: `0 ${space[5]}px ${space[3]}px ${space[8] + space[4] + space[2]}px`,
         padding: `${space[4]}px ${space[5]}px`,
         background: color.bgCard,
         border: `1px solid ${color.hairSoft}`,
@@ -912,7 +914,7 @@ function ConfirmDialog({
           Apply settled frontmatter to {count} notes?
         </div>
         <div style={{ ...type_.body, color: color.inkSoft, lineHeight: 1.55 }}>
-          Each note keeps its body. Only the missing fields are filled — type, project, and date. The
+          Each note keeps its body. Only the missing fields are filled: type, project, and date. The
           change is recorded in each note&rsquo;s history, so you can see exactly what was set.
         </div>
         <div style={{ display: 'flex', gap: space[3], justifyContent: 'flex-end' }}>
