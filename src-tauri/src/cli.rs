@@ -38,12 +38,13 @@ use gray_matter::{Matter, ParsedEntity, Pod};
 use serde_json::json;
 
 use crate::continuity::{score_content, ScoreMemoryInput};
+use crate::embeddings::{chunk_text, fingerprint};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
 use crate::memory_audit::{content_hash, ensure_schema as ensure_audit_schema, history_for, record_change, AuditEntry, RecordMemoryChangeInput};
 use crate::memory_reads;
 use crate::reason;
 use crate::salience;
-use crate::search::{build_index, init_db, search_core, Db, SearchInput};
+use crate::search::{build_index, embedding_to_blob, init_db, search_core, Db, SearchInput};
 use crate::settings::{default_memory_root, STORE_FILE};
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
@@ -283,8 +284,14 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
         build_index(&root, &conn).map_err(|e| e.to_string())?;
     }
 
-    // 5. Record an `agent` audit row.
+    // 4b. Embed the new note's chunks so that headless `recall` is semantic
+    // immediately (TIN-1743). Degrades gracefully: on any error we log and
+    // continue — the write is already committed and the JSON contract is
+    // unchanged. The JSON output is NOT modified by this step.
     let path_str = file_path.to_string_lossy().to_string();
+    embed_new_note_chunks(&db, &path_str);
+
+    // 5. Record an `agent` audit row.
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         record_change(
@@ -307,6 +314,84 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
         "conflicts": score.conflicts,
         "superseded": false,
     }))
+}
+
+/// Embed the chunks for a newly-written note and store their vectors so that
+/// headless `recall` returns semantic results immediately.
+///
+/// The note's body is read from `file_path` (already written to disk), chunked,
+/// embedded with the bundled local model, and upserted into the `chunks` table.
+///
+/// **Degrade-safe**: any error (model not cached, DB lock failure, dim mismatch)
+/// is logged at WARN level and the function returns normally — it NEVER fails
+/// the write or alters the JSON output.
+fn embed_new_note_chunks(db: &Db, file_path: &str) {
+    // Read and chunk the newly-written note body.
+    let body = match fs::read_to_string(file_path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("[add-memory] embed: could not read {file_path}: {e}");
+            return;
+        }
+    };
+    let chunks = chunk_text(&body);
+    if chunks.is_empty() {
+        return;
+    }
+
+    // Compute fingerprints for cache-skip logic (matches the GUI pipeline).
+    let chunk_data: Vec<(i64, String, String)> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, text)| (i as i64, text.clone(), fingerprint(text)))
+        .collect();
+
+    let texts: Vec<String> = chunk_data.iter().map(|(_, t, _)| t.clone()).collect();
+
+    // Embed all chunks with the bundled local model. Called directly (no
+    // spawn_blocking) because run_add_memory is already on a plain OS thread —
+    // the same pattern search_core uses for query embedding.
+    let embeddings = match crate::local_embed::embed(texts) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[add-memory] embed: local_embed failed (model not cached?): {e}");
+            return;
+        }
+    };
+
+    if embeddings.len() != chunk_data.len() {
+        log::warn!(
+            "[add-memory] embed: got {} embeddings for {} chunks; skipping",
+            embeddings.len(),
+            chunk_data.len()
+        );
+        return;
+    }
+
+    // Upsert each chunk + embedding into the DB.
+    let conn = match db.0.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[add-memory] embed: DB lock failed: {e}");
+            return;
+        }
+    };
+
+    for ((chunk_idx, content, sha256), embedding) in chunk_data.iter().zip(embeddings.iter()) {
+        let blob = embedding_to_blob(embedding);
+        if let Err(e) = conn.execute(
+            "INSERT INTO chunks (file_path, chunk_idx, content, sha256, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(file_path, chunk_idx) DO UPDATE SET
+               content   = excluded.content,
+               sha256    = excluded.sha256,
+               embedding = excluded.embedding",
+            rusqlite::params![file_path, chunk_idx, content, sha256, blob],
+        ) {
+            log::warn!("[add-memory] embed: upsert chunk {chunk_idx} failed: {e}");
+            // Continue with remaining chunks — partial embedding is better than none.
+        }
+    }
 }
 
 /// Override suggestion fields from explicit CLI flags. A provided flag always
@@ -1378,6 +1463,80 @@ mod tests {
             "content/file required"
         );
         std::env::remove_var("MEMORY_ROOT");
+    }
+
+    // ── TIN-1743: embed on write ──────────────────────────────────────────────
+
+    /// Full round-trip test: write a note via `run_add_memory` and assert the
+    /// new note's chunks have non-NULL embeddings.
+    ///
+    /// Gated with `#[ignore]` because it requires the bundled embedding model to
+    /// be already cached in `~/.agent-studio/models/`. Run with:
+    ///   cargo test -- --ignored cli::tests::add_memory_embeds_chunks_with_model
+    #[test]
+    #[ignore = "needs the bundled embedding model cached"]
+    fn add_memory_embeds_chunks_with_model() {
+        let _guard = env_lock();
+        let root = temp_root("embed-chunks");
+        let _ = fixture_db(&root);
+
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_add_memory(&[
+            "--content".into(),
+            "Attic Pro is a home-management app that helps homeowners record and track appliances and repairs.".into(),
+            "--agent".into(),
+            "tester".into(),
+            "--project".into(),
+            "attic".into(),
+        ])
+        .expect("add-memory succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let path_str = out["path"].as_str().expect("path in response");
+
+        // Open the DB and check that at least one chunk for this file has a
+        // non-NULL embedding.
+        let db = fixture_db(&root);
+        let conn = db.0.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_path = ?1 AND embedding IS NOT NULL",
+                rusqlite::params![path_str],
+                |r| r.get(0),
+            )
+            .expect("query chunks table");
+        assert!(count > 0, "at least one chunk should have a non-NULL embedding after write");
+    }
+
+    /// Non-ignored degrade-safety test: `run_add_memory` must return `Ok` even
+    /// when the embedding model is not available. The write succeeds; missing
+    /// embeddings are a soft failure.
+    #[test]
+    fn add_memory_write_succeeds_even_when_embedding_fails() {
+        // This test runs without the model cached. `embed_new_note_chunks` will
+        // fail to load the model and log a warning, but `run_add_memory` must
+        // return Ok with the standard JSON shape.
+        let _guard = env_lock();
+        let root = temp_root("embed-degrade");
+        let _ = fixture_db(&root);
+
+        std::env::set_var("MEMORY_ROOT", &root);
+        let result = run_add_memory(&[
+            "--content".into(),
+            "A degrade-safety note: the write must succeed even if embedding fails.".into(),
+            "--agent".into(),
+            "tester".into(),
+            "--project".into(),
+            "studio".into(),
+        ]);
+        std::env::remove_var("MEMORY_ROOT");
+
+        // The write must succeed regardless of whether embedding worked.
+        let out = result.expect("add-memory returns Ok even when embedding is unavailable");
+        assert_eq!(out["superseded"], json!(false));
+        assert!(out["path"].as_str().is_some(), "path is present in response");
+        let path = out["path"].as_str().unwrap();
+        assert!(fs::read_to_string(path).is_ok(), "the note file was written to disk");
     }
 
     // ── supersede ─────────────────────────────────────────────────────────────
