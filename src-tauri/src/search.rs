@@ -465,6 +465,21 @@ pub fn build_index(root: &Path, conn: &Connection) -> rusqlite::Result<usize> {
     // Rebuild the wiki-link graph from the freshly-indexed content (TIN-1639).
     crate::links::rebuild_links(conn, &link_inputs)?;
 
+    // Change-triggered maintenance dispatch (TIN-1763): diff this pass's notes
+    // against the stored fingerprints and fan each add/edit/delete out to the
+    // registered handlers. Detection rides the same parsed bodies we just
+    // indexed (`link_inputs` carries (path, name, body)), so it adds no extra
+    // file reads beyond an mtime stat per note. A failure here is logged and
+    // swallowed — maintenance is ambient and must never fail the index/search.
+    let present: Vec<crate::maintenance::IndexedNote> = link_inputs
+        .iter()
+        .map(|(path, _name, body)| crate::maintenance::IndexedNote { path, body })
+        .collect();
+    let handlers = crate::maintenance::default_handlers();
+    if let Err(e) = crate::maintenance::detect_and_dispatch(conn, &present, &handlers) {
+        log::warn!("[maintenance] change dispatch failed (index unaffected): {e}");
+    }
+
     Ok(files.len())
 }
 
