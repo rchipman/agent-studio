@@ -173,6 +173,21 @@ pub struct SearchTranscriptsInput {
     pub q: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsByDayInput {
+    pub project: String,
+}
+
+/// One entry in the per-day rollup returned by `sessions_by_day`.
+/// `date` is YYYY-MM-DD; `count` is the number of sessions on that date.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayCount {
+    pub date: String,
+    pub count: usize,
+}
+
 // ── Path helpers ─────────────────────────────────────────────────────────────
 
 fn transcripts_root_from_settings<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
@@ -963,6 +978,46 @@ pub fn search_transcripts<R: tauri::Runtime>(
         results.push(row.map_err(|e| e.to_string())?);
     }
     Ok(results)
+}
+
+/// Return per-day session counts for the given project.
+///
+/// Reuses the indexed `transcript_sessions` table (same index that
+/// `list_sessions` reads). Groups rows by `date_iso`, ordered ascending,
+/// so the frontend can build a calendar grid without further sorting.
+#[tauri::command]
+pub fn sessions_by_day<R: tauri::Runtime>(
+    payload: SessionsByDayInput,
+    app: tauri::AppHandle<R>,
+    db: State<'_, Db>,
+) -> Result<Vec<DayCount>, String> {
+    let root = transcripts_root_from_settings(&app);
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ensure_schema(&conn).map_err(|e| e.to_string())?;
+    build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT date_iso, COUNT(*) AS cnt
+             FROM transcript_sessions
+             WHERE project = ?1 AND date_iso != ''
+             GROUP BY date_iso
+             ORDER BY date_iso ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![payload.project], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        let (date, count) = row.map_err(|e| e.to_string())?;
+        result.push(DayCount { date, count: count as usize });
+    }
+    Ok(result)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
