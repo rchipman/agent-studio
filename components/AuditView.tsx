@@ -25,6 +25,7 @@ import {
   auditFrontmatter,
   updateFrontmatter,
   suggestAll,
+  onSuggestResult,
   applySuggestion,
   applySuggestionsBulk,
   bandOf,
@@ -305,21 +306,27 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
     setRunning(true)
     setProgress(null)
     setAfterBulk(null)
+    setDegraded(false)
     const unlisten = await onAuditProgress((p) => setProgress(p))
+    // Stream each suggestion as it lands so rows light up live; the batch result
+    // below is a backstop in case an event was dropped.
+    const unlistenResult = await onSuggestResult((r) => {
+      setSuggestions((prev) => ({ ...prev, [r.path]: r }))
+      if (r.degraded) setDegraded(true)
+    })
     try {
       const results = await suggestAll()
-      const map: Record<string, ConfidenceResult> = {}
-      let anyDegraded = false
-      for (const r of results) {
-        map[r.path] = r
-        if (r.degraded) anyDegraded = true
-      }
-      setSuggestions(map)
-      setDegraded(anyDegraded && results.length > 0)
+      setSuggestions((prev) => {
+        const map = { ...prev }
+        for (const r of results) map[r.path] = r
+        return map
+      })
+      if (results.some((r) => r.degraded)) setDegraded(true)
     } catch (err) {
       console.error('[audit] suggestAll', err)
     } finally {
       unlisten()
+      unlistenResult()
       setRunning(false)
       setProgress(null)
     }
