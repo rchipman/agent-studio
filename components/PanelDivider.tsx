@@ -8,6 +8,13 @@ interface PanelDividerProps {
   onResize: (leftPercent: number) => void
   /** Double-click snaps panels back to an even 50/50 split. */
   onSnap: () => void
+  /**
+   * Optional override for the mousedown handler. When provided, this replaces
+   * the built-in percentage-based resize logic — the caller manages the drag
+   * entirely (e.g. for pixel-based terminal width dragging). The divider still
+   * renders with correct visual/cursor/aria behaviour.
+   */
+  onMouseDownOverride?: (e: React.MouseEvent) => void
 }
 
 /**
@@ -18,7 +25,7 @@ interface PanelDividerProps {
  * click snaps to 50/50. The divider widens its hit area on hover so it is easy
  * to grab without visually intruding (the visible rule stays a hairline).
  */
-export default function PanelDivider({ onResize, onSnap }: PanelDividerProps) {
+export default function PanelDivider({ onResize, onSnap, onMouseDownOverride }: PanelDividerProps) {
   const [active, setActive] = useState(false)
   const frameRef = useRef<number | null>(null)
 
@@ -59,7 +66,7 @@ export default function PanelDivider({ onResize, onSnap }: PanelDividerProps) {
       role="separator"
       aria-orientation="vertical"
       aria-label="Resize panels"
-      onMouseDown={handleMouseDown}
+      onMouseDown={onMouseDownOverride ?? handleMouseDown}
       onDoubleClick={onSnap}
       style={{
         flexShrink: 0,
