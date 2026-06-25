@@ -3,7 +3,10 @@ import nextVitals from 'eslint-config-next/core-web-vitals'
 import nextTs from 'eslint-config-next/typescript'
 
 export default defineConfig([
-  globalIgnores(['.next/**', 'out/**', 'node_modules/**', 'src-tauri/**', 'coverage/**', 'e2e/**']),
+  // `.claude/**` covers git worktrees created under `.claude/worktrees/` by
+  // background build agents: without this, `eslint .` traverses the worktree's
+  // own source + deps and reports hundreds of false errors (TIN-1742).
+  globalIgnores(['.next/**', 'out/**', 'node_modules/**', 'src-tauri/**', 'coverage/**', 'e2e/**', '.claude/**']),
   nextVitals,
   nextTs,
   {
