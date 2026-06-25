@@ -115,6 +115,9 @@ pub struct UsageRollup {
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     pub path: String,
+    /// Project dir this session belongs to (for clean badge keying on the
+    /// all-projects list, where rows come from many projects).
+    pub project: String,
     pub date: String,
     pub first_message: String,
     pub cwd: String,
@@ -929,28 +932,49 @@ pub fn list_sessions<R: tauri::Runtime>(
     ensure_schema(&conn).map_err(|e| e.to_string())?;
     build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, date_iso, first_msg, cwd FROM transcript_sessions
-             WHERE project = ?1
-             ORDER BY date_iso DESC, path DESC",
-        )
-        .map_err(|e| e.to_string())?;
+    // An empty/absent project means "all projects": drop the WHERE clause so the
+    // list spans every project, newest first (mirrors list_transcript_projects).
+    let project_filter = payload.project.trim();
+    let all_projects = project_filter.is_empty();
 
-    let base: Vec<(String, String, String, String)> = stmt
-        .query_map(params![payload.project], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3).unwrap_or_default()))
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let sql = if all_projects {
+        "SELECT path, project, date_iso, first_msg, cwd FROM transcript_sessions
+         ORDER BY date_iso DESC, path DESC"
+    } else {
+        "SELECT path, project, date_iso, first_msg, cwd FROM transcript_sessions
+         WHERE project = ?1
+         ORDER BY date_iso DESC, path DESC"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+
+    let map_row = |r: &rusqlite::Row| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4).unwrap_or_default(),
+        ))
+    };
+    let base: Vec<(String, String, String, String, String)> = if all_projects {
+        stmt.query_map([], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map(params![project_filter], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?
+    };
 
     let mut sessions = Vec::with_capacity(base.len());
-    for (path, date, first_message, stored_cwd) in base {
+    for (path, project, date, first_message, stored_cwd) in base {
         let p = PathBuf::from(&path);
         let (subagent_count, turn_count, usage, models, cwd) = compute_session_metrics(&p);
         sessions.push(SessionSummary {
             path,
+            project,
             date,
             first_message,
             cwd: if cwd.is_empty() { stored_cwd } else { cwd },
@@ -1033,25 +1057,40 @@ pub fn sessions_by_day<R: tauri::Runtime>(
     ensure_schema(&conn).map_err(|e| e.to_string())?;
     build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT date_iso, COUNT(*) AS cnt
-             FROM transcript_sessions
-             WHERE project = ?1 AND date_iso != ''
-             GROUP BY date_iso
-             ORDER BY date_iso ASC",
-        )
-        .map_err(|e| e.to_string())?;
+    // Empty/absent project → all-projects calendar (drop the WHERE project).
+    let project_filter = payload.project.trim();
+    let all_projects = project_filter.is_empty();
 
-    let rows = stmt
-        .query_map(params![payload.project], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })
-        .map_err(|e| e.to_string())?;
+    let sql = if all_projects {
+        "SELECT date_iso, COUNT(*) AS cnt
+         FROM transcript_sessions
+         WHERE date_iso != ''
+         GROUP BY date_iso
+         ORDER BY date_iso ASC"
+    } else {
+        "SELECT date_iso, COUNT(*) AS cnt
+         FROM transcript_sessions
+         WHERE project = ?1 AND date_iso != ''
+         GROUP BY date_iso
+         ORDER BY date_iso ASC"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+
+    let map_row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
+    let rows: Vec<(String, i64)> = if all_projects {
+        stmt.query_map([], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map(params![project_filter], map_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?
+    };
 
     let mut result = Vec::new();
-    for row in rows {
-        let (date, count) = row.map_err(|e| e.to_string())?;
+    for (date, count) in rows {
         result.push(DayCount { date, count: count as usize });
     }
     Ok(result)
@@ -1310,6 +1349,83 @@ mod tests {
         assert_eq!(paths[0], parent.to_string_lossy());
         assert!(!paths[0].contains("agent-"));
         assert!(!paths[0].contains("subagents"));
+    }
+
+    // ── TIN-1751 all-projects list / calendar tests ─────────────────────────
+
+    /// Query the session table the way `list_sessions` does: all projects when
+    /// `project` is empty, otherwise filtered. Returns (path, project) rows in
+    /// the same order the command emits.
+    fn list_session_rows(conn: &Connection, project: &str) -> Vec<(String, String)> {
+        let all = project.trim().is_empty();
+        let sql = if all {
+            "SELECT path, project FROM transcript_sessions ORDER BY date_iso DESC, path DESC"
+        } else {
+            "SELECT path, project FROM transcript_sessions WHERE project = ?1 ORDER BY date_iso DESC, path DESC"
+        };
+        let mut stmt = conn.prepare(sql).unwrap();
+        let map = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+        if all {
+            stmt.query_map([], map).unwrap().filter_map(Result::ok).collect()
+        } else {
+            stmt.query_map(params![project], map).unwrap().filter_map(Result::ok).collect()
+        }
+    }
+
+    #[test]
+    fn list_sessions_empty_project_spans_all_projects() {
+        let root = temp_root("all-projects-list");
+        write_jsonl(
+            &root,
+            "attic/20260101T120000-a.jsonl",
+            r#"{"role":"human","content":"hello attic"}"#,
+        );
+        write_jsonl(
+            &root,
+            "studio/20260618T090000-b.jsonl",
+            r#"{"role":"human","content":"hello studio"}"#,
+        );
+        let conn = mem_db();
+        build_transcript_index(&root, &conn).unwrap();
+
+        // Empty project → both sessions, newest (studio, Jun 18) first.
+        let all = list_session_rows(&conn, "");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].1, "studio");
+        assert_eq!(all[1].1, "attic");
+
+        // A real project → only its rows, and each carries its project key.
+        let only = list_session_rows(&conn, "attic");
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].1, "attic");
+    }
+
+    #[test]
+    fn sessions_by_day_empty_project_spans_all_projects() {
+        let root = temp_root("all-projects-day");
+        // Two projects, both on the same day, plus a second day in one project.
+        write_jsonl(&root, "attic/20260618T010000-a.jsonl", r#"{"role":"human","content":"x"}"#);
+        write_jsonl(&root, "studio/20260618T020000-b.jsonl", r#"{"role":"human","content":"y"}"#);
+        write_jsonl(&root, "studio/20260619T030000-c.jsonl", r#"{"role":"human","content":"z"}"#);
+        let conn = mem_db();
+        build_transcript_index(&root, &conn).unwrap();
+
+        // All-projects: Jun 18 has 2 (one per project), Jun 19 has 1.
+        let mut stmt = conn
+            .prepare(
+                "SELECT date_iso, COUNT(*) FROM transcript_sessions
+                 WHERE date_iso != '' GROUP BY date_iso ORDER BY date_iso ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(rows, vec![
+            ("2026-06-18".to_string(), 2),
+            ("2026-06-19".to_string(), 1),
+        ]);
     }
 
     // ── TIN-1752 image block tests ──────────────────────────────────────────

@@ -3,24 +3,32 @@
 /**
  * TranscriptBrowser.tsx
  *
- * Three-pane session transcript browser (TIN-1636).
- * Pane 1: Projects rail (project list + session counts; FTS search switches to
- *          flat result rows).
- * Pane 2: Sessions list (newest first, forest-wash selection) with a
- *          List / Calendar toggle at the top (TIN-1751).
- * Pane 3: Conversation (human serif + tan rule, assistant serif + forest rule;
- *          tool-use blocks collapsed to "ran <tool>", expandable).
+ * Two-pane session transcript browser (TIN-1751 combined Sessions view).
+ *
+ * Pane 1: Sessions column (~360px). Four stacked regions:
+ *   (1) Filter bar — search + project select + "With subagents" toggle.
+ *   (2) Calendar — cross-project month heatmap (the date filter).
+ *   (3) List header — visible count, or the selected day + a clear button.
+ *   (4) List — every session across every project, newest first; the ONLY
+ *       scroller in the column.
+ * Pane 2: Reader (conversation; human serif + tan rule, assistant serif +
+ *   forest rule; tool-use blocks collapsed to "ran <tool>", expandable).
+ *
+ * The Projects rail and the List/Calendar toggle are retired: the project
+ * select and search field absorb the rail's jobs, and the calendar IS the date
+ * filter. Filters AND together (project · day · subagents · search hit set).
  *
  * Self-contained — the orchestrator wires cmd+T and view routing; this
  * component does not touch app/page.tsx.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
+import { disambiguate } from '@/lib/decodeProjectLabel'
 import {
   estimateCost,
   formatCost,
@@ -35,10 +43,12 @@ interface TranscriptProject {
   project: string
   sessionCount: number
   lastDate: string
+  cwd: string
 }
 
 interface SessionSummary {
   path: string
+  project: string
   date: string
   firstMessage: string
   // TIN-1725 — fields emitted by the Rust backend (camelCase via serde rename_all)
@@ -77,6 +87,11 @@ function formatDate(iso: string): string {
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
   const m = parseInt(mm, 10)
   return `${months[m - 1] ?? mm} ${parseInt(dd, 10)}`
+}
+
+/** "1 session" / "n sessions". */
+function sessionsLabel(n: number): string {
+  return n === 1 ? '1 session' : `${n} sessions`
 }
 
 /** Zero-pad a number to 2 digits. */
@@ -185,6 +200,28 @@ function SessionMetaLine({ usage, compact = false }: SessionMetaLineProps) {
   )
 }
 
+// ── Project badge chip ───────────────────────────────────────────────────────
+
+/** Existing tan project-badge chip (tanTint fill, tan text). Shown on list rows
+ *  only when the project filter is All projects. */
+function ProjectBadge({ label }: { label: string }) {
+  return (
+    <span
+      style={{
+        ...typeToken.micro,
+        background: color.tanTint,
+        color: color.tan,
+        borderRadius: radius.chip,
+        padding: `1px ${space[2]}px`,
+        flexShrink: 0,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </span>
+  )
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 interface ToolBlockProps {
@@ -224,7 +261,7 @@ function ToolBlock({ turn }: ToolBlockProps) {
           style={{
             marginTop: space[2],
             padding: `${space[3]}px ${space[4]}px`,
-            background: 'rgba(38,35,32,0.04)',
+            background: color.neutralTint,
             borderRadius: radius.md,
             ...typeToken.mono,
             fontSize: 12,
@@ -363,54 +400,34 @@ function ConversationTurn({ turn, highlight }: ConversationTurnProps) {
   )
 }
 
-// ── Calendar pane body ────────────────────────────────────────────────────────
+// ── Calendar (cross-project month heatmap = the date filter) ─────────────────
 
-interface CalendarPaneProps {
-  selectedProject: string | null
-  sessions: SessionSummary[]
-  sessionsLoading: boolean
-  selectedSession: SessionSummary | null
-  onSelectSession: (s: SessionSummary) => void
-  sessionRowStyle: (active: boolean) => React.CSSProperties
+interface CalendarProps {
+  selectedProject: string
+  selectedDay: string | null
+  onPickDay: (day: string) => void
 }
 
-function CalendarPane({
-  selectedProject,
-  sessions,
-  sessionsLoading,
-  selectedSession,
-  onSelectSession,
-  sessionRowStyle,
-}: CalendarPaneProps) {
+const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+
+function Calendar({ selectedProject, selectedDay, onPickDay }: CalendarProps) {
   const today = todayIso()
-  const now = new Date()
+  const now = useMemo(() => new Date(), [])
   const [viewYear, setViewYear] = useState(now.getFullYear())
   const [viewMonth, setViewMonth] = useState(now.getMonth() + 1)
   const [dayCountMap, setDayCountMap] = useState<Map<string, number>>(new Map())
-  const [countsLoading, setCountsLoading] = useState(false)
-  const [selectedDay, setSelectedDay] = useState<string | null>(null)
 
-  // Reload counts when project changes
+  // Reload counts when the project filter changes. An empty project means the
+  // all-projects calendar (the backend drops the WHERE project).
   useEffect(() => {
-    if (!selectedProject) {
-      setDayCountMap(new Map())
-      return
-    }
-    setCountsLoading(true)
     invoke<DayCount[]>('sessions_by_day', { payload: { project: selectedProject } })
       .then(rows => {
         const m = new Map<string, number>()
         for (const r of rows) m.set(r.date, r.count)
         setDayCountMap(m)
-        setCountsLoading(false)
       })
-      .catch(() => setCountsLoading(false))
+      .catch(() => setDayCountMap(new Map()))
   }, [selectedProject])
-
-  // Reset selected day when project or month changes
-  useEffect(() => {
-    setSelectedDay(null)
-  }, [selectedProject, viewYear, viewMonth])
 
   const currentYM = yearMonth(now)
   const viewYM = `${viewYear}-${pad2(viewMonth)}`
@@ -424,32 +441,10 @@ function CalendarPane({
   }
 
   const cells = buildMonthGrid(viewYear, viewMonth)
-
-  // Sessions for selected day
-  const dayPrefix = selectedDay ? selectedDay : null
-  const daySessions = dayPrefix
-    ? sessions.filter(s => s.date === dayPrefix)
-    : []
-
-  // Month has any sessions
   const monthHasSessions = cells.some(c => c && (dayCountMap.get(c) ?? 0) > 0)
 
-  if (!selectedProject) {
-    return null // Pane 2 shows the "select a project" message; this is a no-op path
-  }
-
-  if (countsLoading || sessionsLoading) {
-    return (
-      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-        Reading sessions...
-      </div>
-    )
-  }
-
-  const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
-
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+    <div style={{ flexShrink: 0, borderBottom: `1px solid ${color.hairSoft}` }}>
       {/* Month stepper */}
       <div
         style={{
@@ -458,7 +453,6 @@ function CalendarPane({
           justifyContent: 'flex-end',
           gap: space[1],
           padding: `${space[2]}px ${space[3]}px`,
-          borderBottom: `1px solid ${color.hairSoft}`,
         }}
       >
         {/* Back chevron */}
@@ -520,7 +514,7 @@ function CalendarPane({
       </div>
 
       {/* Calendar grid */}
-      <div style={{ padding: `${space[3]}px ${space[3]}px ${space[2]}px`, flex: '0 0 auto' }}>
+      <div style={{ padding: `0 ${space[3]}px ${space[2]}px` }}>
         {/* Weekday headers */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: space[1], marginBottom: space[1] }}>
           {WEEKDAYS.map(d => (
@@ -542,44 +536,32 @@ function CalendarPane({
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: space[1] }}>
           {cells.map((cell, i) => {
             if (!cell) {
-              return <div key={`filler-${i}`} style={{ minHeight: 36 }} />
+              return <div key={`filler-${i}`} style={{ minHeight: 30 }} />
             }
             const count = dayCountMap.get(cell) ?? 0
             const isToday = cell === today
             const isSelected = cell === selectedDay
             const hasSessions = count > 0
             const bg = isSelected ? intensityBgSelected(count) : intensityBg(count)
-            const tooltipText = count === 1 ? '1 session' : count > 1 ? `${count} sessions` : undefined
+            const tooltipText = hasSessions ? sessionsLabel(count) : undefined
 
             return (
               <div
                 key={cell}
                 title={tooltipText}
                 onClick={() => {
+                  // Click a day with sessions → set the day filter; click the
+                  // selected day again → clear it (the parent toggles).
                   if (!hasSessions) return
-                  if (count === 1 && daySessions.length === 0) {
-                    // Will be set below; first set the day so daySessions populates
-                    setSelectedDay(cell)
-                    // find the single session and open it directly
-                    const single = sessions.find(s => s.date === cell)
-                    if (single) onSelectSession(single)
-                  } else if (count === 1) {
-                    setSelectedDay(cell)
-                    const single = sessions.find(s => s.date === cell)
-                    if (single) onSelectSession(single)
-                  } else {
-                    setSelectedDay(isSelected ? null : cell)
-                  }
+                  onPickDay(cell)
                 }}
                 style={{
-                  minHeight: 36,
+                  minHeight: 30,
                   borderRadius: radius.sm,
                   background: bg,
                   border: isSelected
                     ? `1px solid ${color.forest}`
-                    : hasSessions
-                    ? `1px solid transparent`
-                    : `1px solid transparent`,
+                    : '1px solid transparent',
                   cursor: hasSessions ? 'pointer' : 'default',
                   display: 'flex',
                   flexDirection: 'column',
@@ -643,54 +625,6 @@ function CalendarPane({
           </div>
         )}
       </div>
-
-      {/* Day session list */}
-      {selectedDay && daySessions.length > 0 && (
-        <div
-          style={{
-            flex: 1,
-            overflowY: 'auto',
-            borderTop: `1px solid ${color.hairSoft}`,
-            padding: `${space[2]}px ${space[2]}px`,
-          }}
-        >
-          {daySessions.map(s => {
-            const active = selectedSession?.path === s.path
-            return (
-              <div
-                key={s.path}
-                onClick={() => onSelectSession(s)}
-                style={sessionRowStyle(active)}
-                onMouseEnter={e => {
-                  if (!active)
-                    (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
-                }}
-                onMouseLeave={e => {
-                  if (!active)
-                    (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
-                  <span style={{ ...typeToken.body, color: color.ink }}>
-                    {formatDate(s.date)}
-                  </span>
-                </div>
-                <div
-                  style={{
-                    ...typeToken.meta,
-                    color: color.inkSoft,
-                    overflow: 'hidden',
-                    whiteSpace: 'nowrap',
-                    textOverflow: 'ellipsis',
-                  }}
-                >
-                  {s.firstMessage || 'Empty session'}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
     </div>
   )
 }
@@ -711,75 +645,79 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
     setRight(null)
     return () => setRight(null)
   }, [setRight])
+
   // ── State ──────────────────────────────────────────────────────────────────
 
   const [projects, setProjects] = useState<TranscriptProject[]>([])
-  const [projectsLoading, setProjectsLoading] = useState(true)
-  const [projectsError, setProjectsError] = useState<string | null>(null)
+  const [noRoot, setNoRoot] = useState(false)
 
-  const [selectedProject, setSelectedProject] = useState<string | null>(null)
+  // Filter state. selectedProject '' = All projects (a filter value, not a
+  // navigation requirement). selectedDay null = no day constraint.
+  const [selectedProject, setSelectedProject] = useState('')
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
+  const [withSubagents, setWithSubagents] = useState(false)
 
+  // The full cross-project session list (loaded once; re-filtered in memory).
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsLoading, setSessionsLoading] = useState(true)
 
   const [selectedSession, setSelectedSession] = useState<SessionSummary | null>(null)
 
   const [turns, setTurns] = useState<Turn[]>([])
   const [turnsLoading, setTurnsLoading] = useState(false)
 
-  // FTS search
+  // FTS search composes as a client-side filter over the in-memory list.
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<TranscriptSearchResult[]>([])
+  const [searchHits, setSearchHits] = useState<Map<string, string>>(new Map()) // path → snippet
   const [searching, setSearching] = useState(false)
   const [searchDone, setSearchDone] = useState(false)
 
-  // Highlight tracking for search hit scroll
+  // Highlight tracking for the search-hit scroll. We remember the snippet of
+  // the session opened from a search hit so the reader scrolls to + washes the
+  // first matching turn once its turns load.
   const [highlightTurnIdx, setHighlightTurnIdx] = useState<number | null>(null)
+  const [pendingSearchHit, setPendingSearchHit] = useState<string | null>(null)
 
-  // No transcripts root configured
-  const [noRoot, setNoRoot] = useState(false)
-
-  // Pane 2 toggle: 'list' | 'calendar'
-  const [pane2Mode, setPane2Mode] = useState<'list' | 'calendar'>('list')
-
-  // ── Load projects ──────────────────────────────────────────────────────────
+  // ── Load projects (for the select) + decode labels ─────────────────────────
 
   useEffect(() => {
-    setProjectsLoading(true)
     invoke<TranscriptProject[]>('list_transcript_projects')
       .then(p => {
         setProjects(p)
-        setProjectsLoading(false)
         setNoRoot(false)
       })
       .catch(err => {
         const msg = String(err)
         if (msg.includes('transcripts_root') || msg.includes('No such file')) {
           setNoRoot(true)
-        } else {
-          setProjectsError(msg)
         }
-        setProjectsLoading(false)
       })
   }, [])
 
-  // ── Load sessions when project selected ───────────────────────────────────
+  // Decode + disambiguate project labels once when projects load.
+  const labelByProject = useMemo(
+    () => disambiguate(projects.map(p => ({ project: p.project, cwd: p.cwd }))),
+    [projects],
+  )
+  const labelFor = useCallback(
+    (project: string) => labelByProject.get(project) ?? project,
+    [labelByProject],
+  )
+
+  // ── Load the full cross-project session list once ──────────────────────────
 
   useEffect(() => {
-    if (!selectedProject) return
+    if (noRoot) return
     setSessionsLoading(true)
-    setSessions([])
-    setSelectedSession(null)
-    setTurns([])
-    invoke<SessionSummary[]>('list_sessions', { payload: { project: selectedProject } })
+    invoke<SessionSummary[]>('list_sessions', { payload: { project: '' } })
       .then(s => {
         setSessions(s)
         setSessionsLoading(false)
       })
       .catch(() => setSessionsLoading(false))
-  }, [selectedProject])
+  }, [noRoot])
 
-  // ── Load turns when session selected ─────────────────────────────────────
+  // ── Load turns when a session is selected ──────────────────────────────────
 
   useEffect(() => {
     if (!selectedSession) return
@@ -794,26 +732,40 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
       .catch(() => setTurnsLoading(false))
   }, [selectedSession])
 
-  // ── FTS search ─────────────────────────────────────────────────────────────
+  // After a search-hit session loads, scroll to + wash the first matching turn.
+  useEffect(() => {
+    if (!pendingSearchHit || turnsLoading || turns.length === 0) return
+    const needle = pendingSearchHit.toLowerCase()
+    const idx = turns.findIndex(t => t.content.toLowerCase().includes(needle))
+    setHighlightTurnIdx(idx >= 0 ? idx : null)
+    setPendingSearchHit(null)
+  }, [pendingSearchHit, turnsLoading, turns])
+
+  // ── FTS search (debounced 300ms; composes as a filter) ─────────────────────
 
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const runSearch = useCallback((q: string) => {
     if (!q.trim()) {
-      setSearchResults([])
+      setSearchHits(new Map())
       setSearchDone(false)
+      setSearching(false)
       return
     }
     setSearching(true)
     setSearchDone(false)
     invoke<TranscriptSearchResult[]>('search_transcripts', { payload: { q } })
       .then(r => {
-        setSearchResults(r)
+        const m = new Map<string, string>()
+        for (const hit of r) {
+          if (!m.has(hit.sessionPath)) m.set(hit.sessionPath, hit.snippet)
+        }
+        setSearchHits(m)
         setSearching(false)
         setSearchDone(true)
       })
       .catch(() => {
-        setSearchResults([])
+        setSearchHits(new Map())
         setSearching(false)
         setSearchDone(true)
       })
@@ -826,44 +778,44 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
     searchTimeout.current = setTimeout(() => runSearch(q), 300)
   }
 
-  function handleSearchResultClick(result: TranscriptSearchResult) {
-    // Select the project and session.
-    setSearchQuery('')
-    setSearchResults([])
-    setSearchDone(false)
-    setSelectedProject(result.project)
-    // Load the session directly.
-    const fake: SessionSummary = {
-      path: result.sessionPath,
-      date: '',
-      firstMessage: result.snippet,
-      cwd: '',
-      subagentCount: 0,
-      turnCount: 0,
-      usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
-      models: [],
-    }
-    setSelectedSession(fake)
-  }
-
   const isSearchActive = searchQuery.trim().length > 0
 
-  // ── Shared list row styles ─────────────────────────────────────────────────
+  // ── Compose the visible list (project AND day AND subagents AND FTS) ────────
 
-  function projectRowStyle(active: boolean): React.CSSProperties {
-    return {
-      padding: `${space[3]}px ${space[5]}px`,
-      cursor: 'pointer',
-      borderRadius: radius.card,
-      background: active ? color.forestWash : 'transparent',
-      borderLeft: active ? `2px solid ${color.forest}` : '2px solid transparent',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: space[3],
-      transition: 'background 0.15s ease',
-    }
+  const visibleSessions = useMemo(() => {
+    return sessions.filter(s => {
+      if (selectedProject && s.project !== selectedProject) return false
+      if (selectedDay && s.date !== selectedDay) return false
+      if (withSubagents && s.subagentCount <= 0) return false
+      if (isSearchActive && !searchHits.has(s.path)) return false
+      return true
+    })
+  }, [sessions, selectedProject, selectedDay, withSubagents, isSearchActive, searchHits])
+
+  // Per-project session counts for the select options.
+  const countByProject = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of sessions) m.set(s.project, (m.get(s.project) ?? 0) + 1)
+    return m
+  }, [sessions])
+
+  // ── Selection ──────────────────────────────────────────────────────────────
+
+  function selectSession(s: SessionSummary, snippet?: string) {
+    setSelectedSession(s)
+    setPendingSearchHit(snippet ?? null)
   }
+
+  function pickDay(day: string) {
+    // Click the already-selected day clears it; otherwise set it.
+    setSelectedDay(prev => (prev === day ? null : day))
+  }
+
+  function clearDay() {
+    setSelectedDay(null)
+  }
+
+  // ── Shared row style (verbatim sessionRowStyle) ────────────────────────────
 
   function sessionRowStyle(active: boolean): React.CSSProperties {
     return {
@@ -876,357 +828,355 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
     }
   }
 
+  // ── Shared chrome for the search + select controls ─────────────────────────
+
+  const fieldChrome: React.CSSProperties = {
+    boxSizing: 'border-box',
+    background: color.bgField,
+    border: `1px solid ${color.line}`,
+    borderRadius: radius.md,
+    color: color.ink,
+    outline: 'none',
+  }
+
+  // ── List body (the scroller) ───────────────────────────────────────────────
+
+  const showBadges = selectedProject === '' // hide per-row badge when one project is selected
+
+  let listBody: React.ReactNode
+  if (sessionsLoading) {
+    listBody = (
+      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
+        Reading sessions…
+      </div>
+    )
+  } else if (isSearchActive && searching) {
+    listBody = (
+      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
+        Reading sessions…
+      </div>
+    )
+  } else if (isSearchActive && searchDone && visibleSessions.length === 0) {
+    listBody = (
+      <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+        Nothing matched.
+      </div>
+    )
+  } else if (visibleSessions.length === 0) {
+    // A selected day with no rows reads differently from a general no-match.
+    const msg = selectedDay
+      ? 'No sessions on this day.'
+      : 'No sessions match your filters.'
+    listBody = (
+      <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+        {msg}
+      </div>
+    )
+  } else {
+    listBody = visibleSessions.map(s => {
+      const active = selectedSession?.path === s.path
+      const snippet = isSearchActive ? searchHits.get(s.path) : undefined
+      const preview = snippet ?? s.firstMessage ?? ''
+      return (
+        <div
+          key={s.path}
+          onClick={() => selectSession(s, snippet)}
+          style={sessionRowStyle(active)}
+          onMouseEnter={e => {
+            if (!active) (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
+          }}
+          onMouseLeave={e => {
+            if (!active) (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+          }}
+        >
+          {/* Line 1: date · compact metrics */}
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space[3], marginBottom: 2 }}>
+            <span style={{ ...typeToken.body, color: color.ink }}>
+              {formatDate(s.date)}
+            </span>
+            {s.usage && <SessionMetaLine usage={s.usage} compact />}
+          </div>
+          {/* Line 2: project badge (only when All projects) + preview */}
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: space[2], minWidth: 0 }}>
+            {showBadges && <ProjectBadge label={labelFor(s.project)} />}
+            <span
+              style={{
+                ...typeToken.meta,
+                color: color.inkSoft,
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                minWidth: 0,
+                flex: 1,
+              }}
+            >
+              {preview || 'This session is empty.'}
+            </span>
+          </div>
+        </div>
+      )
+    })
+  }
+
+  // ── Reader (pane 3 — unchanged) ────────────────────────────────────────────
+
+  let readerBody: React.ReactNode
+  if (noRoot) {
+    readerBody = (
+      <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
+        Set a transcripts root in Settings to browse sessions.
+      </div>
+    )
+  } else if (!selectedSession) {
+    readerBody = (
+      <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
+        Select a session to read the transcript.
+      </div>
+    )
+  } else if (turnsLoading) {
+    readerBody = (
+      <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkSoft }}>
+        Reading sessions…
+      </div>
+    )
+  } else if (turns.length === 0) {
+    readerBody = (
+      <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
+        This session is empty.
+      </div>
+    )
+  } else {
+    readerBody = (
+      <div style={{ maxWidth: 720, margin: '0 auto' }}>
+        {/* Session detail header — date + quiet metrics (TIN-1725) */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: space[4],
+            paddingBottom: space[5],
+            marginBottom: space[5],
+            borderBottom: `1px solid ${color.hairSoft}`,
+          }}
+        >
+          <span style={{ ...typeToken.meta, color: color.inkSoft }}>
+            {formatDate(selectedSession.date)}
+            {selectedSession.subagentCount > 0 && (
+              <> · {selectedSession.subagentCount} {selectedSession.subagentCount === 1 ? 'subagent' : 'subagents'}</>
+            )}
+          </span>
+          {selectedSession.usage && (
+            <SessionMetaLine usage={selectedSession.usage} />
+          )}
+        </div>
+        {turns.map((turn, i) => (
+          <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
+            <ConversationTurn
+              turn={turn}
+              highlight={highlightTurnIdx === i}
+            />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  // ── List header ────────────────────────────────────────────────────────────
+
+  const listHeader = (
+    <div
+      style={{
+        flexShrink: 0,
+        height: 32,
+        boxSizing: 'border-box',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: space[2],
+        padding: `0 ${space[4]}px`,
+        borderBottom: `1px solid ${color.hairSoft}`,
+        ...typeToken.meta,
+        color: color.inkSoft,
+      }}
+    >
+      {selectedDay ? (
+        <>
+          <span style={{ color: color.inkSoft, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+            {formatDate(selectedDay)} · {sessionsLabel(visibleSessions.length)}
+          </span>
+          <button
+            onClick={clearDay}
+            aria-label="Clear day filter"
+            style={{
+              width: 20,
+              height: 20,
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: radius.sm,
+              cursor: 'pointer',
+              color: color.inkFaint,
+              padding: 0,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.inkSoft }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkFaint }}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="4" y1="4" x2="12" y2="12" />
+              <line x1="12" y1="4" x2="4" y2="12" />
+            </svg>
+          </button>
+        </>
+      ) : (
+        <>
+          <span>All sessions</span>
+          <span style={{ color: color.inkFaint, flexShrink: 0 }}>{visibleSessions.length}</span>
+        </>
+      )}
+    </div>
+  )
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  // Three-pane browse layout (shared by both the full-view and embedded forms).
   const body = (
     <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-        {/* ── Pane 1: Projects rail ── */}
-        <div
-          style={{
-            width: 220,
-            flexShrink: 0,
-            borderRight: `1px solid ${color.hair}`,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-        >
-          {/* Search field */}
-          <div style={{ padding: `${space[3]}px ${space[4]}px`, borderBottom: `1px solid ${color.hairSoft}` }}>
-            <input
-              type="text"
-              placeholder="Search transcripts..."
-              value={searchQuery}
-              onChange={handleSearchChange}
+      {/* ── Sessions column ── */}
+      <div
+        style={{
+          width: 360,
+          flexShrink: 0,
+          borderRight: `1px solid ${color.hair}`,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        {noRoot ? (
+          <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+            Set a transcripts root in Settings to browse sessions.
+          </div>
+        ) : (
+          <>
+            {/* (1) Filter bar */}
+            <div
               style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                background: color.bgField,
-                border: `1px solid ${color.line}`,
-                borderRadius: radius.md,
-                padding: `${space[2]}px ${space[3]}px`,
-                ...typeToken.body,
-                color: color.ink,
-                outline: 'none',
+                flexShrink: 0,
+                padding: `${space[3]}px ${space[4]}px`,
+                borderBottom: `1px solid ${color.hairSoft}`,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: space[2],
               }}
-              onFocus={e => { e.target.style.borderColor = color.forest }}
-              onBlur={e => { e.target.style.borderColor = color.line }}
-            />
-          </div>
-
-          {/* List area */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
-
-            {isSearchActive ? (
-              // Search results mode
-              searching ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                  Loading...
-                </div>
-              ) : searchDone && searchResults.length === 0 ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  Nothing matched.
-                </div>
-              ) : (
-                searchResults.map((r, i) => (
-                  <div
-                    key={i}
-                    onClick={() => handleSearchResultClick(r)}
-                    style={{
-                      padding: `${space[3]}px ${space[4]}px`,
-                      cursor: 'pointer',
-                      borderRadius: radius.card,
-                      marginBottom: space[1],
-                    }}
-                    onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong }}
-                    onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: space[2], marginBottom: 2 }}>
-                      <span
-                        style={{
-                          ...typeToken.micro,
-                          background: color.forestTint,
-                          color: color.forest,
-                          borderRadius: radius.chip,
-                          padding: `1px ${space[2]}px`,
-                        }}
-                      >
-                        {r.project}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        ...typeToken.meta,
-                        color: color.inkSoft,
-                        overflow: 'hidden',
-                        display: '-webkit-box',
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: 'vertical',
-                      }}
-                    >
-                      {r.snippet}
-                    </div>
-                  </div>
-                ))
-              )
-            ) : (
-              // Project list mode
-              projectsLoading ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                  Loading...
-                </div>
-              ) : projectsError ? (
-                <div
-                  style={{
-                    margin: space[4],
-                    padding: `${space[3]}px ${space[4]}px`,
-                    background: 'rgba(155,123,90,0.08)',
-                    borderRadius: radius.md,
-                    ...typeToken.body,
-                    color: color.notice,
-                  }}
-                >
-                  {projectsError}
-                </div>
-              ) : noRoot ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  Set a transcripts root in Settings to browse sessions.
-                </div>
-              ) : projects.length === 0 ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  No projects found.
-                </div>
-              ) : (
-                projects.map(p => (
-                  <div
-                    key={p.project}
-                    onClick={() => setSelectedProject(p.project)}
-                    style={projectRowStyle(selectedProject === p.project)}
-                    onMouseEnter={e => {
-                      if (selectedProject !== p.project)
-                        (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
-                    }}
-                    onMouseLeave={e => {
-                      if (selectedProject !== p.project)
-                        (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-                    }}
-                  >
-                    <span style={{ ...typeToken.body, color: color.ink, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.project}
-                    </span>
-                    <span style={{ ...typeToken.meta, color: color.inkFaint, flexShrink: 0 }}>
-                      {p.sessionCount}
-                    </span>
-                  </div>
-                ))
-              )
-            )}
-          </div>
-        </div>
-
-        {/* ── Pane 2: Sessions ── */}
-        <div
-          style={{
-            width: 320,
-            flexShrink: 0,
-            borderRight: `1px solid ${color.hair}`,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-        >
-          {/* List / Calendar toggle strip */}
-          <div
-            style={{
-              borderBottom: `1px solid ${color.hairSoft}`,
-              padding: `${space[2]}px ${space[3]}px`,
-              display: 'flex',
-              alignItems: 'flex-end',
-              flexShrink: 0,
-            }}
-          >
-            {(['list', 'calendar'] as const).map(id => {
-              const active = pane2Mode === id
-              const label = id === 'list' ? 'List' : 'Calendar'
-              return (
-                <button
-                  key={id}
-                  onClick={() => setPane2Mode(id)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    borderBottom: active ? `1.5px solid ${color.forest}` : '1.5px solid transparent',
-                    padding: `0 0 ${space[2]}px`,
-                    marginRight: space[4],
-                    cursor: 'pointer',
-                    ...typeToken.meta,
-                    color: active ? color.forest : color.inkSoft,
-                    fontWeight: active ? 600 : 400,
-                    transition: 'color 0.1s ease, border-color 0.1s ease',
-                    lineHeight: 1,
-                  }}
-                  onMouseEnter={e => { if (!active) e.currentTarget.style.color = color.ink }}
-                  onMouseLeave={e => { if (!active) e.currentTarget.style.color = color.inkSoft }}
-                >
-                  {label}
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Body */}
-          {pane2Mode === 'list' ? (
-            <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
-              {noRoot ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  Set a transcripts root in Settings to browse sessions.
-                </div>
-              ) : !selectedProject ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  Select a project to see sessions.
-                </div>
-              ) : sessionsLoading ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                  Loading...
-                </div>
-              ) : sessions.length === 0 ? (
-                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                  No sessions in this project yet.
-                </div>
-              ) : (
-                sessions.map(s => {
-                  const active = selectedSession?.path === s.path
-                  return (
-                    <div
-                      key={s.path}
-                      onClick={() => setSelectedSession(s)}
-                      style={sessionRowStyle(active)}
-                      onMouseEnter={e => {
-                        if (!active)
-                          (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
-                      }}
-                      onMouseLeave={e => {
-                        if (!active)
-                          (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space[3], marginBottom: 2 }}>
-                        <span style={{ ...typeToken.body, color: color.ink }}>
-                          {formatDate(s.date)}
-                        </span>
-                        {s.usage && <SessionMetaLine usage={s.usage} compact />}
-                      </div>
-                      <div
-                        style={{
-                          ...typeToken.meta,
-                          color: color.inkSoft,
-                          overflow: 'hidden',
-                          whiteSpace: 'nowrap',
-                          textOverflow: 'ellipsis',
-                        }}
-                      >
-                        {s.firstMessage || 'Empty session'}
-                      </div>
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          ) : (
-            // Calendar mode
-            noRoot ? (
-              <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                Set a transcripts root in Settings to browse sessions.
-              </div>
-            ) : !selectedProject ? (
-              <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                Select a project to see sessions.
-              </div>
-            ) : (
-              <CalendarPane
-                selectedProject={selectedProject}
-                sessions={sessions}
-                sessionsLoading={sessionsLoading}
-                selectedSession={selectedSession}
-                onSelectSession={setSelectedSession}
-                sessionRowStyle={sessionRowStyle}
+            >
+              {/* Row 1: search */}
+              <input
+                type="text"
+                placeholder="Search sessions…"
+                value={searchQuery}
+                onChange={handleSearchChange}
+                style={{
+                  ...fieldChrome,
+                  width: '100%',
+                  padding: `${space[2]}px ${space[3]}px`,
+                  ...typeToken.body,
+                  color: color.ink,
+                }}
+                onFocus={e => { e.target.style.borderColor = color.forest }}
+                onBlur={e => { e.target.style.borderColor = color.line }}
               />
-            )
-          )}
-        </div>
 
-        {/* ── Pane 3: Conversation ── */}
+              {/* Row 2: project select + subagents chip */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: space[2] }}>
+                <select
+                  value={selectedProject}
+                  onChange={e => setSelectedProject(e.target.value)}
+                  style={{
+                    ...fieldChrome,
+                    flex: 1,
+                    minWidth: 0,
+                    padding: `${space[2]}px ${space[3]}px`,
+                    ...typeToken.body,
+                    cursor: 'pointer',
+                    appearance: 'none',
+                  }}
+                  onFocus={e => { e.target.style.borderColor = color.forest }}
+                  onBlur={e => { e.target.style.borderColor = color.line }}
+                >
+                  <option value="">All projects</option>
+                  {projects.map(p => (
+                    <option key={p.project} value={p.project}>
+                      {labelFor(p.project)} ({countByProject.get(p.project) ?? p.sessionCount})
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  onClick={() => setWithSubagents(v => !v)}
+                  aria-pressed={withSubagents}
+                  style={{
+                    flexShrink: 0,
+                    ...typeToken.meta,
+                    padding: `${space[2]}px ${space[3]}px`,
+                    borderRadius: radius.chip,
+                    cursor: 'pointer',
+                    background: withSubagents ? color.forest : 'transparent',
+                    border: `1px solid ${withSubagents ? color.forest : color.line}`,
+                    color: withSubagents ? color.onAccent : color.inkSoft,
+                    transition: 'background 0.12s ease, color 0.12s ease, border-color 0.12s ease',
+                    whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={e => { if (!withSubagents) e.currentTarget.style.color = color.ink }}
+                  onMouseLeave={e => { if (!withSubagents) e.currentTarget.style.color = color.inkSoft }}
+                >
+                  With subagents
+                </button>
+              </div>
+            </div>
+
+            {/* (2) Calendar */}
+            <Calendar
+              selectedProject={selectedProject}
+              selectedDay={selectedDay}
+              onPickDay={pickDay}
+            />
+
+            {/* (3) List header */}
+            {listHeader}
+
+            {/* (4) List — the only scroller */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
+              {listBody}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* ── Reader (pane 3 — unchanged) ── */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          background: color.bgRaised,
+        }}
+      >
         <div
           style={{
             flex: 1,
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            background: color.bgRaised,
+            overflowY: 'auto',
+            padding: `${space[7]}px ${space[8]}px`,
           }}
         >
-          <div
-            style={{
-              flex: 1,
-              overflowY: 'auto',
-              padding: `${space[7]}px ${space[8]}px`,
-            }}
-          >
-            {noRoot ? (
-              <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
-                Set a transcripts root in Settings to browse sessions.
-              </div>
-            ) : !selectedSession ? (
-              <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
-                Select a session to read the transcript.
-              </div>
-            ) : turnsLoading ? (
-              <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkSoft }}>
-                Loading...
-              </div>
-            ) : turns.length === 0 ? (
-              <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>
-                This session is empty.
-              </div>
-            ) : (
-              <div style={{ maxWidth: 720, margin: '0 auto' }}>
-                {/* Session detail header — date + quiet metrics (TIN-1725) */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    justifyContent: 'space-between',
-                    gap: space[4],
-                    paddingBottom: space[5],
-                    marginBottom: space[5],
-                    borderBottom: `1px solid ${color.hairSoft}`,
-                  }}
-                >
-                  <span style={{ ...typeToken.meta, color: color.inkSoft }}>
-                    {formatDate(selectedSession.date)}
-                    {selectedSession.subagentCount > 0 && (
-                      <> · {selectedSession.subagentCount} {selectedSession.subagentCount === 1 ? 'subagent' : 'subagents'}</>
-                    )}
-                  </span>
-                  {selectedSession.usage && (
-                    <SessionMetaLine usage={selectedSession.usage} />
-                  )}
-                </div>
-                {turns.map((turn, i) => (
-                  <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
-                    <ConversationTurn
-                      turn={turn}
-                      highlight={highlightTurnIdx === i}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          {readerBody}
         </div>
+      </div>
 
     </div>
   )
