@@ -155,8 +155,8 @@ export async function suggestWithConfidence(
  * (subscribe with {@link onAuditProgress} from `lib/audit`). Path/rule-only files
  * cost no model call; degrades calmly with no model.
  */
-export async function suggestAll(): Promise<ConfidenceResult[]> {
-  return invoke<ConfidenceResult[]>('suggest_all')
+export async function suggestAll(skip: string[] = []): Promise<ConfidenceResult[]> {
+  return invoke<ConfidenceResult[]>('suggest_all', { skip })
 }
 
 /**
@@ -191,4 +191,9 @@ export async function applySuggestion(payload: ApplySuggestionPayload): Promise<
  */
 export async function applySuggestionsBulk(payloads: ApplySuggestionPayload[]): Promise<number> {
   return invoke<number>('apply_suggestions_bulk', { payload: payloads })
+}
+
+/** Cancel an in-progress suggest_all pass. Partial results remain visible. */
+export function cancelSuggest(): Promise<void> {
+  return invoke('cancel_suggest')
 }

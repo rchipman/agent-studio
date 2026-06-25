@@ -290,6 +290,7 @@ struct Progress {
 pub async fn consistency_audit(
     app: AppHandle,
     db: State<'_, Db>,
+    control: tauri::State<'_, crate::TaskControl>,
 ) -> Result<Vec<Finding>, String> {
     // Fail early with a calm message if there's no reasoning model.
     if !crate::reason::reachable().await {
@@ -298,6 +299,7 @@ pub async fn consistency_audit(
                 .to_string(),
         );
     }
+    control.audit_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
     // Detect model once — used as part of the cache key so a model switch
     // automatically invalidates prior verdicts.
@@ -354,6 +356,10 @@ pub async fn consistency_audit(
     // Cache lookups and writes each re-acquire the lock briefly.
     let mut findings = Vec::new();
     for (idx, (path_a, packed_a, path_b, packed_b)) in work.into_iter().enumerate() {
+        // Honour a cancellation request — return partial findings gathered so far.
+        if control.audit_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let (name_a, body_a) = split_packed(&packed_a);
         let (name_b, body_b) = split_packed(&packed_b);
 
@@ -396,16 +402,24 @@ pub async fn consistency_audit(
         };
 
         for summary in conflicts {
-            findings.push(Finding {
+            let finding = Finding {
                 files: vec![path_a.clone(), path_b.clone()],
                 names: vec![name_a.to_string(), name_b.to_string()],
                 summary,
-            });
+            };
+            let _ = app.emit("audit://finding", &finding);
+            findings.push(finding);
         }
         let _ = app.emit("audit://progress", Progress { done: idx + 1, total });
     }
 
     Ok(findings)
+}
+
+/// Cancel an in-progress consistency audit. Safe to call at any time.
+#[tauri::command]
+pub fn cancel_audit(control: tauri::State<'_, crate::TaskControl>) {
+    control.audit_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Unpack the `name\0body` packing used to carry both through Phase A.
@@ -421,6 +435,17 @@ fn split_packed(s: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cancel_audit sets the flag which the loop checks.
+    #[test]
+    fn cancel_flag_can_be_set_and_cleared() {
+        let ctrl = crate::TaskControl::default();
+        assert!(!ctrl.audit_cancel.load(std::sync::atomic::Ordering::Relaxed));
+        ctrl.audit_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(ctrl.audit_cancel.load(std::sync::atomic::Ordering::Relaxed));
+        ctrl.audit_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!ctrl.audit_cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
 
     #[test]
     fn parse_conflicts_extracts_and_ignores_none() {

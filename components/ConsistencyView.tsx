@@ -18,7 +18,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
 import Button from '@/components/Button'
-import { consistencyAudit, onAuditProgress, type Finding } from '@/lib/audit'
+import { consistencyAudit, onAuditProgress, onFinding, cancelAudit, type Finding } from '@/lib/audit'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
 
@@ -196,8 +196,11 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
   // Keep findings from a prior run visible during an error state.
   const [priorFindings, setPriorFindings] = useState<Finding[] | null>(null)
 
-  // Track the unlisten fn so we can clean it up.
+  // Track unlisten fns so we can clean them up.
   const unlistenRef = useRef<(() => void) | null>(null)
+  const unlistenFindingRef = useRef<(() => void) | null>(null)
+  // Deduplicate live findings by their sorted file-pair key.
+  const findingKeysRef = useRef<Set<string>>(new Set())
 
   // Escape closes.
   useEffect(() => {
@@ -208,22 +211,38 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Cleanup progress subscription on unmount.
+  // Cleanup subscriptions on unmount.
   useEffect(() => {
     return () => {
       unlistenRef.current?.()
+      unlistenFindingRef.current?.()
     }
   }, [])
 
   const runAudit = useCallback(async () => {
-    // Unsubscribe any previous listener.
+    // Unsubscribe any previous listeners.
     unlistenRef.current?.()
     unlistenRef.current = null
+    unlistenFindingRef.current?.()
+    unlistenFindingRef.current = null
 
     setViewState('running')
     setProgress(null)
+    // Reset live findings and the dedup set for this run.
+    setFindings([])
+    findingKeysRef.current = new Set()
 
-    // Subscribe to progress before calling audit so we never miss events.
+    // Subscribe to findings and progress before calling audit so we never miss events.
+    const unlistenFinding = await onFinding((f) => {
+      const key = [...f.files].sort().join('\0')
+      if (!findingKeysRef.current.has(key)) {
+        findingKeysRef.current.add(key)
+        setFindings((prev) => [...prev, f])
+        setViewState('findings')
+      }
+    })
+    unlistenFindingRef.current = unlistenFinding
+
     const unlisten = await onAuditProgress((p) => {
       setProgress(p)
     })
@@ -233,27 +252,48 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
       const result = await consistencyAudit()
       unlisten()
       unlistenRef.current = null
+      unlistenFinding()
+      unlistenFindingRef.current = null
 
-      if (result.length === 0) {
+      // Reconcile: the returned Vec is authoritative. Dedup by file-pair key.
+      const seen = new Set<string>()
+      const deduped = result.filter((f) => {
+        const key = [...f.files].sort().join('\0')
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+
+      if (deduped.length === 0) {
         setPriorFindings(null)
         setFindings([])
         setViewState('all-clear')
       } else {
-        setPriorFindings(result)
-        setFindings(result)
+        setPriorFindings(deduped)
+        setFindings(deduped)
         setViewState('findings')
       }
     } catch (err) {
       unlisten()
       unlistenRef.current = null
+      unlistenFinding()
+      unlistenFindingRef.current = null
 
       const msg = err instanceof Error ? err.message : String(err)
       const isNoModel =
         /reasoning model|ollama|no model|model not found|connection refused/i.test(msg)
+      // If we cancelled (no error, just stopped), keep the partial findings visible.
+      const isCancelled = /cancelled|canceled|cancel/i.test(msg)
 
-      setViewState(isNoModel ? 'no-model' : 'error')
+      if (isCancelled) {
+        // Stay in findings state (or all-clear if nothing found yet).
+        if (findings.length === 0) setViewState('all-clear')
+        // else stay in 'findings' -- already set by live events
+      } else {
+        setViewState(isNoModel ? 'no-model' : 'error')
+      }
     }
-  }, [])
+  }, [findings.length])
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -306,11 +346,16 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
       {/* ── Running ──────────────────────────────────────────────────────── */}
       {viewState === 'running' && (
         <Column>
-          <div style={{ paddingTop: space[8] }}>
+          <div style={{ paddingTop: space[8], display: 'flex', flexDirection: 'column', gap: space[4] }}>
             <div style={{ ...typeToken.body, color: color.inkSoft }}>
               {progress && progress.total > 0
                 ? `Checking ${progress.done} of ${progress.total} related notes…`
                 : 'Reading your library…'}
+            </div>
+            <div>
+              <Button variant="secondary" onClick={() => cancelAudit()}>
+                Stop
+              </Button>
             </div>
           </div>
         </Column>
