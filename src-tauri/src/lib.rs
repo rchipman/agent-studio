@@ -133,6 +133,12 @@ pub fn run() {
       app.manage(terminal::TerminalState::default());
       app.manage(TaskControl::default());
 
+      // Build the transcript index once at startup, on a background thread (it
+      // re-parses any changed .jsonl, and an active session can be tens of MB —
+      // far too slow to run inline on a read). The Sessions view reads the cached
+      // table instantly and refetches when `transcripts://indexed` fires. (TIN-1769)
+      transcript::index_transcripts_bg(app.handle().clone());
+
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -181,6 +187,7 @@ pub fn run() {
       transcript::get_session,
       transcript::search_transcripts,
       transcript::sessions_by_day,
+      transcript::refresh_transcripts,
       archive::archive_status,
       archive::run_retention_cleanup,
       linear::linear_key_status,

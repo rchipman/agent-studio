@@ -24,6 +24,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
@@ -408,11 +409,13 @@ interface CalendarProps {
   selectedProject: string
   selectedDay: string | null
   onPickDay: (day: string) => void
+  /** Bumped when a background reindex lands, so the day counts refetch. */
+  dataVersion: number
 }
 
 const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
-function Calendar({ selectedProject, selectedDay, onPickDay }: CalendarProps) {
+function Calendar({ selectedProject, selectedDay, onPickDay, dataVersion }: CalendarProps) {
   const today = todayIso()
   const now = useMemo(() => new Date(), [])
   const [viewYear, setViewYear] = useState(now.getFullYear())
@@ -429,7 +432,7 @@ function Calendar({ selectedProject, selectedDay, onPickDay }: CalendarProps) {
         setDayCountMap(m)
       })
       .catch(() => setDayCountMap(new Map()))
-  }, [selectedProject])
+  }, [selectedProject, dataVersion])
 
   const currentYM = yearMonth(now)
   const viewYM = `${viewYear}-${pad2(viewMonth)}`
@@ -784,6 +787,30 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
   const [highlightTurnIdx, setHighlightTurnIdx] = useState<number | null>(null)
   const [pendingSearchHit, setPendingSearchHit] = useState<string | null>(null)
 
+  // Bumped when a background reindex finishes (`transcripts://indexed`), so the
+  // cached reads refetch with fresh data without ever blocking the UI. (TIN-1769)
+  const [dataVersion, setDataVersion] = useState(0)
+  const hasLoadedSessions = useRef(false)
+
+  // Kick a background reindex on mount (the reads below are instant from cache),
+  // and refetch when it lands. Indexing never runs inline on a read anymore, so
+  // opening Sessions is immediate even with an active multi-MB session file.
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    invoke('refresh_transcripts').catch(() => {})
+    listen('transcripts://indexed', () => {
+      if (!cancelled) setDataVersion(v => v + 1)
+    }).then(un => {
+      if (cancelled) un()
+      else unlisten = un
+    })
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
   // ── Load projects (for the select) + decode labels ─────────────────────────
 
   useEffect(() => {
@@ -798,7 +825,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
           setNoRoot(true)
         }
       })
-  }, [])
+  }, [dataVersion])
 
   // Decode + disambiguate project labels once when projects load.
   const labelByProject = useMemo(
@@ -814,14 +841,19 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
 
   useEffect(() => {
     if (noRoot) return
-    setSessionsLoading(true)
+    let cancelled = false
+    // Skeleton only on the first load; a background refresh swaps in silently.
+    if (!hasLoadedSessions.current) setSessionsLoading(true)
     invoke<SessionSummary[]>('list_sessions', { payload: { project: '' } })
       .then(s => {
+        if (cancelled) return
         setSessions(s)
         setSessionsLoading(false)
+        hasLoadedSessions.current = true
       })
-      .catch(() => setSessionsLoading(false))
-  }, [noRoot])
+      .catch(() => { if (!cancelled) setSessionsLoading(false) })
+    return () => { cancelled = true }
+  }, [noRoot, dataVersion])
 
   // ── Load turns when a session is selected ──────────────────────────────────
 
@@ -1249,6 +1281,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               selectedProject={selectedProject}
               selectedDay={selectedDay}
               onPickDay={pickDay}
+              dataVersion={dataVersion}
             />
 
             {/* (3) List header */}
