@@ -40,3 +40,11 @@ dur(s) | outcome | self-report fit | adjustment.
 ## Process gotcha
 
 - **Parallel worktree `npm install` cross-contaminates the lockfile.** The settings builder's `npm install` (adding `@tauri-apps/plugin-store`) leaked into the panel branch's `package.json`/lock even though the panel needs no new dep. Always diff `package.json` vs main before merging a worktree branch and strip spurious deps. (Caught and stripped on the 1640 branch.)
+
+## Spine (orchestrator) cost — the other half of the ledger
+
+The ledger above tracks **subagent** tokens. The **orchestrator/spine** cost is recoverable from the session transcript (`~/.claude/projects/<proj>/<session>.jsonl`) — each assistant turn carries `message.usage` (input / output / cache_creation / cache_read). Same data TIN-1725 already parses.
+
+- **Session 2026-06-24 (this long-EM session, ~mid):** 3,247 turns · fresh input 0.40M · cache-write 25.3M · cache-read **1,554.9M** · output 5.16M. Cache hit ratio **98.4%**. Cost-weighted input-equiv ≈ **187M** vs **~1,581M** uncached → caching absorbs ~88% (~8×) of the long-session context cost.
+- **Takeaway:** long-running EM sessions are *not* significantly less efficient than scoped sessions **while cache-warm**; the killer is idle gaps past the ~5-min cache TTL (forces full-price re-reads). Recommend EM for cohesive, *active* bodies of work; scoped for independent tickets.
+- TODO (TIN below): automate this rollup so spine cost is logged per session, not computed by hand.
