@@ -1,3 +1,4 @@
+mod archive;
 mod audit;
 mod cli;
 mod continuity;
@@ -91,6 +92,7 @@ pub fn run() {
       search::create_file,
       settings::get_settings,
       settings::set_settings,
+      settings::set_retention_policy,
       settings::rebuild_index,
       settings::set_embedding_key,
       settings::embedding_key_status,
@@ -119,6 +121,8 @@ pub fn run() {
       transcript::get_session,
       transcript::search_transcripts,
       transcript::sessions_by_day,
+      archive::archive_status,
+      archive::run_retention_cleanup,
       linear::linear_key_status,
       linear::set_linear_key,
       linear::reveal_linear_key,

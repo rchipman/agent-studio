@@ -28,11 +28,16 @@ import {
   revealLinearKey,
   listLinearTeams,
   syncLinear,
+  archiveStatus,
+  setRetentionPolicy,
+  runRetentionCleanup,
   type Settings,
   type Agent,
   type EmbeddingKeyStatus,
   type LinearKeyStatus,
   type LinearTeam,
+  type ArchiveStatus,
+  type RetentionPolicy,
 } from '@/lib/settings'
 
 interface SettingsModalProps {
@@ -46,7 +51,12 @@ const EMPTY_SETTINGS: Settings = {
   skillsRoot: '',
   transcriptsRoot: '',
   agents: [],
+  archiveEnabled: true,
+  retentionPolicy: { kind: 'sizeCap', maxBytes: 2_147_483_648 },
 }
+
+/** One gibibyte, the unit the size-cap field works in. */
+const BYTES_PER_GB = 1_073_741_824
 
 const MASK = '••••••••••••'
 
@@ -63,6 +73,13 @@ type LinearSync =
   | { kind: 'idle' }
   | { kind: 'syncing' }
   | { kind: 'done'; lastSynced: string }
+  | { kind: 'error' }
+
+// Archive cleanup ("Free up space") flow state. Mirrors the Linear-sync idiom.
+type Cleanup =
+  | { kind: 'idle' }
+  | { kind: 'running' }
+  | { kind: 'done'; newStoredBytes: number }
   | { kind: 'error' }
 
 export default function SettingsModal({ open, onClose }: SettingsModalProps) {
@@ -88,6 +105,10 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   // Sync state
   const [linearSync, setLinearSync] = useState<LinearSync>({ kind: 'idle' })
 
+  // ── Session archive (TIN-1759) ──
+  const [archive, setArchive] = useState<ArchiveStatus | null>(null)
+  const [cleanup, setCleanup] = useState<Cleanup>({ kind: 'idle' })
+
   // ── Load on open ──
   useEffect(() => {
     if (!open) return
@@ -100,18 +121,21 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     setLinearKeyDraft(null)
     setLinearRevealed(false)
     setLinearSync({ kind: 'idle' })
+    setCleanup({ kind: 'idle' })
     ;(async () => {
       try {
-        const [s, status, linStatus] = await Promise.all([
+        const [s, status, linStatus, arch] = await Promise.all([
           getSettings(),
           embeddingKeyStatus(),
           linearKeyStatus(),
+          archiveStatus().catch(() => null),
         ])
         if (cancelled) return
         setSettingsState(s)
         setInitialMemoryRoot(s.memoryRoot)
         setKeyStatus(status)
         setLinearStatus(linStatus)
+        setArchive(arch)
         // Load teams if key is already set
         if (linStatus === 'set') {
           try {
@@ -267,6 +291,46 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }
 
+  // ── Session archive (TIN-1759) ──
+  // Persist the toggle + policy, then refresh the status readout so the prune
+  // preview and over-cap line reflect the new policy immediately.
+  async function persistArchive(policy: RetentionPolicy, enabled: boolean) {
+    setSettingsState((prev) => ({ ...prev, archiveEnabled: enabled, retentionPolicy: policy }))
+    setCleanup({ kind: 'idle' })
+    try {
+      await setRetentionPolicy(policy, enabled)
+      const next = await archiveStatus()
+      setArchive(next)
+    } catch (err) {
+      console.error('[settings] archive policy', err)
+    }
+  }
+
+  function toggleArchive(enabled: boolean) {
+    void persistArchive(settings.retentionPolicy, enabled)
+  }
+
+  function changePolicy(policy: RetentionPolicy) {
+    void persistArchive(policy, settings.archiveEnabled)
+  }
+
+  async function doCleanup() {
+    setCleanup({ kind: 'running' })
+    try {
+      const result = await runRetentionCleanup()
+      const next = await archiveStatus()
+      setArchive(next)
+      setCleanup({ kind: 'done', newStoredBytes: result.newStoredBytes })
+      setTimeout(
+        () => setCleanup((c) => (c.kind === 'done' ? { kind: 'idle' } : c)),
+        2400,
+      )
+    } catch (err) {
+      console.error('[settings] cleanup', err)
+      setCleanup({ kind: 'error' })
+    }
+  }
+
   // ── Agents ──
   function addAgent() {
     setSettingsState((prev) => ({
@@ -416,6 +480,18 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                   Rebuild the search index to pick up files added outside Studio.
                 </span>
               </div>
+            </Section>
+
+            {/* ── Session archive ── */}
+            <Section label="Session archive">
+              <ArchiveControls
+                settings={settings}
+                archive={archive}
+                cleanup={cleanup}
+                onToggle={toggleArchive}
+                onChangePolicy={changePolicy}
+                onCleanup={doCleanup}
+              />
             </Section>
 
             {/* ── Embedding ── */}
@@ -816,6 +892,265 @@ function ReindexRow({
       </Button>
     </div>
   )
+}
+
+// ── Session archive controls (TIN-1759) ─────────────────────────────────────────
+
+function ArchiveControls({
+  settings,
+  archive,
+  cleanup,
+  onToggle,
+  onChangePolicy,
+  onCleanup,
+}: {
+  settings: Settings
+  archive: ArchiveStatus | null
+  cleanup: Cleanup
+  onToggle: (enabled: boolean) => void
+  onChangePolicy: (policy: RetentionPolicy) => void
+  onCleanup: () => void
+}) {
+  const enabled = settings.archiveEnabled
+  const policy: RetentionPolicy =
+    settings.retentionPolicy ?? { kind: 'sizeCap', maxBytes: 2_147_483_648 }
+  const dim: React.CSSProperties = enabled ? {} : { opacity: 0.5, pointerEvents: 'none' }
+
+  // The size-cap field works in whole-ish GB; convert to/from bytes.
+  const capBytes = policy.kind === 'sizeCap' ? policy.maxBytes : 2_147_483_648
+  const capGb = capBytes / BYTES_PER_GB
+  const capLabel = `${formatGb(capGb)} GB`
+
+  const prunable = archive?.prunablePreview
+  const overCap = (archive?.overCapBytes ?? 0) > 0
+
+  return (
+    <div>
+      {/* Toggle */}
+      <label
+        style={{ display: 'flex', alignItems: 'flex-start', gap: space[3], cursor: 'pointer' }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onToggle(e.target.checked)}
+          style={{ marginTop: 2, accentColor: color.forest }}
+        />
+        <span>
+          <span style={{ ...type.body, color: color.ink, display: 'block' }}>
+            Keep a durable copy of every session
+          </span>
+          <span style={{ ...type.meta, color: color.inkFaint, display: 'block', marginTop: space[1] }}>
+            Studio copies each session out of Claude Code before it can prune them.
+          </span>
+        </span>
+      </label>
+
+      {!enabled && (
+        <div style={{ ...type.meta, color: color.inkSoft, marginTop: space[3] }}>
+          Archiving is off. New sessions are not being copied.
+        </div>
+      )}
+
+      {/* Readout */}
+      <div style={{ ...dim, marginTop: space[4] }}>
+        <div style={{ ...type.body, color: color.ink }}>
+          {archive
+            ? `${archive.sessionCount.toLocaleString()} ${archive.sessionCount === 1 ? 'session' : 'sessions'} · ${formatBytes(archive.storedBytes)}`
+            : 'No sessions archived yet.'}
+        </div>
+        {archive && archive.sessionCount > 0 && (
+          <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[1] }}>
+            {`Oldest ${formatMonthYear(archive.oldestDate)}, newest ${describeNewest(archive.newestDate)}`}
+          </div>
+        )}
+
+        {/* Retention policy */}
+        <div style={{ marginTop: space[4] }}>
+          <label style={{ ...type.label, color: color.inkSoft }}>Retention</label>
+          <div style={{ marginTop: space[2] }}>
+            <RetentionControl policy={policy} onChange={onChangePolicy} />
+          </div>
+        </div>
+
+        {/* Size-cap inline field */}
+        {policy.kind === 'sizeCap' && (
+          <div
+            style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[3] }}
+          >
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={formatGb(capGb)}
+              onChange={(e) => {
+                const gb = parseFloat(e.target.value)
+                if (!Number.isFinite(gb) || gb <= 0) return
+                onChangePolicy({ kind: 'sizeCap', maxBytes: Math.round(gb * BYTES_PER_GB) })
+              }}
+              onFocus={(e) => (e.currentTarget.style.borderColor = color.forest)}
+              onBlur={(e) => (e.currentTarget.style.borderColor = color.line)}
+              style={{ ...fieldStyle, width: 96, fontFamily: font.mono }}
+            />
+            <span style={{ ...type.meta, color: color.inkFaint }}>GB stored</span>
+          </div>
+        )}
+
+        {/* Standing over-cap / under-cap line (tan notice, never red) */}
+        <div style={{ ...type.meta, color: color.inkSoft, marginTop: space[4] }}>
+          {policy.kind === 'keepAll'
+            ? 'Keeping every session. Nothing is pruned.'
+            : overCap && prunable && prunable.count > 0
+              ? `Will free ${formatBytes(prunable.bytes)} by archiving the ${prunable.count} oldest ${prunable.count === 1 ? 'session' : 'sessions'} back to ${capLabel}.`
+              : prunable && prunable.count > 0
+                ? `Will free ${formatBytes(prunable.bytes)} by archiving the ${prunable.count} oldest ${prunable.count === 1 ? 'session' : 'sessions'}.`
+                : policy.kind === 'sizeCap'
+                  ? `Nothing to free up. You’re under ${capLabel}.`
+                  : 'Nothing to free up.'}
+        </div>
+
+        {/* Free up space */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[3] }}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={onCleanup}
+            disabled={
+              cleanup.kind === 'running' || !prunable || prunable.count === 0
+            }
+          >
+            {cleanup.kind === 'running' ? 'Freeing space…' : 'Free up space'}
+          </Button>
+          {cleanup.kind === 'done' && (
+            <span style={{ ...type.meta, color: color.inkFaint }}>
+              {`Archive trimmed to ${formatBytes(cleanup.newStoredBytes)}.`}
+            </span>
+          )}
+          {cleanup.kind === 'error' && (
+            <>
+              <span style={{ ...type.meta, color: color.notice }}>
+                Could not free space just now.
+              </span>
+              <Button variant="tertiary" tone="notice" padding="none" onClick={onCleanup}>
+                Try again
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Keep everything · Size cap · Keep N months. Same idiom as ThemeControl. */
+function RetentionControl({
+  policy,
+  onChange,
+}: {
+  policy: RetentionPolicy
+  onChange: (policy: RetentionPolicy) => void
+}) {
+  const options: { value: RetentionPolicy['kind']; label: string }[] = [
+    { value: 'keepAll', label: 'Keep everything' },
+    { value: 'sizeCap', label: 'Size cap' },
+    { value: 'keepMonths', label: 'Keep N months' },
+  ]
+
+  const choose = (kind: RetentionPolicy['kind']) => {
+    if (kind === policy.kind) return
+    if (kind === 'keepAll') onChange({ kind: 'keepAll' })
+    else if (kind === 'sizeCap') onChange({ kind: 'sizeCap', maxBytes: 2_147_483_648 })
+    else onChange({ kind: 'keepMonths', months: 6 })
+  }
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Retention policy"
+      style={{
+        display: 'inline-flex',
+        gap: 2,
+        padding: 2,
+        borderRadius: radius.field,
+        border: `1px solid ${color.line}`,
+        background: color.bgField,
+      }}
+    >
+      {options.map((o) => {
+        const active = policy.kind === o.value
+        return (
+          <button
+            key={o.value}
+            role="radio"
+            aria-checked={active}
+            onClick={() => choose(o.value)}
+            style={{
+              padding: `${space[2]}px ${space[4]}px`,
+              borderRadius: radius.md,
+              border: 'none',
+              background: active ? color.forestWash : 'transparent',
+              color: active ? color.forest : color.inkSoft,
+              fontFamily: font.sans,
+              fontSize: 12,
+              fontWeight: active ? 600 : 400,
+              transition: 'all 0.12s ease',
+              cursor: 'pointer',
+            }}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── Archive formatting helpers ───────────────────────────────────────────────────
+
+/** Human byte size: B / KB / MB / GB with one decimal above MB. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kb = bytes / 1024
+  if (kb < 1024) return `${Math.round(kb)} KB`
+  const mb = kb / 1024
+  if (mb < 1024) return `${Math.round(mb)} MB`
+  const gb = mb / 1024
+  return `${formatGb(gb)} GB`
+}
+
+/** Trim a GB value to at most one decimal, dropping a trailing .0. */
+function formatGb(gb: number): string {
+  const rounded = Math.round(gb * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
+/** YYYY-MM-DD → "Month YYYY" (e.g. "December 2025"). */
+function formatMonthYear(iso: string): string {
+  const d = parseIsoDate(iso)
+  if (!d) return iso
+  return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+}
+
+/** "today" when the ISO date is today, else "Month YYYY". */
+function describeNewest(iso: string): string {
+  const d = parseIsoDate(iso)
+  if (!d) return iso
+  const now = new Date()
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return 'today'
+  }
+  return formatMonthYear(iso)
+}
+
+function parseIsoDate(iso: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+  if (!m) return null
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return Number.isNaN(d.getTime()) ? null : d
 }
 
 // ── Agent row ───────────────────────────────────────────────────────────────────

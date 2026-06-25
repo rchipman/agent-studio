@@ -30,6 +30,9 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-store = "2.4.3"
 keyring = { version = "4.1.1", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
+# TIN-1759: durable session archive — zstd compression of session transcripts
+# (write-once / read-rarely, so we compress at a high ratio level).
+zstd = "0.13"
 # sqlite-vec: vector-search SQLite extension, statically linked into the bundled
 # SQLite build. Registered as a SQLite auto-extension at process startup (see
 # search::register_sqlite_vec) — no dynamic .so/.dylib to ship.

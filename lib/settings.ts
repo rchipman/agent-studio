@@ -20,6 +20,15 @@ export interface Agent {
   cwd: string
 }
 
+/**
+ * Retention policy for the durable session archive (TIN-1759). Tagged on `kind`
+ * to mirror the Rust enum's serde representation.
+ */
+export type RetentionPolicy =
+  | { kind: 'keepAll' }
+  | { kind: 'sizeCap'; maxBytes: number }
+  | { kind: 'keepMonths'; months: number }
+
 /** The full persisted settings shape (secrets excluded). */
 export interface Settings {
   memoryRoot: string
@@ -27,6 +36,8 @@ export interface Settings {
   skillsRoot: string
   transcriptsRoot: string
   agents: Agent[]
+  archiveEnabled: boolean
+  retentionPolicy: RetentionPolicy
 }
 
 export type EmbeddingKeyStatus = 'set' | 'unset'
@@ -103,4 +114,48 @@ export async function listLinearTeams(): Promise<LinearTeam[]> {
 /** Trigger a Linear sync. Pass teamKey to scope to a specific team. */
 export async function syncLinear(teamKey?: string): Promise<LinearSyncResult> {
   return invoke<LinearSyncResult>('sync_linear', { payload: { teamKey } })
+}
+
+// ── Session archive (TIN-1759) ──────────────────────────────────────────────────
+
+/** Manifest-derived preview of what a retention cleanup would prune. */
+export interface PrunePreview {
+  count: number
+  bytes: number
+}
+
+/** Instant status snapshot for the Session archive section, from the manifest. */
+export interface ArchiveStatus {
+  enabled: boolean
+  sessionCount: number
+  storedBytes: number
+  oldestDate: string
+  newestDate: string
+  overCapBytes: number
+  prunablePreview: PrunePreview
+}
+
+/** Result of a retention cleanup run. */
+export interface CleanupResult {
+  prunedCount: number
+  freedBytes: number
+  newStoredBytes: number
+}
+
+/** Read the archive status (size, range, prune preview). Reconciles on first call. */
+export async function archiveStatus(): Promise<ArchiveStatus> {
+  return invoke<ArchiveStatus>('archive_status')
+}
+
+/** Persist the archive toggle + retention policy. */
+export async function setRetentionPolicy(
+  policy: RetentionPolicy,
+  enabled: boolean,
+): Promise<void> {
+  await invoke('set_retention_policy', { payload: { policy, enabled } })
+}
+
+/** Trim the archive back under its cap / window. Idempotent; zeros when nothing prunable. */
+export async function runRetentionCleanup(): Promise<CleanupResult> {
+  return invoke<CleanupResult>('run_retention_cleanup')
 }
