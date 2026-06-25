@@ -631,6 +631,110 @@ function Calendar({ selectedProject, selectedDay, onPickDay }: CalendarProps) {
   )
 }
 
+// ── Virtualized session list ────────────────────────────────────────────────
+//
+// The list can hold many hundreds of sessions (857 in a single 30-day window is
+// routine), and it re-renders on every selection / filter change. Rendering all
+// rows synchronously blocks the main thread; the rows are fixed-height (two
+// single-line rows, both ellipsis-clamped), so a simple fixed-height window —
+// render only the visible slice plus an overscan buffer — keeps it instant at
+// any size, with no dependency. (TIN-1768)
+
+/** Fixed row height in px — must match the height baked into `sessionRowStyle`. */
+const ROW_HEIGHT = 56
+
+function VirtualList<T>({
+  items,
+  rowHeight,
+  renderRow,
+  overscan = 8,
+}: {
+  items: T[]
+  rowHeight: number
+  renderRow: (item: T, index: number) => React.ReactNode
+  overscan?: number
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [height, setHeight] = useState(0)
+
+  // Track the scroller's own height so the window covers exactly the viewport.
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setHeight(el.clientHeight)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const total = items.length * rowHeight
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan)
+  const windowCount = (height > 0 ? Math.ceil(height / rowHeight) : 0) + overscan * 2
+  const end = Math.min(items.length, start + windowCount)
+
+  const slice: React.ReactNode[] = []
+  for (let i = start; i < end; i++) slice.push(renderRow(items[i], i))
+
+  return (
+    <div
+      ref={ref}
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}
+    >
+      {/* Spacer sized to the full list so the scrollbar reflects the true extent;
+          the rendered window is offset into place with a transform. */}
+      <div style={{ height: total, position: 'relative' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            transform: `translateY(${start * rowHeight}px)`,
+          }}
+        >
+          {slice}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Skeleton placeholder rows shown while the session list loads, so the view
+ *  swaps in immediately instead of blocking on a "Reading…" message. */
+function SkeletonList({ rows = 9 }: { rows?: number }) {
+  return (
+    <div style={{ flex: 1, overflow: 'hidden', padding: `${space[2]}px ${space[2]}px` }} aria-hidden>
+      <style>{`@keyframes sess-shimmer { 0% { opacity: 0.55 } 50% { opacity: 1 } 100% { opacity: 0.55 } }`}</style>
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} style={{ height: ROW_HEIGHT, boxSizing: 'border-box', padding: `${space[3]}px ${space[5]}px` }}>
+          <div
+            style={{
+              height: 11,
+              width: '38%',
+              borderRadius: radius.sm,
+              background: color.bgFieldStrong,
+              marginBottom: space[2],
+              animation: 'sess-shimmer 1.4s ease-in-out infinite',
+            }}
+          />
+          <div
+            style={{
+              height: 10,
+              width: `${70 - (i % 4) * 9}%`,
+              borderRadius: radius.sm,
+              background: color.bgField,
+              animation: 'sess-shimmer 1.4s ease-in-out infinite',
+            }}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface TranscriptBrowserProps {
@@ -821,6 +925,10 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
 
   function sessionRowStyle(active: boolean): React.CSSProperties {
     return {
+      // Fixed height so the list can virtualize (must match ROW_HEIGHT).
+      height: ROW_HEIGHT,
+      boxSizing: 'border-box',
+      overflow: 'hidden',
       padding: `${space[3]}px ${space[5]}px`,
       cursor: 'pointer',
       borderRadius: radius.card,
@@ -845,79 +953,81 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
 
   const showBadges = selectedProject === '' // hide per-row badge when one project is selected
 
-  let listBody: React.ReactNode
-  if (sessionsLoading) {
-    listBody = (
-      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-        Reading sessions…
+  // One session row — rendered on demand by the virtual list (only the visible
+  // window is built), so this stays cheap no matter how long the list gets.
+  function renderSessionRow(s: SessionSummary): React.ReactNode {
+    const active = selectedSession?.path === s.path
+    const snippet = isSearchActive ? searchHits.get(s.path) : undefined
+    const preview = snippet ?? s.firstMessage ?? ''
+    return (
+      <div
+        key={s.path}
+        onClick={() => selectSession(s, snippet)}
+        style={sessionRowStyle(active)}
+        onMouseEnter={e => {
+          if (!active) (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
+        }}
+        onMouseLeave={e => {
+          if (!active) (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+        }}
+      >
+        {/* Line 1: date · compact metrics */}
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space[3], marginBottom: 2 }}>
+          <span style={{ ...typeToken.body, color: color.ink }}>
+            {formatDate(s.date)}
+          </span>
+          {s.usage && <SessionMetaLine usage={s.usage} compact />}
+        </div>
+        {/* Line 2: project badge (only when All projects) + preview */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: space[2], minWidth: 0 }}>
+          {showBadges && <ProjectBadge label={labelFor(s.project)} />}
+          <span
+            style={{
+              ...typeToken.meta,
+              color: color.inkSoft,
+              overflow: 'hidden',
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              minWidth: 0,
+              flex: 1,
+            }}
+          >
+            {preview || 'This session is empty.'}
+          </span>
+        </div>
       </div>
     )
-  } else if (isSearchActive && searching) {
-    listBody = (
-      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-        Reading sessions…
-      </div>
-    )
+  }
+
+  // The list area: skeleton while loading, a calm empty state, or the
+  // virtualized list. Each fills the column (flex:1); the VirtualList owns its
+  // own scroller.
+  const centeredState = (text: string, faint = false): React.ReactNode => (
+    <div style={{ flex: 1, overflowY: 'auto', padding: space[5], ...typeToken.body, color: faint ? color.inkFaint : color.inkSoft, textAlign: 'center' }}>
+      {text}
+    </div>
+  )
+
+  let listArea: React.ReactNode
+  if (sessionsLoading || (isSearchActive && searching)) {
+    listArea = <SkeletonList />
   } else if (isSearchActive && searchDone && visibleSessions.length === 0) {
-    listBody = (
-      <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-        Nothing matched.
-      </div>
-    )
+    listArea = centeredState('Nothing matched.', true)
   } else if (visibleSessions.length === 0) {
-    // A selected day with no rows reads differently from a general no-match.
-    const msg = selectedDay
-      ? 'No sessions on this day.'
-      : 'No sessions match your filters.'
-    listBody = (
-      <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-        {msg}
-      </div>
+    listArea = centeredState(
+      selectedDay ? 'No sessions on this day.' : 'No sessions match your filters.',
+      true,
     )
   } else {
-    listBody = visibleSessions.map(s => {
-      const active = selectedSession?.path === s.path
-      const snippet = isSearchActive ? searchHits.get(s.path) : undefined
-      const preview = snippet ?? s.firstMessage ?? ''
-      return (
-        <div
-          key={s.path}
-          onClick={() => selectSession(s, snippet)}
-          style={sessionRowStyle(active)}
-          onMouseEnter={e => {
-            if (!active) (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
-          }}
-          onMouseLeave={e => {
-            if (!active) (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-          }}
-        >
-          {/* Line 1: date · compact metrics */}
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space[3], marginBottom: 2 }}>
-            <span style={{ ...typeToken.body, color: color.ink }}>
-              {formatDate(s.date)}
-            </span>
-            {s.usage && <SessionMetaLine usage={s.usage} compact />}
-          </div>
-          {/* Line 2: project badge (only when All projects) + preview */}
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: space[2], minWidth: 0 }}>
-            {showBadges && <ProjectBadge label={labelFor(s.project)} />}
-            <span
-              style={{
-                ...typeToken.meta,
-                color: color.inkSoft,
-                overflow: 'hidden',
-                whiteSpace: 'nowrap',
-                textOverflow: 'ellipsis',
-                minWidth: 0,
-                flex: 1,
-              }}
-            >
-              {preview || 'This session is empty.'}
-            </span>
-          </div>
-        </div>
-      )
-    })
+    listArea = (
+      <VirtualList
+        // Remount on a filter change so the new list starts scrolled to the top.
+        key={`${selectedProject}|${selectedDay ?? ''}|${isSearchActive ? searchQuery : ''}`}
+        items={visibleSessions}
+        rowHeight={ROW_HEIGHT}
+        renderRow={(s) => renderSessionRow(s)}
+      />
+    )
   }
 
   // ── Reader (pane 3 — unchanged) ────────────────────────────────────────────
@@ -1144,10 +1254,8 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
             {/* (3) List header */}
             {listHeader}
 
-            {/* (4) List — the only scroller */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
-              {listBody}
-            </div>
+            {/* (4) List — skeleton / empty state / virtualized scroller */}
+            {listArea}
           </>
         )}
       </div>
