@@ -39,11 +39,12 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::search::Db;
 
@@ -1088,6 +1089,54 @@ fn maybe_archive_pass<R: tauri::Runtime>(
     }
 }
 
+// ── Background indexing (TIN-1769) ──────────────────────────────────────────────
+//
+// Indexing re-parses any `.jsonl` whose mtime changed since the last pass. An
+// ACTIVE session file grows constantly and can be tens of MB (this session's own
+// transcript was 28.8 MB), so a re-parse + FTS rebuild of it costs tens of
+// seconds. Running that inline inside the read commands made opening Sessions
+// take 30s+. So the read commands (list/projects/by-day/search) now ONLY query
+// the cached table; indexing runs here, on a background thread off the shared Db
+// mutex, and emits `transcripts://indexed` so the UI refetches when it lands.
+
+/// Coalescing guard: a pass already running makes a new request a no-op.
+static TRANSCRIPT_INDEXING: AtomicBool = AtomicBool::new(false);
+
+/// Build the transcript index on a background thread (own connection, off the
+/// shared `Db` mutex), run the archive pass, then emit `transcripts://indexed`.
+/// Coalesced — overlapping calls collapse to the one in-flight pass.
+pub fn index_transcripts_bg<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    if TRANSCRIPT_INDEXING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mem_root = crate::settings::resolved_memory_root(&app);
+        let tx_root = transcripts_root_from_settings(&app);
+        // Own connection to the same index DB (WAL + busy_timeout via init_db), so
+        // the long parse never holds the shared mutex the read commands use.
+        match crate::search::init_db(&mem_root) {
+            Ok(conn) => {
+                if let Err(e) = build_transcript_index(&tx_root, &conn) {
+                    log::warn!("[transcripts] background index failed: {e}");
+                }
+                maybe_archive_pass(&app, &tx_root, &conn);
+            }
+            Err(e) => log::error!("[transcripts] index db open failed: {e}"),
+        }
+        TRANSCRIPT_INDEXING.store(false, Ordering::SeqCst);
+        let _ = app.emit("transcripts://indexed", ());
+    });
+}
+
+/// Kick a background transcript reindex. Returns immediately; the cached reads
+/// are already current, and the UI refetches on the `transcripts://indexed`
+/// event when fresh data lands.
+#[tauri::command]
+pub fn refresh_transcripts<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    index_transcripts_bg(app);
+    Ok(())
+}
+
 /// Walk `root`, yielding `(project_name, path_to_jsonl)` for every TOP-LEVEL
 /// session `.jsonl` directly inside a project dir. Subagent sidecar files (under
 /// a `subagents/` directory and/or named `agent-*.jsonl`) are NEVER yielded as
@@ -1141,15 +1190,12 @@ fn collect_top_level_sessions(project_dir: &Path, project: &str, out: &mut Vec<(
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn list_transcript_projects<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
+pub fn list_transcript_projects(
     db: State<'_, Db>,
 ) -> Result<Vec<TranscriptProject>, String> {
-    let root = transcripts_root_from_settings(&app);
+    // Pure cached read — indexing runs in the background (see index_transcripts_bg).
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
-    build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
-    maybe_archive_pass(&app, &root, &conn);
 
     // One row per project: count, latest date, and a representative cwd (the cwd
     // of the most recent session, so the frontend can show a real path).
@@ -1184,16 +1230,13 @@ pub fn list_transcript_projects<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub fn list_sessions<R: tauri::Runtime>(
+pub fn list_sessions(
     payload: ListSessionsInput,
-    app: tauri::AppHandle<R>,
     db: State<'_, Db>,
 ) -> Result<Vec<SessionSummary>, String> {
-    let root = transcripts_root_from_settings(&app);
+    // Pure cached read — indexing runs in the background (see index_transcripts_bg).
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
-    build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
-    maybe_archive_pass(&app, &root, &conn);
 
     // An empty/absent project means "all projects": drop the WHERE clause so the
     // list spans every project, newest first (mirrors list_transcript_projects).
@@ -1348,15 +1391,13 @@ pub fn get_session<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub fn search_transcripts<R: tauri::Runtime>(
+pub fn search_transcripts(
     payload: SearchTranscriptsInput,
-    app: tauri::AppHandle<R>,
     db: State<'_, Db>,
 ) -> Result<Vec<TranscriptSearchResult>, String> {
-    let root = transcripts_root_from_settings(&app);
+    // Pure cached read — indexing runs in the background (see index_transcripts_bg).
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
-    build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
 
     let q = payload.q.trim().to_string();
     if q.is_empty() {
@@ -1398,15 +1439,13 @@ pub fn search_transcripts<R: tauri::Runtime>(
 /// `list_sessions` reads). Groups rows by `date_iso`, ordered ascending,
 /// so the frontend can build a calendar grid without further sorting.
 #[tauri::command]
-pub fn sessions_by_day<R: tauri::Runtime>(
+pub fn sessions_by_day(
     payload: SessionsByDayInput,
-    app: tauri::AppHandle<R>,
     db: State<'_, Db>,
 ) -> Result<Vec<DayCount>, String> {
-    let root = transcripts_root_from_settings(&app);
+    // Pure cached read — indexing runs in the background (see index_transcripts_bg).
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
-    build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
 
     // Empty/absent project → all-projects calendar (drop the WHERE project).
     let project_filter = payload.project.trim();
