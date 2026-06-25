@@ -960,7 +960,12 @@ function DocTab({
         // belonging to the panel below, not a flat label. `color.line` (vs the
         // near-invisible hair) gives the left/right edges a readable outline.
         background: active ? color.bgRaised : 'transparent',
-        border: active ? `1px solid ${color.line}` : '1px solid transparent',
+        // All-longhand borders (no `border` shorthand) so React never has to
+        // reconcile a shorthand against a longhand on rerender, which it warns
+        // about. Sides give the classic outline; top is the forest seam; the
+        // bottom stays open so the tab fuses with the panel below.
+        borderLeft: active ? `1px solid ${color.line}` : '1px solid transparent',
+        borderRight: active ? `1px solid ${color.line}` : '1px solid transparent',
         borderBottom: 'none',
         borderTop: active ? `2px solid ${color.forest}` : '2px solid transparent',
         borderTopLeftRadius: radius.md,
