@@ -17,7 +17,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { color, space, radius, type as typeToken } from '@/lib/tokens'
+import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
@@ -41,6 +41,7 @@ interface Turn {
   content: string
   hasToolUse: boolean
   toolSummary: string
+  images: { mediaType: string; data: string }[]
 }
 
 interface TranscriptSearchResult {
@@ -180,6 +181,46 @@ function ToolBlock({ turn }: ToolBlockProps) {
   )
 }
 
+interface ImageBlockProps {
+  mediaType: string
+  data: string
+}
+
+function InlineImage({ mediaType, data }: ImageBlockProps) {
+  const src = `data:${mediaType};base64,${data}`
+  return (
+    <div
+      style={{
+        margin: `${space[3]}px 0`,
+        lineHeight: 0,
+      }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        loading="lazy"
+        alt="[attached image]"
+        style={{
+          maxWidth: '100%',
+          maxHeight: 360,
+          borderRadius: radius.md,
+          border: `1px solid ${color.hair}`,
+          display: 'block',
+          objectFit: 'contain',
+        }}
+        onError={e => {
+          const el = e.currentTarget
+          el.style.display = 'none'
+          const ph = document.createElement('span')
+          ph.textContent = '[image]'
+          ph.style.cssText = `font-family: ${font.mono}; font-size: 12px; color: ${color.inkFaint};`
+          el.parentElement?.appendChild(ph)
+        }}
+      />
+    </div>
+  )
+}
+
 interface ConversationTurnProps {
   turn: Turn
   highlight: boolean
@@ -245,9 +286,17 @@ function ConversationTurn({ turn, highlight }: ConversationTurnProps) {
               </div>
             )}
             <ToolBlock turn={turn} />
+            {(turn.images ?? []).map((img, i) => (
+              <InlineImage key={i} mediaType={img.mediaType} data={img.data} />
+            ))}
           </div>
         ) : (
-          <MarkdownContent content={turn.content} />
+          <div>
+            <MarkdownContent content={turn.content} />
+            {(turn.images ?? []).map((img, i) => (
+              <InlineImage key={i} mediaType={img.mediaType} data={img.data} />
+            ))}
+          </div>
         )}
       </div>
     </div>

@@ -83,6 +83,13 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
 
 // ── Types returned to the frontend ──────────────────────────────────────────
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBlock {
+    pub media_type: String,
+    pub data: String, // full base64 data
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptProject {
@@ -143,6 +150,8 @@ pub struct Turn {
     pub agent_label: Option<String>,
     /// Spawning `Task`/`Agent` tool_use id (from the sidecar meta.json).
     pub spawned_by: Option<String>,
+    /// Inline images attached to this turn (base64-encoded).
+    pub images: Vec<ImageBlock>,
 }
 
 #[derive(Serialize)]
@@ -263,6 +272,7 @@ struct ParsedLine {
     content: String,     // display text
     has_tool_use: bool,
     tool_summary: String,
+    images: Vec<ImageBlock>,
     is_sidechain: bool,
     uuid: String,
     parent_uuid: Option<String>,
@@ -315,8 +325,8 @@ fn parse_line_full(line: &str) -> Option<ParsedLine> {
         _ => return None,
     };
 
-    let (text, has_tool_use, tool_summary) = extract_content(&content_val);
-    if text.is_empty() && !has_tool_use {
+    let (text, has_tool_use, tool_summary, images) = extract_content(&content_val);
+    if text.is_empty() && !has_tool_use && images.is_empty() {
         return None;
     }
 
@@ -365,6 +375,7 @@ fn parse_line_full(line: &str) -> Option<ParsedLine> {
         content: text,
         has_tool_use,
         tool_summary,
+        images,
         is_sidechain,
         uuid,
         parent_uuid,
@@ -376,13 +387,14 @@ fn parse_line_full(line: &str) -> Option<ParsedLine> {
 }
 
 /// Parse a `content` value (string or array of content blocks).
-fn extract_content(content: &Value) -> (String, bool, String) {
+fn extract_content(content: &Value) -> (String, bool, String, Vec<ImageBlock>) {
     match content {
-        Value::String(s) => (s.clone(), false, String::new()),
+        Value::String(s) => (s.clone(), false, String::new(), Vec::new()),
         Value::Array(blocks) => {
             let mut text_parts: Vec<String> = Vec::new();
             let mut tool_names: Vec<String> = Vec::new();
             let mut has_tool_use = false;
+            let mut images: Vec<ImageBlock> = Vec::new();
 
             for block in blocks {
                 let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -404,14 +416,38 @@ fn extract_content(content: &Value) -> (String, bool, String) {
                     "tool_result" => {
                         has_tool_use = true;
                     }
+                    "image" => {
+                        if let Some(src) = block.get("source") {
+                            let src_type =
+                                src.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if src_type == "base64" {
+                                if let (Some(mt), Some(d)) = (
+                                    src.get("media_type").and_then(|m| m.as_str()),
+                                    src.get("data").and_then(|d| d.as_str()),
+                                ) {
+                                    // Cap at 2MB of base64 (≈1.5MB decoded) to avoid
+                                    // unbounded DOM. base64 char ≈ 0.75 bytes;
+                                    // 2_621_440 chars ≈ 2MB decoded.
+                                    const MAX_B64: usize = 2_621_440;
+                                    if d.len() <= MAX_B64 {
+                                        images.push(ImageBlock {
+                                            media_type: mt.to_string(),
+                                            data: d.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            // url-type images: not yet observed in the wild; skip.
+                        }
+                    }
                     _ => {}
                 }
             }
 
             let summary = tool_names.join(" · ");
-            (text_parts.join("\n\n"), has_tool_use, summary)
+            (text_parts.join("\n\n"), has_tool_use, summary, images)
         }
-        _ => (String::new(), false, String::new()),
+        _ => (String::new(), false, String::new(), Vec::new()),
     }
 }
 
@@ -446,6 +482,7 @@ fn parsed_to_turn(p: ParsedLine) -> Turn {
         content: p.content,
         has_tool_use: p.has_tool_use,
         tool_summary: p.tool_summary,
+        images: p.images,
         is_sidechain: p.is_sidechain,
         uuid: p.uuid,
         parent_uuid: p.parent_uuid,
@@ -1273,5 +1310,48 @@ mod tests {
         assert_eq!(paths[0], parent.to_string_lossy());
         assert!(!paths[0].contains("agent-"));
         assert!(!paths[0].contains("subagents"));
+    }
+
+    // ── TIN-1752 image block tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_image_block_base64() {
+        let line = r#"{"role":"user","content":[{"type":"text","text":"see attached"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}"#;
+        let p = parse_line_full(line).unwrap();
+        assert_eq!(p.images.len(), 1);
+        assert_eq!(p.images[0].media_type, "image/png");
+        assert_eq!(p.images[0].data, "iVBORw0KGgo=");
+        assert_eq!(p.content, "see attached");
+    }
+
+    #[test]
+    fn parse_no_image_block() {
+        let line = r#"{"role":"human","content":"plain text only"}"#;
+        let p = parse_line_full(line).unwrap();
+        assert!(p.images.is_empty());
+    }
+
+    #[test]
+    fn parse_image_oversized_dropped() {
+        // Create a data string just over 2_621_440 chars (the cap).
+        let big = "A".repeat(2_621_441);
+        let line = format!(
+            r#"{{"role":"user","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{big}"}}}}]}}"#
+        );
+        // Should degrade: the line has a content block with no text, so parse_line_full
+        // may return None (no text AND no tool_use). That's acceptable degradation.
+        // If it returns Some, images must be empty.
+        if let Some(p) = parse_line_full(&line) {
+            assert!(p.images.is_empty(), "oversized image must be dropped");
+        }
+    }
+
+    #[test]
+    fn parse_malformed_image_block() {
+        // Missing source field — should not crash, image is silently ignored.
+        let line = r#"{"role":"user","content":[{"type":"image"},{"type":"text","text":"ok"}]}"#;
+        let p = parse_line_full(line).unwrap();
+        assert!(p.images.is_empty());
+        assert_eq!(p.content, "ok");
     }
 }
