@@ -3,7 +3,6 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { visit } from 'unist-util-visit'
 import type { Root, Text, Element } from 'hast'
 
 interface MarkdownContentProps {
@@ -14,62 +13,65 @@ interface MarkdownContentProps {
 
 const TICKET_RE = /\bTIN-\d+\b/g
 
-/** rehype plugin: converts TIN-XXXX text runs into <a data-linear-ticket> elements */
-function rehypeLinearTickets() {
-  return (tree: Root) => {
-    visit(tree, 'text', (node: Text, index: number | undefined, parent) => {
-      if (
-        parent == null ||
-        index == null ||
-        // Don't process text inside code blocks
-        (parent as Element).tagName === 'code' ||
-        (parent as Element).tagName === 'pre'
-      ) {
-        return
-      }
+/**
+ * Turn the TIN-XXXX runs in one text value into a <span> of text + ticket
+ * anchors, or null when there are no tickets. The ticket anchors are only safe
+ * OUTSIDE an existing <a> (nesting anchors is invalid HTML and breaks
+ * hydration), so the caller guards on that.
+ */
+function linkifyTickets(text: string): Element | null {
+  if (!TICKET_RE.test(text)) return null
+  TICKET_RE.lastIndex = 0
 
-      const text = node.value
-      if (!TICKET_RE.test(text)) return
-      TICKET_RE.lastIndex = 0
-
-      const children: (Text | Element)[] = []
-      let last = 0
-      let m: RegExpExecArray | null
-
-      while ((m = TICKET_RE.exec(text)) !== null) {
-        if (m.index > last) {
-          children.push({ type: 'text', value: text.slice(last, m.index) })
-        }
-        const ticketId = m[0]
-        children.push({
-          type: 'element',
-          tagName: 'a',
-          properties: {
-            href: '#',
-            'data-linear-ticket': ticketId,
-          },
-          children: [{ type: 'text', value: ticketId }],
-        } as Element)
-        last = m.index + ticketId.length
-      }
-
-      if (last < text.length) {
-        children.push({ type: 'text', value: text.slice(last) })
-      }
-
-      if (children.length === 0) return
-
-      // Replace the single text node with a span containing the new children
-      const replacement: Element = {
-        type: 'element',
-        tagName: 'span',
-        properties: {},
-        children,
-      }
-
-      ;(parent as Element).children.splice(index, 1, replacement)
-    })
+  const children: (Text | Element)[] = []
+  let last = 0
+  let m: RegExpExecArray | null
+  while ((m = TICKET_RE.exec(text)) !== null) {
+    if (m.index > last) {
+      children.push({ type: 'text', value: text.slice(last, m.index) })
+    }
+    const ticketId = m[0]
+    children.push({
+      type: 'element',
+      tagName: 'a',
+      properties: { href: '#', 'data-linear-ticket': ticketId },
+      children: [{ type: 'text', value: ticketId }],
+    } as Element)
+    last = m.index + ticketId.length
   }
+  if (last < text.length) {
+    children.push({ type: 'text', value: text.slice(last) })
+  }
+  if (children.length === 0) return null
+
+  return { type: 'element', tagName: 'span', properties: {}, children } as Element
+}
+
+/**
+ * rehype plugin: convert TIN-XXXX text runs into <a data-linear-ticket>
+ * elements. Walks manually so it can track whether it is inside an <a> (where a
+ * ticket anchor would nest invalidly) or a code/pre block (where it must not
+ * touch the text), and skips those — a ticket inside a markdown link stays plain.
+ */
+function rehypeLinearTickets() {
+  const walk = (node: Root | Element, insideAnchor: boolean) => {
+    const children = node.children
+    if (!children) return
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i]
+      if (child.type === 'element') {
+        const tag = child.tagName
+        if (tag === 'code' || tag === 'pre') continue
+        walk(child, insideAnchor || tag === 'a')
+      } else if (child.type === 'text' && !insideAnchor) {
+        const replacement = linkifyTickets(child.value)
+        // Replace the text node in place; the span's inner ticket anchors are
+        // already final, so we do not recurse into them.
+        if (replacement) children.splice(i, 1, replacement)
+      }
+    }
+  }
+  return (tree: Root) => walk(tree, false)
 }
 
 export default function MarkdownContent({ content, onClick, onTicketClick }: MarkdownContentProps) {

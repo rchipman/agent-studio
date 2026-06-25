@@ -834,10 +834,17 @@ fn date_from_path_or_mtime(path: &Path) -> String {
         if stem.len() >= 8 {
             let digits: String = stem.chars().take(8).filter(|c| c.is_ascii_digit()).collect();
             if digits.len() == 8 {
-                let y = &digits[0..4];
-                let m = &digits[4..6];
-                let d = &digits[6..8];
-                return format!("{y}-{m}-{d}");
+                // Only accept it as a YYYYMMDD date if the components are a real
+                // calendar date. Claude Code names sessions with UUIDs, and ~2% of
+                // them start with 8 digits (e.g. 60439699-…) that would otherwise
+                // be misread as "6043-96-99". A plausible-year + valid month/day
+                // gate rejects those UUID false positives; they fall to mtime.
+                let y: u32 = digits[0..4].parse().unwrap_or(0);
+                let m: u32 = digits[4..6].parse().unwrap_or(0);
+                let d: u32 = digits[6..8].parse().unwrap_or(0);
+                if (2000..=2100).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) {
+                    return format!("{y:04}-{m:02}-{d:02}");
+                }
             }
         }
     }
@@ -1102,6 +1109,34 @@ fn maybe_archive_pass<R: tauri::Runtime>(
 /// Coalescing guard: a pass already running makes a new request a no-op.
 static TRANSCRIPT_INDEXING: AtomicBool = AtomicBool::new(false);
 
+/// Recompute `date_iso` for rows whose cached date is not a real calendar date —
+/// the old UUID-as-YYYYMMDD bug (TIN-1770) left rows like "6043-96-99". The
+/// affected files' mtimes have not changed, so a normal index pass would skip
+/// them; this self-healing pass fixes them in place (cheap: path + mtime, no
+/// JSONL parse). A no-op once everything is clean.
+fn repair_implausible_dates(conn: &Connection) -> rusqlite::Result<()> {
+    let bad: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT path FROM transcript_sessions
+             WHERE date_iso != '' AND (
+                 CAST(substr(date_iso, 1, 4) AS INTEGER) NOT BETWEEN 2000 AND 2100
+              OR CAST(substr(date_iso, 6, 2) AS INTEGER) NOT BETWEEN 1 AND 12
+              OR CAST(substr(date_iso, 9, 2) AS INTEGER) NOT BETWEEN 1 AND 31
+             )",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for path in bad {
+        let date = date_from_path_or_mtime(Path::new(&path));
+        conn.execute(
+            "UPDATE transcript_sessions SET date_iso = ?1 WHERE path = ?2",
+            params![date, path],
+        )?;
+    }
+    Ok(())
+}
+
 /// Build the transcript index on a background thread (own connection, off the
 /// shared `Db` mutex), run the archive pass, then emit `transcripts://indexed`.
 /// Coalesced — overlapping calls collapse to the one in-flight pass.
@@ -1118,6 +1153,9 @@ pub fn index_transcripts_bg<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
             Ok(conn) => {
                 if let Err(e) = build_transcript_index(&tx_root, &conn) {
                     log::warn!("[transcripts] background index failed: {e}");
+                }
+                if let Err(e) = repair_implausible_dates(&conn) {
+                    log::warn!("[transcripts] date repair failed: {e}");
                 }
                 maybe_archive_pass(&app, &tx_root, &conn);
             }
@@ -1599,6 +1637,53 @@ mod tests {
     fn date_from_filename() {
         let p = PathBuf::from("/some/path/20260618T143022-abc.jsonl");
         assert_eq!(date_from_path_or_mtime(&p), "2026-06-18");
+    }
+
+    #[test]
+    fn date_rejects_uuid_that_is_not_a_real_date() {
+        // A UUID whose first 8 chars are all digits but form an impossible date
+        // (month 96, day 99) must NOT be parsed as a date — it falls to mtime.
+        // The file does not exist, so mtime also fails → empty (never "6043-96-99").
+        let p = PathBuf::from("/some/path/60439699-7856-4bcd-af23-873720680000.jsonl");
+        let got = date_from_path_or_mtime(&p);
+        assert_ne!(got, "6043-96-99", "impossible date must be rejected");
+        assert!(
+            got.is_empty(),
+            "no valid filename date + missing file → empty, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn repair_fixes_implausible_cached_dates() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        // A row left by the old bug, plus a good one.
+        conn.execute(
+            "INSERT INTO transcript_sessions (path, project, date_iso, mtime) VALUES
+                ('/p/bad.jsonl', 'p', '6043-96-99', 0),
+                ('/p/good.jsonl', 'p', '2026-06-18', 0)",
+            [],
+        )
+        .unwrap();
+        repair_implausible_dates(&conn).unwrap();
+        let bad: String = conn
+            .query_row(
+                "SELECT date_iso FROM transcript_sessions WHERE path = '/p/bad.jsonl'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // The bad path has no filename date and the file is missing → recomputes
+        // to empty (no longer the garbage "6043-96-99").
+        assert_ne!(bad, "6043-96-99", "implausible date repaired");
+        let good: String = conn
+            .query_row(
+                "SELECT date_iso FROM transcript_sessions WHERE path = '/p/good.jsonl'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(good, "2026-06-18", "valid date left untouched");
     }
 
     #[test]
