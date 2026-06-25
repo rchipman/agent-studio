@@ -11,10 +11,17 @@
 //! Embeddings find *related* notes; the LLM judges *truth*. Both run locally
 //! (candle + Ollama), so the whole audit is free and private. The pass is bounded
 //! to the most-similar pairs so a full-library audit stays in the minutes range.
+//!
+//! Per-pair LLM verdicts are cached in `audit_verdict_cache` (TIN-audit-cache).
+//! Cache key: (hash_lo, hash_hi, model) where hash_lo/hash_hi are the sorted
+//! SHA-256 hex digests of the two note bodies (order-independent). On a re-run
+//! where no note body changed, every pair hits the cache and zero LLM calls are
+//! made.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 
@@ -39,6 +46,79 @@ pub struct Finding {
     pub names: Vec<String>,
     /// One-sentence description of the conflict (from the model).
     pub summary: String,
+}
+
+// ── Cache schema ─────────────────────────────────────────────────────────────
+
+/// SQL to create the verdict cache table. Safe to call repeatedly (idempotent).
+const CACHE_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS audit_verdict_cache (
+        hash_lo       TEXT NOT NULL,
+        hash_hi       TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        conflicts_json TEXT NOT NULL,
+        created_ts    TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (hash_lo, hash_hi, model)
+    );
+";
+
+/// Ensure the `audit_verdict_cache` table exists on `conn`. Idempotent.
+pub(crate) fn ensure_cache_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(CACHE_SCHEMA)
+}
+
+// ── Cache helpers ─────────────────────────────────────────────────────────────
+
+/// SHA-256 hex digest of `body`. Used to build the cache key.
+fn body_hash(body: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(body.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Sort two body hashes so the pair key is order-independent.
+/// Returns `(hash_lo, hash_hi)` where `hash_lo <= hash_hi` lexicographically.
+fn sorted_hashes(ha: &str, hb: &str) -> (String, String) {
+    if ha <= hb {
+        (ha.to_string(), hb.to_string())
+    } else {
+        (hb.to_string(), ha.to_string())
+    }
+}
+
+/// Look up a cached verdict. Returns `Some(conflicts)` on a hit, `None` on miss.
+fn cache_get(
+    conn: &Connection,
+    hash_lo: &str,
+    hash_hi: &str,
+    model: &str,
+) -> Option<Vec<String>> {
+    let result: rusqlite::Result<String> = conn.query_row(
+        "SELECT conflicts_json FROM audit_verdict_cache \
+         WHERE hash_lo = ?1 AND hash_hi = ?2 AND model = ?3",
+        params![hash_lo, hash_hi, model],
+        |row| row.get(0),
+    );
+    result.ok().and_then(|json| serde_json::from_str(&json).ok())
+}
+
+/// Store a verdict in the cache. Replaces any existing row for the same key.
+fn cache_put(
+    conn: &Connection,
+    hash_lo: &str,
+    hash_hi: &str,
+    model: &str,
+    conflicts: &[String],
+) -> rusqlite::Result<()> {
+    let json = serde_json::to_string(conflicts).unwrap_or_else(|_| "[]".to_string());
+    let ts = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO audit_verdict_cache \
+         (hash_lo, hash_hi, model, conflicts_json, created_ts) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![hash_lo, hash_hi, model, json, ts],
+    )?;
+    Ok(())
 }
 
 // ── Clustering ───────────────────────────────────────────────────────────────
@@ -202,6 +282,10 @@ struct Progress {
 /// pairs with the local reasoning model, and return concrete findings. Emits
 /// `audit://progress` as it goes. Requires the embedding pass to have run and a
 /// reasoning model (Ollama) to be reachable.
+///
+/// Per-pair results are cached in `audit_verdict_cache` keyed by (body_hash_lo,
+/// body_hash_hi, model). On a re-run where nothing changed, every pair hits the
+/// cache and the LLM is not called at all.
 #[tauri::command]
 pub async fn consistency_audit(
     app: AppHandle,
@@ -215,9 +299,20 @@ pub async fn consistency_audit(
         );
     }
 
+    // Detect model once — used as part of the cache key so a model switch
+    // automatically invalidates prior verdicts.
+    let model = crate::reason::detect_model()
+        .await
+        .map_err(|e| e.to_string())?;
+
     // ── Phase A: cluster + gather bodies (locked, no await) ───────────────────
+    // Also ensure the cache table exists while we hold the lock.
     let work: Vec<(String, String, String, String)> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+        // Ensure the verdict cache table exists (idempotent).
+        ensure_cache_table(&conn).map_err(|e| e.to_string())?;
+
         let vectors = file_vectors(&conn).map_err(|e| e.to_string())?;
         let pairs = candidate_pairs(&vectors, SIM_FLOOR);
         let pairs: Vec<_> = pairs.into_iter().take(MAX_PAIRS).collect();
@@ -256,21 +351,56 @@ pub async fn consistency_audit(
     }
 
     // ── Phase B: judge each pair with the LLM (async, no lock) ────────────────
+    // Cache lookups and writes each re-acquire the lock briefly.
     let mut findings = Vec::new();
     for (idx, (path_a, packed_a, path_b, packed_b)) in work.into_iter().enumerate() {
         let (name_a, body_a) = split_packed(&packed_a);
         let (name_b, body_b) = split_packed(&packed_b);
-        match judge_pair(name_a, body_a, name_b, body_b).await {
-            Ok(conflicts) => {
-                for summary in conflicts {
-                    findings.push(Finding {
-                        files: vec![path_a.clone(), path_b.clone()],
-                        names: vec![name_a.to_string(), name_b.to_string()],
-                        summary,
-                    });
+
+        // Build the order-independent cache key from the two note bodies.
+        let ha = body_hash(body_a);
+        let hb = body_hash(body_b);
+        let (hash_lo, hash_hi) = sorted_hashes(&ha, &hb);
+
+        // Cache lookup (lock, read, release).
+        let cached = {
+            if let Ok(conn) = db.0.lock() {
+                cache_get(&conn, &hash_lo, &hash_hi, &model)
+            } else {
+                None
+            }
+        };
+
+        let conflicts = if let Some(cached_conflicts) = cached {
+            // Cache hit — no LLM call needed.
+            log::debug!("[audit] cache hit pair {idx} ({hash_lo:.8}…/{hash_hi:.8}…)");
+            cached_conflicts
+        } else {
+            // Cache miss — call the LLM and store the result.
+            match judge_pair(name_a, body_a, name_b, body_b).await {
+                Ok(result) => {
+                    // Store result (including empty vec for consistent pairs).
+                    if let Ok(conn) = db.0.lock() {
+                        if let Err(e) = cache_put(&conn, &hash_lo, &hash_hi, &model, &result) {
+                            log::warn!("[audit] cache write failed for pair {idx}: {e}");
+                        }
+                    }
+                    result
+                }
+                Err(e) => {
+                    log::warn!("[audit] pair {idx} judge failed: {e}");
+                    let _ = app.emit("audit://progress", Progress { done: idx + 1, total });
+                    continue;
                 }
             }
-            Err(e) => log::warn!("[audit] pair {idx} judge failed: {e}"),
+        };
+
+        for summary in conflicts {
+            findings.push(Finding {
+                files: vec![path_a.clone(), path_b.clone()],
+                names: vec![name_a.to_string(), name_b.to_string()],
+                summary,
+            });
         }
         let _ = app.emit("audit://progress", Progress { done: idx + 1, total });
     }
@@ -319,6 +449,80 @@ mod tests {
         // a–b is similar and present; nothing pairs with the orthogonal c.
         assert!(pairs.iter().any(|(i, j, _)| (*i, *j) == (0, 1)));
         assert!(!pairs.iter().any(|(i, j, _)| *i == 2 || *j == 2));
+    }
+
+    // ── Cache unit tests (no live model) ─────────────────────────────────────
+
+    fn make_cache_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_cache_table(&conn).unwrap();
+        conn
+    }
+
+    /// (a) Hash-pair ordering is symmetric: (a,b) and (b,a) produce the same key.
+    #[test]
+    fn cache_key_is_order_independent() {
+        let ha = body_hash("note body alpha");
+        let hb = body_hash("note body beta");
+
+        let (lo1, hi1) = sorted_hashes(&ha, &hb);
+        let (lo2, hi2) = sorted_hashes(&hb, &ha);
+
+        assert_eq!(lo1, lo2, "hash_lo must be identical regardless of argument order");
+        assert_eq!(hi1, hi2, "hash_hi must be identical regardless of argument order");
+        assert!(lo1 <= hi1, "hash_lo must be <= hash_hi lexicographically");
+    }
+
+    /// (b) Cache store→get round-trips a Vec<String>, including the empty
+    ///     (consistent) case — consistent pairs MUST be cached.
+    #[test]
+    fn cache_roundtrip_conflicts_and_empty() {
+        let conn = make_cache_conn();
+        let (lo, hi) = sorted_hashes("aaa", "bbb");
+        let model = "llama3.1:8b";
+
+        // Store a non-empty conflict list.
+        let conflicts = vec!["Note A says $9 but Note B says $12.".to_string()];
+        cache_put(&conn, &lo, &hi, model, &conflicts).unwrap();
+        let got = cache_get(&conn, &lo, &hi, model);
+        assert_eq!(got, Some(conflicts.clone()), "conflict list should round-trip");
+
+        // Overwrite with an empty list (consistent pair) — must also round-trip.
+        cache_put(&conn, &lo, &hi, model, &[]).unwrap();
+        let got_empty = cache_get(&conn, &lo, &hi, model);
+        assert_eq!(
+            got_empty,
+            Some(vec![]),
+            "empty conflicts (consistent pair) must be cached and returned as Some([])"
+        );
+    }
+
+    /// (c) A changed body hash causes a cache miss.
+    #[test]
+    fn cache_miss_on_changed_body() {
+        let conn = make_cache_conn();
+        let body_a = "original note body";
+        let body_b = "other note body";
+        let ha = body_hash(body_a);
+        let hb = body_hash(body_b);
+        let (lo, hi) = sorted_hashes(&ha, &hb);
+        let model = "llama3.1:8b";
+
+        // Store with original bodies.
+        cache_put(&conn, &lo, &hi, model, &["conflict".to_string()]).unwrap();
+        assert!(cache_get(&conn, &lo, &hi, model).is_some(), "should be a hit");
+
+        // Compute key for a changed body — must be a miss.
+        let ha2 = body_hash("CHANGED note body");
+        let (lo2, hi2) = sorted_hashes(&ha2, &hb);
+        assert!(
+            (lo2 != lo || hi2 != hi),
+            "changed body must produce a different cache key"
+        );
+        assert!(
+            cache_get(&conn, &lo2, &hi2, model).is_none(),
+            "changed body hash must cause a cache miss"
+        );
     }
 
     /// Labeled judge golden set (TIN-1753). Each case: (id, note A, note B,
