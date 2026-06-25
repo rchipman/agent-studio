@@ -107,6 +107,8 @@ Agents can write memory through a headless command that scores the note against 
 agent-studio-memory add-memory --content "…" --agent <name> [--project <p>] [--type <t>]
 #   → prints { path, continuityScore, conflicts }   (surface conflicts to the human)
 agent-studio-memory supersede --old <path|name> --new <name>   # invalidate, don't delete
+agent-studio-memory reindex                                    # re-index + re-embed the whole
+#   → prints { indexed, embedded }   store after out-of-band edits (the GUI does this on startup)
 ```
 
 It is **headless** (the GUI does not need to be running) and degrades gracefully if no reasoning model is available.

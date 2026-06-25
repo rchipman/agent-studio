@@ -96,6 +96,7 @@ pub fn maybe_run() {
         "cornerstones" => run_cornerstones(rest),
         "brief" => run_brief(rest),
         "story" => run_story(rest),
+        "reindex" => run_reindex(rest),
         _ => return, // not a headless command → fall through to the GUI
     };
 
@@ -386,6 +387,50 @@ fn embed_new_note_chunks(db: &Db, file_path: &str, body: &str) {
             // Continue with remaining chunks — partial embedding is better than none.
         }
     }
+}
+
+/// `reindex` — rebuild the on-disk index over the whole memory root and embed
+/// every note's chunks. For when notes were added or edited OUT OF BAND — written
+/// to disk directly, bulk-imported, or migrated by another tool — without going
+/// through `add-memory`. The GUI does this on startup; this is the headless
+/// equivalent so a pure-CLI workflow's `recall` reflects on-disk reality.
+///
+/// Embedding is degrade-safe per file (a missing model leaves keyword search
+/// working); chunk vectors are upserted, so this refreshes existing notes and
+/// populates new ones. Returns `{ indexed, embedded }`.
+pub fn run_reindex(_rest: &[String]) -> Result<serde_json::Value, String> {
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    // 1. Rebuild memory_files + FTS + links across the whole root.
+    let indexed = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        build_index(&root, &conn).map_err(|e| e.to_string())?
+    };
+
+    // 2. Collect the frontmatter-free body per file (build_index already stripped
+    //    it into memory_files.body). Lock released before embedding.
+    let files: Vec<(String, String)> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT path, body FROM memory_files")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    // 3. Embed each note's chunks (same degrade-safe path as add-memory).
+    let mut embedded = 0usize;
+    for (path, body) in &files {
+        if !body.trim().is_empty() {
+            embed_new_note_chunks(&db, path, body);
+            embedded += 1;
+        }
+    }
+
+    Ok(json!({ "indexed": indexed, "embedded": embedded }))
 }
 
 /// Override suggestion fields from explicit CLI flags. A provided flag always
@@ -1531,6 +1576,38 @@ mod tests {
         assert!(out["path"].as_str().is_some(), "path is present in response");
         let path = out["path"].as_str().unwrap();
         assert!(fs::read_to_string(path).is_ok(), "the note file was written to disk");
+    }
+
+    /// `reindex` picks up notes written OUT OF BAND (directly to disk, not via
+    /// add-memory) and is degrade-safe without the embedding model: it indexes
+    /// every on-disk note and attempts to embed each. This is the headless
+    /// equivalent of the GUI's startup reindex.
+    #[test]
+    fn reindex_indexes_out_of_band_notes_and_is_degrade_safe() {
+        let _guard = env_lock();
+        let root = temp_root("reindex");
+        let _ = fixture_db(&root);
+        // Two notes written straight to disk — never through add-memory.
+        write_note(
+            &root,
+            "studio/a.md",
+            "---\nname: a\ntype: project\nprojects: studio\n---\nDecision A about the index.",
+        );
+        write_note(
+            &root,
+            "studio/b.md",
+            "---\nname: b\ntype: project\nprojects: studio\n---\nDecision B about recall.",
+        );
+
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_reindex(&[]).expect("reindex succeeds even with no embedding model");
+        std::env::remove_var("MEMORY_ROOT");
+
+        assert_eq!(out["indexed"], json!(2), "both on-disk notes are indexed");
+        assert!(
+            out["embedded"].as_u64().unwrap() >= 2,
+            "both notes were attempted for embedding: {out}"
+        );
     }
 
     // ── supersede ─────────────────────────────────────────────────────────────
