@@ -112,7 +112,10 @@ pub trait MaintenanceHandler: Send + Sync {
 /// Returned as owned boxes so the dispatcher can hold them for the pass without
 /// borrowing global state. Cheap to build — one allocation per handler.
 pub fn default_handlers() -> Vec<Box<dyn MaintenanceHandler>> {
-    vec![Box::new(NoteChangeLog)]
+    vec![
+        Box::new(NoteChangeLog),
+        Box::new(crate::consistency::ConsistencyMonitor),
+    ]
 }
 
 // ── State table + schema ──────────────────────────────────────────────────────
@@ -135,6 +138,7 @@ const STATE_SCHEMA: &str = "
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(STATE_SCHEMA)?;
     NoteChangeLog::ensure_schema(conn)?;
+    crate::consistency::ensure_schema(conn)?;
     Ok(())
 }
 

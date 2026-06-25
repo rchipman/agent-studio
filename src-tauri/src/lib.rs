@@ -1,6 +1,7 @@
 mod archive;
 mod audit;
 mod cli;
+mod consistency;
 mod continuity;
 mod embeddings;
 mod frontmatter;
@@ -134,6 +135,9 @@ pub fn run() {
       frontmatter::apply_suggestions_bulk,
       audit::consistency_audit,
       audit::cancel_audit,
+      consistency::seed_consistency,
+      consistency::consistency_findings,
+      consistency::consistency_status,
       frontmatter::cancel_suggest,
       continuity::score_memory,
       memory_audit::record_memory_change,
