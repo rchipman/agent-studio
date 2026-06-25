@@ -127,7 +127,7 @@ fn insert_change(conn: &Connection, input: &RecordMemoryChangeInput) -> rusqlite
 
 /// Read a note's audit history, newest-first (most recent change at index 0).
 /// An unknown path yields an empty vec. Pure of Tauri state for testing.
-fn history_for(conn: &Connection, path: &str) -> rusqlite::Result<Vec<AuditEntry>> {
+pub fn history_for(conn: &Connection, path: &str) -> rusqlite::Result<Vec<AuditEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, ts, actor_type, actor_id, continuity_score, change_summary
          FROM memory_audit

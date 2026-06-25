@@ -39,8 +39,9 @@ use serde_json::json;
 
 use crate::continuity::{score_content, ScoreMemoryInput};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
-use crate::memory_audit::{content_hash, record_change, RecordMemoryChangeInput};
+use crate::memory_audit::{content_hash, ensure_schema as ensure_audit_schema, history_for, record_change, AuditEntry, RecordMemoryChangeInput};
 use crate::memory_reads;
+use crate::reason;
 use crate::salience;
 use crate::search::{build_index, init_db, search_core, Db, SearchInput};
 use crate::settings::default_memory_root;
@@ -92,6 +93,8 @@ pub fn maybe_run() {
         "recall" => run_recall(rest),
         "check" => run_check(rest),
         "cornerstones" => run_cornerstones(rest),
+        "brief" => run_brief(rest),
+        "story" => run_story(rest),
         _ => return, // not a headless command → fall through to the GUI
     };
 
@@ -643,6 +646,402 @@ pub fn run_cornerstones(rest: &[String]) -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Array(items))
 }
 
+// ── brief (TIN-1749) ─────────────────────────────────────────────────────────
+
+/// The `brief` pipeline. Assembles top cornerstones (salience), most-recently-
+/// changed notes (audit recency), and contested/superseded notes; synthesises a
+/// calm situation report via `reason::complete`. Degrades calmly: with no model,
+/// returns the raw assembled grounding as plain JSON without prose.
+///
+/// Usage: `brief [--project <p>] [--about <topic>]`
+pub fn run_brief(rest: &[String]) -> Result<serde_json::Value, String> {
+    let args = Args::parse(rest);
+    let project = args.get("project").filter(|s| !s.trim().is_empty());
+    let about = args.get("about").filter(|s| !s.trim().is_empty());
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    // ── 1. Top cornerstones (salience) ────────────────────────────────────────
+    const CORNERSTONE_K: usize = 8;
+    let cornerstones: Vec<serde_json::Value> = {
+        let mut entries = salience::salience(&db, project)?;
+        entries.truncate(CORNERSTONE_K);
+        entries
+            .into_iter()
+            .map(|e| json!({ "name": e.name, "path": e.path, "summary": e.summary, "salience": e.salience }))
+            .collect()
+    };
+
+    // ── 2. Most-recently-changed notes (audit recency) ────────────────────────
+    // Pull the latest audit entry per note, take top 6 by recency.
+    const RECENT_K: usize = 6;
+    let recent_notes: Vec<serde_json::Value> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        ensure_audit_schema(&conn).map_err(|e| e.to_string())?;
+        // Query: most recent audit row per path, most recent first.
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, MAX(ts) AS last_ts, change_summary \
+                 FROM memory_audit \
+                 GROUP BY path \
+                 ORDER BY last_ts DESC \
+                 LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map(rusqlite::params![RECENT_K as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        rows.into_iter()
+            .map(|(path, ts, summary)| json!({ "path": path, "lastChanged": ts, "changeSummary": summary }))
+            .collect()
+    };
+
+    // ── 3. Contested / superseded notes ──────────────────────────────────────
+    // Walk the index for notes with status == "superseded" or that have a
+    // `supersedes` / `superseded_by` field set.
+    let contested: Vec<serde_json::Value> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, name, status FROM memory_files \
+                 WHERE status = 'superseded' OR status = 'contested'",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<serde_json::Value> = stmt.query_map([], |r| {
+            Ok(json!({
+                "path": r.get::<_, String>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "status": r.get::<_, String>(2)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+        rows
+    };
+
+    // Collect paths for grounding (deduplicated).
+    let mut grounding: Vec<String> = cornerstones
+        .iter()
+        .filter_map(|v| v["path"].as_str().map(String::from))
+        .collect();
+    for r in &recent_notes {
+        if let Some(p) = r["path"].as_str() {
+            if !grounding.contains(&p.to_string()) {
+                grounding.push(p.to_string());
+            }
+        }
+    }
+    for c in &contested {
+        if let Some(p) = c["path"].as_str() {
+            if !grounding.contains(&p.to_string()) {
+                grounding.push(p.to_string());
+            }
+        }
+    }
+
+    // ── 4. Synthesise via reason::complete ────────────────────────────────────
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Build a context block for the model.
+    let about_clause = about
+        .map(|t| format!(" Focus especially on the topic: {t}."))
+        .unwrap_or_default();
+
+    let user_ctx = {
+        let cs_text = cornerstones
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                format!(
+                    "{}. {} — {}",
+                    i + 1,
+                    v["name"].as_str().unwrap_or(""),
+                    v["summary"].as_str().unwrap_or("(no summary)")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let recent_text = recent_notes
+            .iter()
+            .map(|v| {
+                format!(
+                    "- {} (changed {}): {}",
+                    v["path"].as_str().unwrap_or(""),
+                    v["lastChanged"].as_str().unwrap_or(""),
+                    v["changeSummary"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let contested_text = if contested.is_empty() {
+            "(none)".to_string()
+        } else {
+            contested
+                .iter()
+                .map(|v| format!("- {} [{}]", v["name"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or("")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!(
+            "TOP NOTES BY SALIENCE:\n{cs_text}\n\nRECENTLY CHANGED:\n{recent_text}\n\nCONTESTED / SUPERSEDED:\n{contested_text}"
+        )
+    };
+
+    let system = "Write a short, calm situation report: what's settled, what's contested, what's recently changed. Plain prose, no preamble, no headers, no bullet lists.";
+
+    let synthesis_result = rt.block_on(reason::complete(system, &format!("{user_ctx}{about_clause}")));
+
+    match synthesis_result {
+        Ok(prose) => Ok(json!({
+            "brief": prose.trim(),
+            "grounding": grounding,
+            "degraded": false,
+        })),
+        Err(_) => {
+            // Degrade: return raw grounding without prose.
+            Ok(json!({
+                "brief": null,
+                "cornerstones": cornerstones,
+                "recentlyChanged": recent_notes,
+                "contested": contested,
+                "grounding": grounding,
+                "degraded": true,
+            }))
+        }
+    }
+}
+
+// ── story (TIN-1749) ─────────────────────────────────────────────────────────
+
+/// The `story` pipeline. Given a note name/path (or `--topic <t>`), assembles:
+/// the note + its supersede chain (both directions via frontmatter fields), its
+/// `memory_audit` trail, and related notes via recall. Hands to `reason::complete`
+/// to narrate how the decision evolved. Degrades calmly: returns the ordered chain
+/// without prose.
+///
+/// Usage: `story <note-name-or-path> [--topic <t>]`
+pub fn run_story(rest: &[String]) -> Result<serde_json::Value, String> {
+    let args = Args::parse(rest);
+
+    // The note identifier is the first positional arg OR --topic.
+    let positional = rest.iter().find(|a| !a.starts_with("--")).cloned();
+    let topic = args.get("topic").map(str::to_string);
+    let note_ref = positional
+        .or(topic)
+        .ok_or("a note name/path or --topic <t> is required")?;
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    // ── 1. Resolve the starting note ──────────────────────────────────────────
+    let start_path = resolve_note(&root, &note_ref)
+        .ok_or_else(|| format!("note not found: {note_ref}"))?;
+
+    // ── 2. Walk the supersede chain in both directions ────────────────────────
+    // Build an ordered list: oldest (head of chain) → newest. We follow
+    // `supersedes` backward and `superseded_by` forward, deduplicating.
+    let chain_paths = collect_supersede_chain(&root, &start_path);
+
+    // ── 3. Collect audit history for each note in the chain ───────────────────
+    let chain: Vec<serde_json::Value> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        ensure_audit_schema(&conn).map_err(|e| e.to_string())?;
+
+        chain_paths
+            .iter()
+            .map(|p| {
+                let name = note_name(p).unwrap_or_else(|| {
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
+                let raw = fs::read_to_string(p).unwrap_or_default();
+                let status = frontmatter_field(&raw, "status").unwrap_or_else(|| "active".to_string());
+                let history: Vec<AuditEntry> =
+                    history_for(&conn, &p.to_string_lossy()).unwrap_or_default();
+                let edits: Vec<serde_json::Value> = history
+                    .into_iter()
+                    .map(|e| {
+                        json!({
+                            "ts": e.ts,
+                            "actorType": e.actor_type,
+                            "actorId": e.actor_id,
+                            "continuityScore": e.continuity_score,
+                            "changeSummary": e.change_summary,
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": name,
+                    "path": p.to_string_lossy(),
+                    "status": status,
+                    "edits": edits,
+                })
+            })
+            .collect()
+    };
+
+    // ── 4. Recall related notes ───────────────────────────────────────────────
+    let related: Vec<serde_json::Value> = {
+        let input = crate::search::SearchInput {
+            q: note_ref.clone(),
+            type_filter: String::new(),
+            project_filter: String::new(),
+            limit: Some(5),
+            rebuild: false,
+        };
+        match search_core(&db, &input, 5) {
+            Ok(results) => results
+                .into_iter()
+                .filter(|r| {
+                    // exclude notes already in the chain
+                    !chain_paths
+                        .iter()
+                        .any(|p| p.to_string_lossy() == r.path.as_str())
+                })
+                .map(|r| json!({ "name": r.name, "path": r.path, "snippet": r.excerpt }))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+
+    // ── 5. Synthesise via reason::complete ────────────────────────────────────
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let user_ctx = {
+        let chain_text = chain
+            .iter()
+            .map(|v| {
+                let edits_text = v["edits"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|e| {
+                                format!(
+                                    "  [{}] {} ({}): {}",
+                                    e["ts"].as_str().unwrap_or(""),
+                                    e["actorId"].as_str().unwrap_or(""),
+                                    e["actorType"].as_str().unwrap_or(""),
+                                    e["changeSummary"].as_str().unwrap_or("")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "NOTE: {} [{}]\nPATH: {}\nEDITS:\n{}",
+                    v["name"].as_str().unwrap_or(""),
+                    v["status"].as_str().unwrap_or(""),
+                    v["path"].as_str().unwrap_or(""),
+                    if edits_text.is_empty() { "  (no recorded edits)".to_string() } else { edits_text }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        let related_text = if related.is_empty() {
+            "(none)".to_string()
+        } else {
+            related
+                .iter()
+                .map(|v| format!("- {}: {}", v["name"].as_str().unwrap_or(""), v["snippet"].as_str().unwrap_or("")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!("DECISION CHAIN (oldest → newest):\n{chain_text}\n\nRELATED NOTES:\n{related_text}")
+    };
+
+    let system = "Tell the story of how this decision evolved across the recorded changes and reversals. Calm, plain prose. No preamble, no headers.";
+
+    let synthesis_result = rt.block_on(reason::complete(system, &user_ctx));
+
+    let chain_paths_str: Vec<String> = chain_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    match synthesis_result {
+        Ok(prose) => Ok(json!({
+            "story": prose.trim(),
+            "chain": chain,
+            "related": related,
+            "degraded": false,
+        })),
+        Err(_) => Ok(json!({
+            "story": null,
+            "chain": chain,
+            "chainPaths": chain_paths_str,
+            "related": related,
+            "degraded": true,
+        })),
+    }
+}
+
+/// Walk the supersede chain in both directions from `start`. Returns paths in
+/// oldest-first order (head of chain → newest). Cycles are broken by a visited
+/// set so malformed chains don't loop forever.
+fn collect_supersede_chain(root: &Path, start: &Path) -> Vec<PathBuf> {
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut chain: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+
+    // Walk backwards via `supersedes` to the chain head.
+    let mut cursor = start.to_path_buf();
+    loop {
+        if !visited.insert(cursor.clone()) {
+            break; // cycle guard
+        }
+        chain.push_front(cursor.clone());
+        let raw = match fs::read_to_string(&cursor) {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        let prev_name = match frontmatter_field(&raw, "supersedes") {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => break,
+        };
+        match resolve_note(root, &prev_name) {
+            Some(p) if !visited.contains(&p) => cursor = p,
+            _ => break,
+        }
+    }
+
+    // Walk forwards via `superseded_by` from start.
+    let mut cursor = start.to_path_buf();
+    loop {
+        let raw = match fs::read_to_string(&cursor) {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        let next_name = match frontmatter_field(&raw, "superseded_by") {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => break,
+        };
+        match resolve_note(root, &next_name) {
+            Some(p) if !visited.contains(&p) => {
+                visited.insert(p.clone());
+                chain.push_back(p.clone());
+                cursor = p;
+            }
+            _ => break,
+        }
+    }
+
+    chain.into_iter().collect()
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1034,5 +1433,184 @@ mod tests {
         let err = run_check(&[]).unwrap_err();
         std::env::remove_var("MEMORY_ROOT");
         assert!(err.contains("--content"), "error mentions --content: {err}");
+    }
+
+    // ── brief (TIN-1749) ─────────────────────────────────────────────────────
+
+    /// Seed fixture for brief/story tests: creates 2 notes + audit rows.
+    fn brief_fixture(tag: &str) -> (PathBuf, Db) {
+        let root = temp_root(&format!("brief-{tag}"));
+        let db = fixture_db(&root);
+
+        let dir = root.join("studio");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Note A: cornerstone candidate
+        fs::write(
+            dir.join("decision-a.md"),
+            "---\nname: decision-a\ntype: project\nprojects: studio\nstatus: active\nsummary: We chose approach A.\n---\nWe chose approach A for the studio project.\n",
+        )
+        .unwrap();
+
+        // Note B: superseded
+        fs::write(
+            dir.join("decision-b.md"),
+            "---\nname: decision-b\ntype: project\nprojects: studio\nstatus: superseded\nsuperseded_by: decision-c\nsummary: Old approach B.\n---\nOld approach B was tried first.\n",
+        )
+        .unwrap();
+
+        // Note C: supersedes B
+        fs::write(
+            dir.join("decision-c.md"),
+            "---\nname: decision-c\ntype: project\nprojects: studio\nstatus: active\nsupersedes: decision-b\nsummary: New approach C replaces B.\n---\nNew approach C replaces B.\n",
+        )
+        .unwrap();
+
+        // Rebuild index.
+        {
+            let conn = db.0.lock().unwrap();
+            crate::search::build_index(&root, &conn).unwrap();
+        }
+
+        // Seed audit rows for B and C (simulating a supersede event).
+        {
+            let conn = db.0.lock().unwrap();
+            let path_b = dir.join("decision-b.md").to_string_lossy().to_string();
+            let path_c = dir.join("decision-c.md").to_string_lossy().to_string();
+            crate::memory_audit::record_change(
+                &conn,
+                &crate::memory_audit::RecordMemoryChangeInput {
+                    path: path_b,
+                    actor_type: "agent".to_string(),
+                    actor_id: "poppy".to_string(),
+                    continuity_score: Some(0.9),
+                    change_summary: "Created old approach B.".to_string(),
+                    content_hash: "abc".to_string(),
+                },
+            )
+            .unwrap();
+            crate::memory_audit::record_change(
+                &conn,
+                &crate::memory_audit::RecordMemoryChangeInput {
+                    path: path_c,
+                    actor_type: "agent".to_string(),
+                    actor_id: "poppy".to_string(),
+                    continuity_score: Some(0.5),
+                    change_summary: "Superseded B with new approach C.".to_string(),
+                    content_hash: "def".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        (root, db)
+    }
+
+    #[test]
+    fn brief_assembles_cornerstones_and_contested() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("assemble");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_brief(&[]).expect("brief succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Shape: grounding is an array of paths, degraded is a bool.
+        assert!(out["grounding"].is_array(), "grounding is an array");
+        assert!(out["degraded"].is_boolean(), "degraded is a boolean");
+
+        // grounding must contain at least the contested note (decision-b is superseded).
+        let grounding = out["grounding"].as_array().unwrap();
+        let paths: Vec<&str> = grounding.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.contains("decision-b")),
+            "superseded note in grounding: {paths:?}"
+        );
+
+        // On the degraded path (no model in CI), contested and cornerstones are top-level.
+        if out["degraded"].as_bool() == Some(true) {
+            assert!(out["contested"].is_array(), "contested array on degraded path");
+            let contested = out["contested"].as_array().unwrap();
+            assert!(
+                contested.iter().any(|v| v["name"].as_str() == Some("decision-b")),
+                "decision-b is contested: {contested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn brief_project_filter_restricts_grounding() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("proj");
+        std::env::set_var("MEMORY_ROOT", &root);
+        // Non-existent project → empty salience, still returns valid JSON.
+        let out = run_brief(&["--project".into(), "nonexistent-project".into()])
+            .expect("brief with unknown project still succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+        assert!(out["grounding"].is_array(), "grounding present even for empty project");
+        assert!(out["degraded"].is_boolean(), "degraded present");
+    }
+
+    // ── story (TIN-1749) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn story_walks_supersede_chain_in_order() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("story-chain");
+        std::env::set_var("MEMORY_ROOT", &root);
+        // Ask for the story of decision-c (which supersedes decision-b).
+        let out = run_story(&["decision-c".into()]).expect("story succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        assert!(out["chain"].is_array(), "chain is an array");
+        assert!(out["degraded"].is_boolean(), "degraded is a boolean");
+
+        let chain = out["chain"].as_array().unwrap();
+        assert!(
+            chain.len() >= 2,
+            "chain includes both decision-b and decision-c: {chain:?}"
+        );
+
+        // decision-b is older (head of chain), decision-c is newer (tail).
+        // Chain is oldest-first.
+        let names: Vec<&str> = chain.iter().filter_map(|v| v["name"].as_str()).collect();
+        let pos_b = names.iter().position(|n| *n == "decision-b");
+        let pos_c = names.iter().position(|n| *n == "decision-c");
+        assert!(pos_b.is_some(), "decision-b in chain: {names:?}");
+        assert!(pos_c.is_some(), "decision-c in chain: {names:?}");
+        assert!(
+            pos_b.unwrap() < pos_c.unwrap(),
+            "decision-b (older) before decision-c (newer): {names:?}"
+        );
+    }
+
+    #[test]
+    fn story_includes_audit_edits_in_chain() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("story-edits");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_story(&["decision-c".into()]).expect("story succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let chain = out["chain"].as_array().unwrap();
+        // decision-c has an audit row seeded in brief_fixture.
+        let c_entry = chain.iter().find(|v| v["name"].as_str() == Some("decision-c"));
+        assert!(c_entry.is_some(), "decision-c in chain");
+        let edits = c_entry.unwrap()["edits"].as_array().unwrap();
+        assert!(!edits.is_empty(), "decision-c has at least one audit edit");
+        assert!(
+            edits[0]["changeSummary"].as_str().unwrap_or("").contains("Superseded B"),
+            "audit row changeSummary present: {:?}", edits[0]
+        );
+    }
+
+    #[test]
+    fn story_missing_note_errors_cleanly() {
+        let _guard = env_lock();
+        let root = temp_root("story-notnote");
+        let _ = fixture_db(&root);
+        std::env::set_var("MEMORY_ROOT", &root);
+        let err = run_story(&["--topic".into(), "nonexistent-note-xyz".into()]).unwrap_err();
+        std::env::remove_var("MEMORY_ROOT");
+        assert!(err.contains("not found"), "error mentions not found: {err}");
     }
 }
