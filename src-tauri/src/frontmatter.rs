@@ -943,7 +943,7 @@ fn file_mtime_date(path: &str) -> String {
 /// Core per-file suggestion: compose path-derived + rule-based + (optional) LLM
 /// confidences. Shared by the single-file command and the bulk pass. Degrades to
 /// rules+path with `degraded: true` when no model is reachable — never errors.
-async fn suggest_one(
+pub(crate) async fn suggest_one(
     path: &str,
     content: &str,
     today: &str,
@@ -1024,6 +1024,7 @@ const DEFAULT_PROJECTS: &[&str] =
 #[tauri::command]
 pub async fn suggest_all(
     app: tauri::AppHandle,
+    db: State<'_, Db>,
     memory: State<'_, crate::settings::MemoryRoot>,
     control: tauri::State<'_, crate::TaskControl>,
     #[allow(clippy::default_trait_access)]
@@ -1040,14 +1041,29 @@ pub async fn suggest_all(
         .unwrap_or_else(|_| crate::settings::default_memory_root());
 
     // Gather the unhealthy files (collect_md + audit_one), like the audit view.
+    // Complete files are tracked separately so the seed can also DROP any stale
+    // suggestion row a now-complete note used to have (keeping the ambient table
+    // in step with reality, exactly as the monitor does incrementally).
     let mut files = Vec::new();
     collect_md(&root, &mut files);
     let mut work: Vec<(String, String)> = Vec::new();
+    let mut complete: Vec<String> = Vec::new();
     for path in files {
         let raw = fs::read_to_string(&path).unwrap_or_default();
-        let entry = audit_one(&path.to_string_lossy(), &raw);
+        let p = path.to_string_lossy().to_string();
+        let entry = audit_one(&p, &raw);
         if entry.status != "complete" {
-            work.push((path.to_string_lossy().to_string(), raw));
+            work.push((p, raw));
+        } else {
+            complete.push(p);
+        }
+    }
+
+    // Reconcile: drop suggestion rows for notes that are now complete. Best-effort
+    // — a lock/SQL hiccup here must not abort the seed pass.
+    if let Ok(conn) = db.0.lock() {
+        for p in &complete {
+            let _ = crate::suggestions::seed_clear_complete(&conn, p);
         }
     }
 
@@ -1080,6 +1096,14 @@ pub async fn suggest_all(
             break;
         }
         let res = suggest_one(&path, &content, &today, &root, &known, model_up).await;
+        // Persist the seed into the ambient suggestions table (upsert keyed by
+        // path, hashed by body) so the monitor can maintain it incrementally
+        // afterwards. Best-effort: a persistence failure must not break streaming.
+        if let Ok(conn) = db.0.lock() {
+            if let Err(e) = crate::suggestions::persist_seed_result(&conn, &res, &content) {
+                log::warn!("[suggest] seed persist failed for {path}: {e}");
+            }
+        }
         // Stream each suggestion the moment it is ready, so rows light up live
         // instead of the user waiting for the whole pass (TIN-1758 follow-up).
         let _ = app.emit("suggest://result", &res);

@@ -115,6 +115,7 @@ pub fn default_handlers() -> Vec<Box<dyn MaintenanceHandler>> {
     vec![
         Box::new(NoteChangeLog),
         Box::new(crate::consistency::ConsistencyMonitor),
+        Box::new(crate::suggestions::SuggesterMonitor),
     ]
 }
 
@@ -139,6 +140,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(STATE_SCHEMA)?;
     NoteChangeLog::ensure_schema(conn)?;
     crate::consistency::ensure_schema(conn)?;
+    crate::suggestions::ensure_schema(conn)?;
     Ok(())
 }
 
