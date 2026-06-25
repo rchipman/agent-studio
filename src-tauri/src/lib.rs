@@ -10,6 +10,7 @@ mod launcher;
 mod linear;
 mod links;
 mod local_embed;
+mod maintenance;
 mod memory_audit;
 mod memory_reads;
 mod reason;
