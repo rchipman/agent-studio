@@ -18,6 +18,7 @@ mod reason;
 mod salience;
 mod search;
 mod settings;
+mod suggestions;
 mod terminal;
 mod transcript;
 
@@ -138,6 +139,8 @@ pub fn run() {
       consistency::seed_consistency,
       consistency::consistency_findings,
       consistency::consistency_status,
+      suggestions::all_suggestions,
+      suggestions::suggestions_status,
       frontmatter::cancel_suggest,
       continuity::score_memory,
       memory_audit::record_memory_change,
