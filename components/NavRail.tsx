@@ -134,7 +134,10 @@ function RailItem({
         flexDirection: 'column',
         alignItems: 'center',
         gap: 3,
-        padding: `${space[2]}px 0`,
+        // Horizontal inset keeps the centred icon/label clear of the 2px active
+        // rule at the left edge, so a wide label (Sessions/Settings) never runs
+        // under it.
+        padding: `${space[2]}px ${space[1]}px`,
         background: active ? color.forestWash : 'transparent',
         color: active ? color.forest : color.inkSoft,
         border: 'none',

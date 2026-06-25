@@ -889,7 +889,12 @@ function DocStrip({
           flexShrink: 1,
           minWidth: 0,
           display: 'flex',
-          alignItems: 'center',
+          // Stretch to the strip's full height and bottom-align the doc tabs so
+          // they share the Search tab's baseline (which is alignSelf:flex-end).
+          // Without this the doc tabs centre while Search bottom-aligns → the
+          // tabs read as slightly misaligned.
+          alignSelf: 'stretch',
+          alignItems: 'flex-end',
           gap: space[1],
           overflowX: 'auto',
           overflowY: 'hidden',
