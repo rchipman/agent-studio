@@ -750,10 +750,12 @@ function DocTab({
         height: 30,
         padding: `0 ${space[3]}px`,
         // Folder tab: the active tab takes the body's raised surface and fuses
-        // with it (forest top seam, hairline sides, square bottom, -1 overlap),
-        // so it reads as a tab belonging to the panel below, not a flat label.
+        // with it (forest top seam, defined sides, open bottom, -1 overlap that
+        // covers the strip's divider under the tab), so it reads as a classic tab
+        // belonging to the panel below, not a flat label. `color.line` (vs the
+        // near-invisible hair) gives the left/right edges a readable outline.
         background: active ? color.bgRaised : 'transparent',
-        border: active ? `1px solid ${color.hair}` : '1px solid transparent',
+        border: active ? `1px solid ${color.line}` : '1px solid transparent',
         borderBottom: 'none',
         borderTop: active ? `2px solid ${color.forest}` : '2px solid transparent',
         borderTopLeftRadius: radius.md,
@@ -899,8 +901,10 @@ function DocStrip({
           overflowX: 'auto',
           overflowY: 'hidden',
           scrollbarWidth: 'none',
-          WebkitMaskImage: `linear-gradient(to right, transparent 0, ${color.bgApp} 12px, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
-          maskImage: `linear-gradient(to right, transparent 0, ${color.bgApp} 12px, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
+          // Fade only the RIGHT edge (where tabs scroll off). The old left fade
+          // erased the leftmost tab's left border, breaking the classic outline.
+          WebkitMaskImage: `linear-gradient(to right, ${color.bgApp} 0, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
+          maskImage: `linear-gradient(to right, ${color.bgApp} 0, ${color.bgApp} calc(100% - 12px), transparent 100%)`,
         }}
       >
         {tabs.map((doc) => {
