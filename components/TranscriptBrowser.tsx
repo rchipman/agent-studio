@@ -17,7 +17,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
+import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
@@ -187,14 +187,20 @@ interface ImageBlockProps {
 }
 
 function InlineImage({ mediaType, data }: ImageBlockProps) {
+  const [broken, setBroken] = useState(false)
   const src = `data:${mediaType};base64,${data}`
+  // Broken/oversized image → a calm, recessive placeholder (matches the meta
+  // type used elsewhere in this reader), never a broken-image glyph or alarm.
+  if (broken) {
+    return (
+      <div style={{ margin: `${space[3]}px 0` }}>
+        <span style={{ ...typeToken.meta, color: color.inkFaint }}>[image]</span>
+      </div>
+    )
+  }
   return (
-    <div
-      style={{
-        margin: `${space[3]}px 0`,
-        lineHeight: 0,
-      }}
-    >
+    // lineHeight:0 collapses the inline-image baseline gap so the framing is tight.
+    <div style={{ margin: `${space[3]}px 0`, lineHeight: 0 }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src={src}
@@ -208,14 +214,7 @@ function InlineImage({ mediaType, data }: ImageBlockProps) {
           display: 'block',
           objectFit: 'contain',
         }}
-        onError={e => {
-          const el = e.currentTarget
-          el.style.display = 'none'
-          const ph = document.createElement('span')
-          ph.textContent = '[image]'
-          ph.style.cssText = `font-family: ${font.mono}; font-size: 12px; color: ${color.inkFaint};`
-          el.parentElement?.appendChild(ph)
-        }}
+        onError={() => setBroken(true)}
       />
     </div>
   )
