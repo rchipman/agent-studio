@@ -121,6 +121,7 @@ pub fn run() {
       launcher::list_prompts,
       launcher::list_skills,
       launcher::read_prompt,
+      launcher::write_prompt,
       links::file_links,
       links::link_suggest,
       links::graph_data,

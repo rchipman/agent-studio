@@ -16,17 +16,20 @@
  * bundle injected. Per-prompt memory restores the last setup on re-select.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import MarkdownContent from './MarkdownContent'
 import Button from '@/components/Button'
 import { color, radius, space, font, type as typeRamp, shadow } from '@/lib/tokens'
+import { slugify } from '@/lib/slug'
 import { getSettings, type Settings, type Agent } from '@/lib/settings'
 import {
   listPrompts,
   listSkills,
   readPrompt,
+  writePrompt,
   stripFrontmatter,
   buildBundle,
   writeBundle,
@@ -37,13 +40,26 @@ import {
   getRecentDirs,
   pushRecentDir,
   filename,
+  parseFrontmatterContext,
+  parseFrontmatterSystemFacts,
+  resolveContextRef,
+  contextItemToRef,
+  resolveFacts,
+  defaultSystemFacts,
+  systemFactsToList,
+  systemFactsFromList,
+  SYSTEM_FACT_ORDER,
   type PromptEntry,
   type SkillEntry,
   type ContextItem,
   type ContextKind,
+  type SystemFacts,
 } from '@/lib/launcher'
 import type { MemorySearchResult } from '@/lib/types'
 import type { RunRequest } from './TerminalPanel'
+
+// Lazy-mount the real editor (Milkdown/Crepe) only when compose-mode opens it.
+const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
 
 // ── Props ──────────────────────────────────────────────────────────────────────
 
@@ -106,10 +122,27 @@ const KIND_TINT: Record<ContextKind, { bg: string; fg: string }> = {
   file: { bg: color.neutralTint, fg: color.inkSoft },
 }
 
-function ContextChip({ item, onRemove }: { item: ContextItem; onRemove: () => void }) {
-  const tint = KIND_TINT[item.kind]
+function ContextChip({
+  item,
+  onRemove,
+  onToggleSystem,
+}: {
+  item: ContextItem
+  onRemove: () => void
+  /** Move this chip between the user tier and the system tier (TIN-1764). */
+  onToggleSystem: () => void
+}) {
+  const [hover, setHover] = useState(false)
+  const isSystem = !!item.system
+  // System-tier chips render in the neutral treatment regardless of kind.
+  const tint = isSystem ? { bg: color.neutralTint, fg: color.inkSoft } : KIND_TINT[item.kind]
+  const toggleGlyph = isSystem ? '↥' : '↧'
+  const toggleTitle = isSystem ? 'return to prompt' : 'send to system'
+
   return (
     <span
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -124,6 +157,31 @@ function ContextChip({ item, onRemove }: { item: ContextItem; onRemove: () => vo
         maxWidth: '100%',
       }}
     >
+      {/* Leading tier toggle — appears on hover/focus. */}
+      <button
+        onClick={onToggleSystem}
+        onFocus={() => setHover(true)}
+        onBlur={() => setHover(false)}
+        title={toggleTitle}
+        aria-label={`${toggleTitle}: ${item.label}`}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          color: tint.fg,
+          opacity: hover ? 0.6 : isSystem ? 0.45 : 0,
+          padding: 0,
+          display: 'flex',
+          fontSize: 11,
+          lineHeight: 1,
+          transition: 'opacity 0.12s ease',
+        }}
+      >
+        {toggleGlyph}
+      </button>
+      {isSystem && (
+        <span style={{ ...typeRamp.micro, color: tint.fg, opacity: 0.8, textTransform: 'lowercase' }}>sys</span>
+      )}
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {item.label}
       </span>
@@ -171,6 +229,26 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
   // Context bundle (the chips)
   const [context, setContext] = useState<ContextItem[]>([])
   const [restored, setRestored] = useState(false)
+  /** Restore-line copy: which source seeded the current context, if any. */
+  const [restoreLine, setRestoreLine] = useState<string>('Restored your last setup.')
+
+  // ── Compose-mode (TIN-1764 in-app authoring) ──
+  const [composing, setComposing] = useState<{ mode: 'new' | 'edit'; seedPath?: string } | null>(null)
+  const [composeName, setComposeName] = useState('')
+  const [composeDesc, setComposeDesc] = useState('')
+  const [composeBody, setComposeBody] = useState('')
+  /** Default-context refs to write to frontmatter on a "Save as prompt…" flow. */
+  const [composeContext, setComposeContext] = useState<ContextItem[]>([])
+  const [saving, setSaving] = useState(false)
+
+  // ── System tier (TIN-1764) ──
+  const [systemFacts, setSystemFacts] = useState<SystemFacts>(defaultSystemFacts())
+  const [autoFactsOpen, setAutoFactsOpen] = useState(false)
+  const [systemPreviewOpen, setSystemPreviewOpen] = useState(false)
+  /** Bodies of system-tier items, loaded lazily when the preview opens. */
+  const [systemBodies, setSystemBodies] = useState<Record<string, string>>({})
+  /** A stable "now" for the preview stamp, refreshed when the preview opens. */
+  const [previewNow, setPreviewNow] = useState(() => new Date())
 
   // Run column
   const [agentName, setAgentName] = useState('')
@@ -206,36 +284,60 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
   // ── Select a prompt: load body, restore remembered setup ──
 
   const selectPrompt = useCallback(
-    async (p: PromptEntry, agents: Agent[]) => {
+    async (p: PromptEntry, agents: Agent[], roots: { skillsRoot: string; memoryRoot: string }) => {
       setSelected(p)
       setPicker(null)
+      setComposing(null)
       setLoadingBody(true)
 
-      // Restore remembered setup for this prompt, if any.
-      const setup = getSetup(p.path)
-      if (setup) {
-        setContext(setup.context)
-        setAgentName(setup.agentName)
-        setCwd(setup.cwd)
-        setRestored(true)
-      } else {
-        setContext([])
-        setRestored(false)
-        // Default agent + its cwd.
-        const first = agents[0]
-        setAgentName(first?.name ?? '')
-        setCwd(first?.cwd ?? '')
-      }
+      const first = agents[0]
 
+      // Read the body first so frontmatter is available for default-context seeding.
+      let raw = ''
       try {
         const cached = bodyByPathRef.current[p.path]
-        const raw = cached ?? (await readPrompt(p.path))
+        raw = cached ?? (await readPrompt(p.path))
         bodyByPathRef.current[p.path] = raw
         setPromptBody(raw)
       } catch {
         setPromptBody('')
       } finally {
         setLoadingBody(false)
+      }
+
+      // Precedence: a session override (localStorage) WINS; else the prompt's
+      // frontmatter `context:` default; else nothing.
+      const setup = getSetup(p.path)
+      if (setup) {
+        setContext(setup.context)
+        setAgentName(setup.agentName)
+        setCwd(setup.cwd)
+        setSystemFacts(setup.systemFacts ?? defaultSystemFacts())
+        setRestoreLine('Restored your last setup.')
+        setRestored(true)
+      } else {
+        setAgentName(first?.name ?? '')
+        setCwd(first?.cwd ?? '')
+        // A `system_facts:` key (even empty) is honored; its absence defaults time on.
+        const hasFactsKey = /\bsystem_facts\s*:/.test(raw.slice(0, raw.indexOf('\n---', 3) + 1 || raw.length))
+        setSystemFacts(hasFactsKey ? systemFactsFromList(parseFrontmatterSystemFacts(raw)) : defaultSystemFacts())
+
+        const refs = parseFrontmatterContext(raw)
+        if (refs.length > 0) {
+          const resolved = (
+            await Promise.all(refs.map((r) => resolveContextRef(r, roots)))
+          ).filter((x): x is ContextItem => x !== null)
+          setContext(resolved)
+          if (resolved.length > 0) {
+            setRestoreLine("Loaded this prompt’s default context.")
+            setRestored(true)
+          } else {
+            setRestored(false)
+          }
+        } else {
+          setContext([])
+          setRestored(false)
+        }
       }
     },
     [],
@@ -253,14 +355,132 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
     setContext((prev) => prev.filter((c) => c.path !== path))
   }, [])
 
+  /** Move a chip between the user tier and the system tier (TIN-1764). */
+  const toggleSystem = useCallback((path: string) => {
+    setRestored(false)
+    setContext((prev) => prev.map((c) => (c.path === path ? { ...c, system: !c.system } : c)))
+  }, [])
+
   const startFresh = useCallback(() => {
     if (selected) clearSetup(selected.path)
     setContext([])
     setRestored(false)
+    setSystemFacts(defaultSystemFacts())
     const first = settings?.agents[0]
     setAgentName(first?.name ?? '')
     setCwd(first?.cwd ?? '')
   }, [selected, settings])
+
+  // ── Compose-mode handlers (TIN-1764) ──
+
+  const promptsRoot = settings?.promptsRoot ?? ''
+  const roots = useMemo(
+    () => ({ skillsRoot: settings?.skillsRoot ?? '', memoryRoot: settings?.memoryRoot ?? '' }),
+    [settings?.skillsRoot, settings?.memoryRoot],
+  )
+
+  const startNew = useCallback(() => {
+    setComposing({ mode: 'new' })
+    setComposeName('')
+    setComposeDesc('')
+    setComposeBody('')
+    setComposeContext([])
+    setSelected(null)
+    setPicker(null)
+  }, [])
+
+  const startEdit = useCallback(() => {
+    if (!selected) return
+    const raw = bodyByPathRef.current[selected.path] ?? promptBody
+    setComposing({ mode: 'edit', seedPath: selected.path })
+    setComposeName(selected.name)
+    setComposeDesc(selected.description)
+    setComposeBody(stripFrontmatter(raw).trim())
+    setComposeContext([])
+    setPicker(null)
+  }, [selected, promptBody])
+
+  /** "Save as prompt…": new prompt pre-seeded from the current body + chips. */
+  const startSaveAs = useCallback(() => {
+    setComposing({ mode: 'new' })
+    setComposeName(selected?.name ?? '')
+    setComposeDesc('')
+    setComposeBody(stripFrontmatter(promptBody).trim())
+    setComposeContext(context)
+    setPicker(null)
+  }, [selected, promptBody, context])
+
+  const cancelCompose = useCallback(() => {
+    setComposing(null)
+  }, [])
+
+  const saveCompose = useCallback(async () => {
+    if (!composing || !composeName.trim() || !promptsRoot) return
+    setSaving(true)
+    try {
+      const isEdit = composing.mode === 'edit'
+      const baseSlug = slugify(composeName) || 'prompt'
+      const ctxRefs = composeContext.map((c) => contextItemToRef(c, roots))
+      // Carry the current auto-facts into frontmatter only when seeding from a
+      // live setup ("Save as prompt…" pre-seeds chips); a blank New leaves none.
+      const factsList = composeContext.length > 0 ? systemFactsToList(systemFacts) : []
+
+      let savedPath: string
+      if (isEdit && composing.seedPath) {
+        const seedSlug = filename(composing.seedPath).replace(/\.md$/, '')
+        savedPath = await writePrompt({
+          dir: promptsRoot,
+          slug: seedSlug,
+          name: composeName.trim(),
+          description: composeDesc.trim(),
+          body: composeBody,
+          overwrite: true,
+          context: ctxRefs.length ? ctxRefs : undefined,
+          systemFacts: factsList.length ? factsList : undefined,
+        })
+      } else {
+        // NEW: suffix -2, -3… on collision; never overwrite, never dialog.
+        let slug = baseSlug
+        let n = 1
+        // Loop until write succeeds (backend refuses to clobber an existing slug).
+        // Bounded so a pathological collision storm cannot hang the UI.
+        let written: string | null = null
+        while (n < 100) {
+          try {
+            written = await writePrompt({
+              dir: promptsRoot,
+              slug,
+              name: composeName.trim(),
+              description: composeDesc.trim(),
+              body: composeBody,
+              overwrite: false,
+              context: ctxRefs.length ? ctxRefs : undefined,
+              systemFacts: factsList.length ? factsList : undefined,
+            })
+            break
+          } catch {
+            n += 1
+            slug = `${baseSlug}-${n}`
+          }
+        }
+        if (!written) throw new Error('Could not find a free slug.')
+        savedPath = written
+      }
+
+      // Re-list, select the saved prompt, return to preview-mode.
+      bodyByPathRef.current[savedPath] = ''
+      delete bodyByPathRef.current[savedPath]
+      const list = await listPrompts(promptsRoot)
+      setPrompts(list)
+      setComposing(null)
+      const saved = list.find((p) => p.path === savedPath)
+      if (saved) await selectPrompt(saved, settings?.agents ?? [], roots)
+    } catch {
+      /* leave compose open on failure; nothing is half-written by the backend */
+    } finally {
+      setSaving(false)
+    }
+  }, [composing, composeName, composeDesc, composeBody, composeContext, systemFacts, promptsRoot, roots, selectPrompt, settings])
 
   // ── Working dir picker ──
 
@@ -277,18 +497,21 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
 
   const agents = settings?.agents ?? []
   const activeAgent = agents.find((a) => a.name === agentName) ?? null
-  const canRun = !!selected && !!activeAgent && !!cwd && !launching
+  // Run is inert while composing — column 3 shows "Save this prompt to run it."
+  const canRun = !!selected && !!activeAgent && !!cwd && !launching && !composing
 
   const handleRun = useCallback(async () => {
     if (!selected || !activeAgent || !cwd) return
     setLaunching(true)
     try {
       // Remember this setup for the prompt before launching.
-      saveSetup(selected.path, { context, agentName, cwd })
+      saveSetup(selected.path, { context, agentName, cwd, systemFacts })
       pushRecentDir(cwd)
       setRecentDirs(getRecentDirs())
 
-      const bundle = await buildBundle(selected.name, promptBody, context)
+      // Stamp time-of-input + the other on auto-facts at the moment Run fires.
+      const facts = resolveFacts(systemFacts, { cwd, agentName }, new Date())
+      const bundle = await buildBundle(selected.name, promptBody, context, facts)
       const bundlePath = await writeBundle(bundle)
       const args = composeAgentArgs(activeAgent, bundlePath)
 
@@ -305,9 +528,9 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
     } finally {
       setLaunching(false)
     }
-  }, [selected, activeAgent, cwd, context, agentName, promptBody, onRun, onClose])
+  }, [selected, activeAgent, cwd, context, agentName, systemFacts, promptBody, onRun, onClose])
 
-  // ── Keyboard: ⌘↩ runs, Esc closes ──
+  // ── Keyboard: ⌘↩ runs, Esc cancels compose → closes picker → closes launcher ──
 
   useEffect(() => {
     if (!open) return
@@ -315,7 +538,8 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
       const mod = navigator.platform.includes('Mac') ? e.metaKey : e.ctrlKey
       if (e.key === 'Escape') {
         e.preventDefault()
-        if (picker) setPicker(null)
+        if (composing) cancelCompose()
+        else if (picker) setPicker(null)
         else onClose()
         return
       }
@@ -326,7 +550,33 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [open, picker, canRun, handleRun, onClose])
+  }, [open, picker, composing, cancelCompose, canRun, handleRun, onClose])
+
+  // ── Load system-item bodies (and refresh the stamp) when the preview opens ──
+
+  const systemPaths = context.filter((c) => c.system).map((c) => c.path).join('|')
+  useEffect(() => {
+    if (!systemPreviewOpen) return
+    const paths = systemPaths ? systemPaths.split('|') : []
+    let cancelled = false
+    ;(async () => {
+      const entries = await Promise.all(
+        paths.map(async (p) => {
+          let body = ''
+          try {
+            body = await readPrompt(p)
+          } catch {
+            body = ''
+          }
+          return [p, body] as const
+        }),
+      )
+      if (!cancelled) setSystemBodies(Object.fromEntries(entries))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [systemPreviewOpen, systemPaths])
 
   if (!open) return null
 
@@ -342,15 +592,39 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
 
   const previewBody = stripFrontmatter(promptBody).trim()
 
+  const userContext = context.filter((c) => !c.system)
+  const systemContext = context.filter((c) => c.system)
+
   const tally = (['skill', 'memory', 'file'] as ContextKind[])
     .map((k) => {
-      const n = context.filter((c) => c.kind === k).length
+      const n = userContext.filter((c) => c.kind === k).length
       const noun =
         k === 'skill' ? (n === 1 ? 'skill' : 'skills') : k === 'memory' ? 'memory' : n === 1 ? 'file' : 'files'
       return n > 0 ? `${n} ${noun}` : null
     })
     .filter(Boolean)
     .join(' · ')
+
+  // Second faint tally line: the on auto-facts (e.g. "System: time of input").
+  const onFactLabels = SYSTEM_FACT_ORDER.filter((f) => systemFacts[f.id]).map((f) => f.label.toLowerCase())
+  const systemTally = onFactLabels.length > 0 ? `System: ${onFactLabels.join(', ')}` : ''
+  // Count for the human-hideable preview disclosure: system chips + on auto-facts.
+  const systemPreviewCount = systemContext.length + onFactLabels.length
+
+  // The mono preview text: resolved auto-facts as plain lines, then each system
+  // item as `## SYSTEM — <Kind>: <label>` + body (long files summarized).
+  const previewFacts = resolveFacts(systemFacts, { cwd, agentName }, previewNow)
+  const systemPreviewText = [
+    ...previewFacts.map((f) => `${f.label}: ${f.value}`),
+    ...systemContext.map((item) => {
+      const body = systemBodies[item.path]
+      const head = `## SYSTEM — ${item.kind.charAt(0).toUpperCase() + item.kind.slice(1)}: ${item.label}`
+      if (body == null) return `${head}\n(loading…)`
+      const lines = body.split('\n').length
+      const summary = item.kind === 'file' && lines > 40 ? `<file body, ${lines} lines>` : stripFrontmatter(body).trim()
+      return `${head}\n${summary}`
+    }),
+  ].join('\n\n')
 
   const noPromptsRoot = settings !== null && !settings.promptsRoot.trim()
   const noAgents = settings !== null && agents.length === 0
@@ -442,6 +716,16 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
               onChange={(e) => setPromptQuery(e.target.value)}
               style={fieldStyle}
             />
+            {!noPromptsRoot && (
+              <Button
+                variant="tertiary"
+                tone="forest"
+                onClick={startNew}
+                style={{ width: '100%', marginTop: space[2], textAlign: 'left', justifyContent: 'flex-start' }}
+              >
+                + New prompt
+              </Button>
+            )}
           </div>
           <div style={{ flex: 1, overflowY: 'auto' }}>
             {loadingPrompts ? (
@@ -464,7 +748,7 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
                 return (
                   <button
                     key={p.path}
-                    onClick={() => selectPrompt(p, agents)}
+                    onClick={() => selectPrompt(p, agents, roots)}
                     style={{
                       display: 'block',
                       width: '100%',
@@ -500,9 +784,23 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
           </div>
         </div>
 
-        {/* ── Column 2 — Preview & Context ── */}
+        {/* ── Column 2 — Preview & Context (swaps to Compose in place) ── */}
         <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', position: 'relative' }}>
-          {!selected ? (
+          {composing ? (
+            <ComposePane
+              mode={composing.mode}
+              name={composeName}
+              description={composeDesc}
+              body={composeBody}
+              seedPath={composing.seedPath}
+              saving={saving}
+              onName={setComposeName}
+              onDescription={setComposeDesc}
+              onBody={setComposeBody}
+              onCancel={cancelCompose}
+              onSave={saveCompose}
+            />
+          ) : !selected ? (
             <div
               style={{
                 height: '100%',
@@ -517,20 +815,25 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
             </div>
           ) : (
             <div style={{ maxWidth: 760, margin: '0 auto', padding: `${space[8]}px ${space[8]}px` }}>
-              {/* Prompt title + restore line */}
+              {/* Prompt title + Edit + restore line */}
               <div style={{ marginBottom: space[5] }}>
-                <h1
-                  style={{
-                    fontFamily: font.serif,
-                    fontSize: 26,
-                    fontWeight: 600,
-                    color: color.ink,
-                    margin: 0,
-                    lineHeight: 1.25,
-                  }}
-                >
-                  {selected.name}
-                </h1>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: space[4] }}>
+                  <h1
+                    style={{
+                      fontFamily: font.serif,
+                      fontSize: 26,
+                      fontWeight: 600,
+                      color: color.ink,
+                      margin: 0,
+                      lineHeight: 1.25,
+                    }}
+                  >
+                    {selected.name}
+                  </h1>
+                  <Button variant="tertiary" padding="none" onClick={startEdit} style={{ fontWeight: 400 }}>
+                    Edit
+                  </Button>
+                </div>
                 {restored && (
                   <div
                     style={{
@@ -542,7 +845,7 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
                       gap: space[3],
                     }}
                   >
-                    Restored your last setup.
+                    {restoreLine}
                     <Button variant="tertiary" padding="none" onClick={startFresh} style={{ fontSize: 'inherit', fontWeight: 400 }}>
                       Start fresh
                     </Button>
@@ -597,20 +900,95 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
                 <FilesPicker cwd={cwd} selected={context} onAdd={addContext} />
               )}
 
-              {/* Chips grouped by kind */}
-              {context.length > 0 && (
+              {/* User-tier chips grouped by kind */}
+              {userContext.length > 0 && (
                 <div style={{ marginTop: space[5], display: 'flex', flexDirection: 'column', gap: space[3] }}>
                   {(['skill', 'memory', 'file'] as ContextKind[]).map((kind) => {
-                    const items = context.filter((c) => c.kind === kind)
+                    const items = userContext.filter((c) => c.kind === kind)
                     if (items.length === 0) return null
                     return (
                       <div key={kind} style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
                         {items.map((item) => (
-                          <ContextChip key={item.path} item={item} onRemove={() => removeContext(item.path)} />
+                          <ContextChip
+                            key={item.path}
+                            item={item}
+                            onRemove={() => removeContext(item.path)}
+                            onToggleSystem={() => toggleSystem(item.path)}
+                          />
                         ))}
                       </div>
                     )
                   })}
+                </div>
+              )}
+
+              {/* System-tier chips, under a hair separator + SYSTEM header */}
+              {systemContext.length > 0 && (
+                <div style={{ marginTop: space[5] }}>
+                  <div style={{ height: 1, background: color.hair, marginBottom: space[4] }} />
+                  <div style={{ ...typeRamp.label, color: color.inkFaint, marginBottom: space[3] }}>SYSTEM</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
+                    {systemContext.map((item) => (
+                      <ContextChip
+                        key={item.path}
+                        item={item}
+                        onRemove={() => removeContext(item.path)}
+                        onToggleSystem={() => toggleSystem(item.path)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* "Save as prompt…" — appears once there's a body or ≥1 chip */}
+              {(previewBody || context.length > 0) && promptsRoot && (
+                <div style={{ marginTop: space[5] }}>
+                  <Button variant="tertiary" tone="forest" padding="none" onClick={startSaveAs}>
+                    Save as prompt…
+                  </Button>
+                </div>
+              )}
+
+              {/* Human-hideable system-context preview disclosure */}
+              {systemPreviewCount > 0 && (
+                <div style={{ marginTop: space[6] }}>
+                  <button
+                    onClick={() => {
+                      if (!systemPreviewOpen) setPreviewNow(new Date())
+                      setSystemPreviewOpen((v) => !v)
+                    }}
+                    aria-expanded={systemPreviewOpen}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: space[2],
+                      ...typeRamp.meta,
+                      color: color.inkFaint,
+                    }}
+                  >
+                    <span style={{ fontSize: 10 }}>{systemPreviewOpen ? '▾' : '▸'}</span>
+                    <span>System context the agent will also receive ({systemPreviewCount})</span>
+                  </button>
+                  {systemPreviewOpen && (
+                    <pre
+                      style={{
+                        marginTop: space[3],
+                        background: color.neutralTint,
+                        borderRadius: radius.md,
+                        padding: space[4],
+                        ...typeRamp.mono,
+                        color: color.inkSoft,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {systemPreviewText}
+                    </pre>
+                  )}
                 </div>
               )}
             </div>
@@ -711,6 +1089,52 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
             <div style={{ ...typeRamp.meta, color: color.inkSoft }}>
               {tally || 'Nothing added yet.'}
             </div>
+            {systemTally && (
+              <div style={{ ...typeRamp.meta, color: color.inkFaint }}>{systemTally}</div>
+            )}
+
+            {/* Auto system messages — a quiet disclosure of the four facts */}
+            <div style={{ marginTop: space[2] }}>
+              <button
+                onClick={() => setAutoFactsOpen((v) => !v)}
+                aria-expanded={autoFactsOpen}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: space[2],
+                  ...typeRamp.label,
+                  color: color.inkFaint,
+                }}
+              >
+                <span>SYSTEM</span>
+                <span style={{ ...typeRamp.meta, fontWeight: 400 }}>{onFactLabels.length}</span>
+                <span style={{ fontSize: 9 }}>{autoFactsOpen ? '▾' : '▸'}</span>
+              </button>
+              {autoFactsOpen && (
+                <div style={{ marginTop: space[3], display: 'flex', flexDirection: 'column', gap: space[2] }}>
+                  {SYSTEM_FACT_ORDER.map((f) => (
+                    <label
+                      key={f.id}
+                      style={{ display: 'flex', alignItems: 'center', gap: space[2], cursor: 'pointer', ...typeRamp.meta, color: color.inkSoft }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={systemFacts[f.id]}
+                        onChange={() =>
+                          setSystemFacts((prev) => ({ ...prev, [f.id]: !prev[f.id] }))
+                        }
+                        style={{ accentColor: color.forest }}
+                      />
+                      {f.label}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div style={{ flex: 1 }} />
@@ -746,6 +1170,11 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
                 ⌘↩
               </span>
             </Button>
+            {composing && (
+              <div style={{ ...typeRamp.meta, color: color.inkFaint, textAlign: 'center' }}>
+                Save this prompt to run it.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -783,6 +1212,91 @@ function PickerButton({ label, onClick, active }: { label: string; onClick: () =
     >
       {label}
     </button>
+  )
+}
+
+// ── Compose pane (TIN-1764 in-app authoring) ────────────────────────────────────
+
+/**
+ * Column 2's compose surface — swapped in place of the preview. Name (serif
+ * title), one-line Description, and the real MarkdownEditor for the body. The
+ * editor is lazy-mounted (this whole pane only renders in compose-mode).
+ */
+function ComposePane({
+  mode,
+  name,
+  description,
+  body,
+  seedPath,
+  saving,
+  onName,
+  onDescription,
+  onBody,
+  onCancel,
+  onSave,
+}: {
+  mode: 'new' | 'edit'
+  name: string
+  description: string
+  body: string
+  seedPath?: string
+  saving: boolean
+  onName: (v: string) => void
+  onDescription: (v: string) => void
+  onBody: (v: string) => void
+  onCancel: () => void
+  onSave: () => void
+}) {
+  // Stable mount key so the editor seeds once per compose session (seedPath for
+  // edit; a constant for new). Matches the WorkspacePanel key={activePath} pattern.
+  const editorKey = mode === 'edit' && seedPath ? `edit:${seedPath}` : 'new'
+  const canSave = !!name.trim() && !saving
+
+  return (
+    <div style={{ maxWidth: 760, margin: '0 auto', padding: `${space[8]}px ${space[8]}px` }}>
+      {/* Compose header row */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: space[4] }}>
+        <span style={{ ...typeRamp.label, color: color.inkSoft }}>
+          {mode === 'new' ? 'NEW PROMPT' : 'EDITING'}
+        </span>
+        <div style={{ display: 'flex', gap: space[3] }}>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={onSave} disabled={!canSave}>
+            {saving ? 'Saving…' : 'Save prompt'}
+          </Button>
+        </div>
+      </div>
+      <div style={{ height: 1, background: color.hair, margin: `${space[4]}px 0 ${space[6]}px` }} />
+
+      {/* Name — serif title-size field */}
+      <input
+        value={name}
+        onChange={(e) => onName(e.target.value)}
+        placeholder="Name this prompt"
+        autoFocus
+        style={{
+          ...fieldStyle,
+          fontFamily: font.serif,
+          fontSize: 26,
+          fontWeight: 600,
+          padding: '8px 12px',
+          marginBottom: space[3],
+        }}
+      />
+
+      {/* Description — one-line meta field */}
+      <input
+        value={description}
+        onChange={(e) => onDescription(e.target.value)}
+        placeholder="One line, so you can find it later"
+        style={{ ...fieldStyle, ...typeRamp.meta, marginBottom: space[6] }}
+      />
+
+      {/* Body — the real editor */}
+      <MarkdownEditor key={editorKey} initialContent={body} onChange={onBody} onSave={onSave} />
+    </div>
   )
 }
 

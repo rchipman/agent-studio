@@ -47,6 +47,54 @@ export interface ContextItem {
   path: string
   /** Display label (skill name, memory name, or filename). */
   label: string
+  /** When true, this item rides in the SYSTEM context tier, not the user prompt. */
+  system?: boolean
+}
+
+// ── System auto-facts (TIN-1764) ───────────────────────────────────────────────
+
+/**
+ * The four ambient facts the agent can be told about a launch. Each is opt-in
+ * per prompt; `time` defaults on. Persisted alongside the per-prompt setup and,
+ * on "Save current setup", into the prompt's `system_facts:` frontmatter.
+ */
+export interface SystemFacts {
+  /** Time of input — stamped at the moment Run fires. Default ON. */
+  time: boolean
+  /** Date — the calendar date at launch. */
+  date: boolean
+  /** Working directory — the launch cwd. */
+  cwd: boolean
+  /** Agent name — the chosen agent. */
+  agent: boolean
+}
+
+export function defaultSystemFacts(): SystemFacts {
+  return { time: true, date: false, cwd: false, agent: false }
+}
+
+/** The auto-facts, in display + bundle order, with their human labels. */
+export const SYSTEM_FACT_ORDER: { id: keyof SystemFacts; label: string }[] = [
+  { id: 'time', label: 'Time of input' },
+  { id: 'date', label: 'Date' },
+  { id: 'cwd', label: 'Working directory' },
+  { id: 'agent', label: 'Agent name' },
+]
+
+/** Serialize on-facts to the `system_facts:` frontmatter list (e.g. `['time']`). */
+export function systemFactsToList(facts: SystemFacts): string[] {
+  return SYSTEM_FACT_ORDER.filter((f) => facts[f.id]).map((f) => f.id)
+}
+
+/** Parse a `system_facts:` list back into a SystemFacts (missing keys → off). */
+export function systemFactsFromList(list: string[]): SystemFacts {
+  const set = new Set(list)
+  return {
+    time: set.has('time'),
+    date: set.has('date'),
+    cwd: set.has('cwd'),
+    agent: set.has('agent'),
+  }
 }
 
 // ── Backend commands ──────────────────────────────────────────────────────────
@@ -66,6 +114,38 @@ export async function readPrompt(path: string): Promise<string> {
   return invoke<string>('read_prompt', { payload: { path } })
 }
 
+// ── Prompt authoring (TIN-1764) ────────────────────────────────────────────────
+
+/** A portable default-context reference, as carried in a prompt's frontmatter. */
+export interface PromptContextRef {
+  kind: ContextKind
+  /** Root-relative (skill/memory) or absolute/relative (file) reference. */
+  ref: string
+}
+
+/** Arguments for `write_prompt`. Mirrors the Rust `WritePromptInput`. */
+export interface WritePromptArgs {
+  dir: string
+  slug: string
+  name: string
+  description?: string
+  body: string
+  /** false = new file (refuses to clobber); true = rewrite in place. */
+  overwrite: boolean
+  context?: PromptContextRef[]
+  systemFacts?: string[]
+}
+
+/**
+ * Write or rewrite a prompt `.md` in the prompts root. Returns the absolute path.
+ * NEW writes refuse to clobber (caller suffixes the slug and retries); EDIT
+ * rewrites in place, preserving other frontmatter keys. See `launcher.rs`.
+ */
+export async function writePrompt(args: WritePromptArgs): Promise<string> {
+  const res = await invoke<{ path: string }>('write_prompt', { payload: args })
+  return res.path
+}
+
 // ── Frontmatter stripping (for the serif preview + clean bundle bodies) ────────
 
 /**
@@ -78,6 +158,138 @@ export function stripFrontmatter(raw: string): string {
   if (end === -1) return raw
   const after = raw.indexOf('\n', end + 1)
   return after === -1 ? '' : raw.slice(after + 1).replace(/^\s*\n/, '')
+}
+
+/** The inner YAML text of a leading `---`-fenced frontmatter block, or ''. */
+function frontmatterBlock(raw: string): string {
+  if (!raw.startsWith('---')) return ''
+  const firstNl = raw.indexOf('\n')
+  if (firstNl === -1) return ''
+  const end = raw.indexOf('\n---', firstNl)
+  if (end === -1) return ''
+  return raw.slice(firstNl + 1, end)
+}
+
+/**
+ * Parse a prompt's `context:` frontmatter block into `PromptContextRef[]`.
+ * Tolerant of the small subset of YAML we emit: a `context:` key followed by
+ * `- kind: <k>` / `ref: <r>` pairs. Unparseable / unknown-kind items are dropped.
+ * No YAML dependency — this is a hot path and the shape is fixed.
+ */
+export function parseFrontmatterContext(raw: string): PromptContextRef[] {
+  const block = frontmatterBlock(raw)
+  if (!block) return []
+  const lines = block.split('\n')
+  const out: PromptContextRef[] = []
+  let inContext = false
+  let cur: Partial<PromptContextRef> | null = null
+  const unquote = (s: string) => s.trim().replace(/^['"]|['"]$/g, '').trim()
+
+  const flush = () => {
+    if (cur && cur.kind && cur.ref && (cur.kind === 'skill' || cur.kind === 'memory' || cur.kind === 'file')) {
+      out.push({ kind: cur.kind, ref: cur.ref })
+    }
+    cur = null
+  }
+
+  for (const line of lines) {
+    const indented = /^\s/.test(line)
+    if (!indented) {
+      // A new top-level key ends the context block.
+      flush()
+      inContext = line.replace(/\s+$/, '') === 'context:'
+      continue
+    }
+    if (!inContext) continue
+    const trimmed = line.trim()
+    const itemMatch = trimmed.match(/^-\s*kind:\s*(.+)$/)
+    if (itemMatch) {
+      flush()
+      cur = { kind: unquote(itemMatch[1]) as ContextKind }
+      continue
+    }
+    const refMatch = trimmed.match(/^ref:\s*(.+)$/)
+    if (refMatch && cur) {
+      cur.ref = unquote(refMatch[1])
+      continue
+    }
+    const kindMatch = trimmed.match(/^kind:\s*(.+)$/)
+    if (kindMatch) {
+      flush()
+      cur = { kind: unquote(kindMatch[1]) as ContextKind }
+    }
+  }
+  flush()
+  return out
+}
+
+/** Parse a `system_facts: [a, b]` (or block-list) frontmatter value. */
+export function parseFrontmatterSystemFacts(raw: string): string[] {
+  const block = frontmatterBlock(raw)
+  if (!block) return []
+  const lines = block.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^system_facts:\s*(.*)$/)
+    if (!m) continue
+    const inline = m[1].trim()
+    if (inline.startsWith('[')) {
+      return inline
+        .replace(/^\[|\]$/g, '')
+        .split(',')
+        .map((s) => s.trim().replace(/^['"]|['"]$/g, '').trim())
+        .filter(Boolean)
+    }
+    // Block list form: subsequent `  - item` lines.
+    const out: string[] = []
+    for (let j = i + 1; j < lines.length; j++) {
+      const im = lines[j].match(/^\s+-\s*(.+)$/)
+      if (!im) break
+      out.push(im[1].trim().replace(/^['"]|['"]$/g, '').trim())
+    }
+    return out
+  }
+  return []
+}
+
+/**
+ * Resolve a default-context `ref` (from frontmatter) to a `ContextItem` by
+ * locating it under the right root. skill→skillsRoot, memory→memoryRoot,
+ * file→absolute as-is. Returns null when the target does not exist (the caller
+ * silently drops unresolvable refs — no alarm).
+ */
+export async function resolveContextRef(
+  ref: PromptContextRef,
+  roots: { skillsRoot: string; memoryRoot: string },
+): Promise<ContextItem | null> {
+  const join = (root: string, rel: string) => {
+    const r = root.replace(/\/+$/, '')
+    return rel.startsWith('/') ? rel : `${r}/${rel}`
+  }
+  let path: string
+  if (ref.kind === 'skill') path = join(roots.skillsRoot, ref.ref)
+  else if (ref.kind === 'memory') path = join(roots.memoryRoot, ref.ref)
+  else path = ref.ref
+  try {
+    const { exists } = await import('@tauri-apps/plugin-fs')
+    if (!(await exists(path))) return null
+  } catch {
+    return null
+  }
+  return { kind: ref.kind, path, label: filename(path) }
+}
+
+/** The root-relative ref for a context item, given the roots (for frontmatter). */
+export function contextItemToRef(
+  item: ContextItem,
+  roots: { skillsRoot: string; memoryRoot: string },
+): PromptContextRef {
+  const rel = (root: string) => {
+    const r = root.replace(/\/+$/, '')
+    return item.path.startsWith(r + '/') ? item.path.slice(r.length + 1) : item.path
+  }
+  if (item.kind === 'skill') return { kind: 'skill', ref: rel(roots.skillsRoot) }
+  if (item.kind === 'memory') return { kind: 'memory', ref: rel(roots.memoryRoot) }
+  return { kind: 'file', ref: item.path }
 }
 
 // ── Bundle composition ─────────────────────────────────────────────────────────
@@ -95,27 +307,51 @@ const KIND_HEADING: Record<ContextKind, string> = {
   file: 'Project file',
 }
 
+/** Capitalized kind label for the SYSTEM tier (`## SYSTEM — <Kind>: <label>`). */
+const KIND_CAP: Record<ContextKind, string> = {
+  skill: 'Skill',
+  memory: 'Memory',
+  file: 'File',
+}
+
+/** A resolved auto-fact: its label and the literal value to emit. */
+export interface ResolvedFact {
+  label: string
+  value: string
+}
+
 /**
- * Compose the launch bundle: the prompt body first, then each context item under
- * a light, labeled header grouped by kind (skills, then memory, then files). This
- * is the single source of truth for what the agent receives.
+ * The framing sentence atop the SYSTEM CONTEXT block. Kept as one source of truth
+ * so the bundle and the human-facing preview agree.
+ */
+export const SYSTEM_FRAMING =
+  'The following is ambient context for you, the agent, not part of the user’s request.'
+
+/**
+ * Compose the launch bundle. The prompt body first, then the USER-tier context
+ * grouped by kind (skills, memory, files). If there is any system-tier context or
+ * any auto-fact, a single clearly-delimited `# SYSTEM CONTEXT` block is appended
+ * AFTER all user content — never interleaved with the user's request.
  *
- * Bodies have their frontmatter stripped so the agent reads prose, not YAML.
+ * This is the single source of truth for what the agent receives.
  */
 export function composeBundle(
   promptName: string,
   promptBody: string,
   context: LoadedContext[],
+  facts: ResolvedFact[] = [],
 ): string {
+  const order: ContextKind[] = ['skill', 'memory', 'file']
+  const userItems = context.filter((c) => !c.system)
+  const systemItems = context.filter((c) => c.system)
+
   const parts: string[] = []
   parts.push(`# ${promptName}`)
   parts.push('')
   parts.push(stripFrontmatter(promptBody).trim())
 
-  const order: ContextKind[] = ['skill', 'memory', 'file']
   for (const kind of order) {
-    const items = context.filter((c) => c.kind === kind)
-    for (const item of items) {
+    for (const item of userItems.filter((c) => c.kind === kind)) {
       parts.push('')
       parts.push('---')
       parts.push('')
@@ -124,6 +360,29 @@ export function composeBundle(
       parts.push(stripFrontmatter(item.body).trim())
     }
   }
+
+  // ── System tier — one fenced block, after all user content. ──
+  if (systemItems.length > 0 || facts.length > 0) {
+    parts.push('')
+    parts.push('---')
+    parts.push('')
+    parts.push('# SYSTEM CONTEXT')
+    parts.push('')
+    parts.push(SYSTEM_FRAMING)
+    for (const f of facts) {
+      parts.push('')
+      parts.push(`${f.label}: ${f.value}`)
+    }
+    for (const kind of order) {
+      for (const item of systemItems.filter((c) => c.kind === kind)) {
+        parts.push('')
+        parts.push(`## SYSTEM — ${KIND_CAP[kind]}: ${item.label}`)
+        parts.push('')
+        parts.push(stripFrontmatter(item.body).trim())
+      }
+    }
+  }
+
   parts.push('')
   return parts.join('\n')
 }
@@ -132,11 +391,15 @@ export function composeBundle(
  * Read the bodies of every selected context item, then compose the bundle.
  * Memory and file items are read through the fs plugin; skills through the
  * backend (same as the preview) — all by absolute path, so one read fn suffices.
+ *
+ * `facts` carries the resolved auto-facts (time-of-input stamped at Run); they
+ * land in the SYSTEM CONTEXT block.
  */
 export async function buildBundle(
   promptName: string,
   promptBody: string,
   context: ContextItem[],
+  facts: ResolvedFact[] = [],
 ): Promise<string> {
   const loaded: LoadedContext[] = await Promise.all(
     context.map(async (item) => {
@@ -149,7 +412,45 @@ export async function buildBundle(
       return { ...item, body }
     }),
   )
-  return composeBundle(promptName, promptBody, loaded)
+  return composeBundle(promptName, promptBody, loaded, facts)
+}
+
+/**
+ * Stamp the on auto-facts into resolved label/value lines, at the moment Run
+ * fires. Time-of-input format: `YYYY-MM-DD HH:MM TZ` (e.g. `2026-06-25 09:14 PST`).
+ */
+export function resolveFacts(
+  facts: SystemFacts,
+  ctx: { cwd: string; agentName: string },
+  now: Date = new Date(),
+): ResolvedFact[] {
+  const out: ResolvedFact[] = []
+  if (facts.time) out.push({ label: 'time of input', value: formatStamp(now) })
+  if (facts.date) out.push({ label: 'date', value: formatDate(now) })
+  if (facts.cwd) out.push({ label: 'working directory', value: ctx.cwd })
+  if (facts.agent) out.push({ label: 'agent name', value: ctx.agentName })
+  return out
+}
+
+/** `YYYY-MM-DD` from a Date (local). */
+export function formatDate(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** `YYYY-MM-DD HH:MM TZ` from a Date (local), e.g. `2026-06-25 09:14 PST`. */
+export function formatStamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  const date = formatDate(d)
+  const time = `${p(d.getHours())}:${p(d.getMinutes())}`
+  let tz = ''
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(d)
+    tz = parts.find((x) => x.type === 'timeZoneName')?.value ?? ''
+  } catch {
+    tz = ''
+  }
+  return tz ? `${date} ${time} ${tz}` : `${date} ${time}`
 }
 
 /**
@@ -194,6 +495,8 @@ export interface RememberedSetup {
   context: ContextItem[]
   agentName: string
   cwd: string
+  /** The per-prompt auto-fact toggles (TIN-1764). Absent on legacy entries. */
+  systemFacts?: SystemFacts
 }
 
 const SETUP_KEY = 'agent-studio-launcher-setups'
