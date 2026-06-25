@@ -34,8 +34,11 @@ struct TagModel {
 }
 
 /// Pick a usable instruct model from the installed list. Skips base/embedding
-/// models (no chat behaviour) and prefers a known instruct family when present.
-/// Pure so it can be unit-tested without a server.
+/// models (no chat behaviour), prefers a known general-instruct family, and
+/// DEPRIORITIZES code-tuned models — the reasoning consumer (the contradiction
+/// judge, TIN-1753) reasons over prose, where a `-coder` model is a weak
+/// last-resort, not a preference. A code model is still chosen if it is the only
+/// usable one. Pure so it can be unit-tested without a server.
 fn pick_model(names: &[String]) -> Option<String> {
     let usable: Vec<&String> = names
         .iter()
@@ -47,14 +50,29 @@ fn pick_model(names: &[String]) -> Option<String> {
     if usable.is_empty() {
         return None;
     }
-    // Prefer a general instruct family (better at prose) over a code model.
+    // Prefer a general instruct family (better at prose); earlier = stronger.
     const PREFERRED: &[&str] = &["llama3", "llama-3", "mistral", "qwen2.5", "qwen3", "gemma"];
-    for fam in PREFERRED {
-        if let Some(m) = usable.iter().find(|n| n.to_lowercase().contains(fam)) {
-            return Some((*m).clone());
+    let score = |name: &str| -> i32 {
+        let l = name.to_lowercase();
+        let mut s = 0;
+        // Code-tuned models are poor prose judges — heavy penalty, but not a ban.
+        if l.contains("coder") || l.contains("-code") || l.contains(":code") {
+            s -= 100;
         }
-    }
-    Some(usable[0].clone())
+        for (i, fam) in PREFERRED.iter().enumerate() {
+            if l.contains(fam) {
+                s += 50 - i as i32;
+                break;
+            }
+        }
+        s
+    };
+    // Highest score wins; stable on ties (first usable in original order).
+    usable
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, n)| (score(n), -(*i as i32)))
+        .map(|(_, n)| (*n).clone())
 }
 
 /// The model the reasoning provider will use, if Ollama is reachable and has a
@@ -172,6 +190,29 @@ mod tests {
             "llama3.1:8b".to_string(),
         ];
         assert_eq!(pick_model(&names), Some("llama3.1:8b".to_string()));
+    }
+
+    #[test]
+    fn pick_model_prefers_general_sibling_over_same_family_coder() {
+        // The general qwen2.5:7b must beat its code-tuned sibling — the judge
+        // reasons over prose, not code (TIN-1753). Both match the "qwen2.5"
+        // family term, so the coder penalty is what must break the tie.
+        let names = vec![
+            "qwen2.5-coder:7b".to_string(),
+            "qwen2.5:7b".to_string(),
+        ];
+        assert_eq!(pick_model(&names), Some("qwen2.5:7b".to_string()));
+    }
+
+    #[test]
+    fn pick_model_falls_back_to_coder_when_only_option() {
+        // A code model is a weak last-resort, not banned: if it is the only
+        // usable instruct model, we still use it rather than degrade to nothing.
+        let names = vec![
+            "qwen2.5-coder:7b".to_string(),
+            "nomic-embed-text:latest".to_string(),
+        ];
+        assert_eq!(pick_model(&names), Some("qwen2.5-coder:7b".to_string()));
     }
 
     #[test]
