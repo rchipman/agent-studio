@@ -289,7 +289,7 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
     // continue — the write is already committed and the JSON contract is
     // unchanged. The JSON output is NOT modified by this step.
     let path_str = file_path.to_string_lossy().to_string();
-    embed_new_note_chunks(&db, &path_str);
+    embed_new_note_chunks(&db, &path_str, &body);
 
     // 5. Record an `agent` audit row.
     {
@@ -319,22 +319,16 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
 /// Embed the chunks for a newly-written note and store their vectors so that
 /// headless `recall` returns semantic results immediately.
 ///
-/// The note's body is read from `file_path` (already written to disk), chunked,
-/// embedded with the bundled local model, and upserted into the `chunks` table.
+/// `body` is the frontmatter-FREE note content — the same text `build_index`
+/// indexes (gray_matter strips the YAML), so we never embed frontmatter into the
+/// semantic vector. It is chunked, embedded with the bundled local model, and
+/// upserted into the `chunks` table.
 ///
 /// **Degrade-safe**: any error (model not cached, DB lock failure, dim mismatch)
 /// is logged at WARN level and the function returns normally — it NEVER fails
 /// the write or alters the JSON output.
-fn embed_new_note_chunks(db: &Db, file_path: &str) {
-    // Read and chunk the newly-written note body.
-    let body = match fs::read_to_string(file_path) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("[add-memory] embed: could not read {file_path}: {e}");
-            return;
-        }
-    };
-    let chunks = chunk_text(&body);
+fn embed_new_note_chunks(db: &Db, file_path: &str, body: &str) {
+    let chunks = chunk_text(body);
     if chunks.is_empty() {
         return;
     }
