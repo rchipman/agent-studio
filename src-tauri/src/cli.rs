@@ -652,10 +652,21 @@ fn set_frontmatter_fields(raw: &str, fields: &[(&str, &str)]) -> Result<String, 
 /// `search` command uses (via `search_core`), applies `derank_superseded`, and
 /// returns a JSON array of the top-k hits with the shape the agent API defines.
 ///
-/// Usage: `recall --query "<text>" [--project <p>] [--type <t>] [--k <n>]`
+/// Usage:
+///   `recall --query "<text>" [--project <p>] [--type <t>] [--k <n>]` — keyword/semantic search
+///   `recall --about "<file|name|topic>"` — settled-context lookup: resolves the note, returns
+///      related notes, full audit trail, and the supersede chain as a single JSON object.
+///
 /// Default k = 8.
 pub fn run_recall(rest: &[String]) -> Result<serde_json::Value, String> {
     let args = Args::parse(rest);
+
+    // --about takes priority: if present (and non-empty), route to the
+    // settled-context path and return its JSON object (not an array).
+    if let Some(about) = args.get("about").filter(|s| !s.trim().is_empty()) {
+        return run_recall_about(about, &args);
+    }
+
     let query = args.get("query").ok_or("--query <text> is required")?;
     if query.trim().is_empty() {
         return Err("--query must not be empty".to_string());
@@ -727,6 +738,138 @@ pub fn run_recall(rest: &[String]) -> Result<serde_json::Value, String> {
         .collect();
 
     Ok(serde_json::Value::Array(items))
+}
+
+
+// ── recall --about (TIN-1741) ────────────────────────────────────────────────
+
+/// Settled-context lookup for `recall --about <file|name|topic>`.
+///
+/// Returns a JSON object with the shape:
+/// ```json
+/// { "about": "<input>",
+///   "resolved": "<path or null>",
+///   "related": [ { "name": ..., "path": ..., "summary": ..., "status": ..., "score": 0.0 } ],
+///   "audit":   [ { "actorType": ..., "actorId": ..., "changeSummary": ..., "continuityScore": ..., "ts": ... } ],
+///   "chain":   [ { "name": ..., "path": ..., "status": ... } ]
+/// }
+/// ```
+///
+/// Degrade-safe: any failure reading audit rows or the supersede chain produces
+/// empty arrays — the function never returns Err from those paths.
+fn run_recall_about(about: &str, args: &Args) -> Result<serde_json::Value, String> {
+    let k: usize = args.get("k").and_then(|s| s.parse().ok()).unwrap_or(8);
+
+    let root = resolve_root();
+    let db = open_db(&root)?;
+
+    // Try to resolve `about` as a concrete note (by path or frontmatter name).
+    let resolved: Option<PathBuf> = resolve_note(&root, about);
+
+    // Run hybrid search using `about` as the query text (same path as --query).
+    let search_input = SearchInput {
+        q: about.to_string(),
+        type_filter: String::new(),
+        project_filter: String::new(),
+        limit: Some(k as i64),
+        rebuild: false,
+    };
+    let search_results = search_core(&db, &search_input, k).unwrap_or_default();
+
+    // Build the `related` array — same shape as the regular recall array items,
+    // minus the `snippet` field (not part of the --about contract).
+    let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
+    let related: Vec<serde_json::Value> = search_results
+        .iter()
+        .map(|r| {
+            let summary: String = fs::read_to_string(&r.path)
+                .ok()
+                .and_then(|raw| {
+                    let parsed: gray_matter::ParsedEntity = matter.parse(&raw).ok()?;
+                    let map = parsed.data.as_ref()?.as_hashmap().ok()?;
+                    map.get("summary").and_then(|p| p.as_string().ok())
+                })
+                .unwrap_or_default();
+            json!({
+                "name":    r.name,
+                "path":    r.path,
+                "summary": summary,
+                "status":  r.status,
+                "score":   0.0,
+            })
+        })
+        .collect();
+
+    // Chain and audit are only populated when we resolved a concrete note.
+    let (resolved_str, chain, audit): (serde_json::Value, Vec<serde_json::Value>, Vec<serde_json::Value>) =
+        if let Some(ref resolved_path) = resolved {
+            let resolved_str = json!(resolved_path.to_string_lossy().to_string());
+
+            // Build the supersede chain (oldest-first).
+            let chain_paths = collect_supersede_chain(&root, resolved_path);
+            let chain_items: Vec<serde_json::Value> = chain_paths
+                .iter()
+                .map(|p| {
+                    let name = note_name(p).unwrap_or_else(|| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string()
+                    });
+                    let raw = fs::read_to_string(p).unwrap_or_default();
+                    let status = frontmatter_field(&raw, "status")
+                        .unwrap_or_else(|| "active".to_string());
+                    json!({ "name": name, "path": p.to_string_lossy(), "status": status })
+                })
+                .collect();
+
+            // Collect audit rows for every note in the chain, newest-first overall.
+            let audit_items: Vec<serde_json::Value> = {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                // Degrade-safe: if schema ensure fails, return empty.
+                if ensure_audit_schema(&conn).is_err() {
+                    Vec::new()
+                } else {
+                    let mut all_entries: Vec<(String, crate::memory_audit::AuditEntry)> = chain_paths
+                        .iter()
+                        .flat_map(|p| {
+                            let path_str = p.to_string_lossy().to_string();
+                            history_for(&conn, &path_str)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(move |e| (path_str.clone(), e))
+                        })
+                        .collect();
+                    // Sort newest-first by audit entry id (monotonically increasing).
+                    all_entries.sort_by(|a, b| b.1.id.cmp(&a.1.id));
+                    all_entries
+                        .into_iter()
+                        .map(|(_, e)| {
+                            json!({
+                                "actorType":      e.actor_type,
+                                "actorId":        e.actor_id,
+                                "changeSummary":  e.change_summary,
+                                "continuityScore": e.continuity_score,
+                                "ts":             e.ts,
+                            })
+                        })
+                        .collect()
+                }
+            };
+
+            (resolved_str, chain_items, audit_items)
+        } else {
+            // No concrete note found — chain and audit are empty.
+            (json!(null), Vec::new(), Vec::new())
+        };
+
+    Ok(json!({
+        "about":    about,
+        "resolved": resolved_str,
+        "related":  related,
+        "audit":    audit,
+        "chain":    chain,
+    }))
 }
 
 // ── check (TIN-1740) ─────────────────────────────────────────────────────────
@@ -2006,4 +2149,78 @@ mod tests {
         std::env::remove_var("MEMORY_ROOT");
         assert!(err.contains("not found"), "error mentions not found: {err}");
     }
+    // ── recall --about (TIN-1741) ────────────────────────────────────────────
+
+    #[test]
+    fn recall_about_note_with_audit_returns_audit_rows() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("about-audit");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_recall(&["--about".into(), "decision-c".into()])
+            .expect("recall --about succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Must return an object, not an array.
+        assert!(out.is_object(), "recall --about returns a JSON object: {out}");
+
+        // Required top-level fields.
+        assert!(out["about"].is_string(), "about field present");
+        assert!(out["resolved"].is_string() || out["resolved"].is_null(), "resolved field present");
+        assert!(out["related"].is_array(), "related field is an array");
+        assert!(out["audit"].is_array(), "audit field is an array");
+        assert!(out["chain"].is_array(), "chain field is an array");
+
+        // decision-c was seeded with an audit row in brief_fixture.
+        let audit = out["audit"].as_array().unwrap();
+        assert!(!audit.is_empty(), "audit array is non-empty for decision-c");
+    }
+
+    #[test]
+    fn recall_about_superseded_note_returns_chain() {
+        let _guard = env_lock();
+        let (root, _db) = brief_fixture("about-chain");
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_recall(&["--about".into(), "decision-c".into()])
+            .expect("recall --about succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let chain = out["chain"].as_array().unwrap();
+        assert!(
+            chain.len() >= 2,
+            "chain includes decision-b and decision-c: {chain:?}"
+        );
+
+        // Each chain item must have the expected fields.
+        for item in chain {
+            assert!(item["name"].is_string(), "chain item has name field");
+            assert!(item["path"].is_string(), "chain item has path field");
+            assert!(item["status"].is_string(), "chain item has status field");
+        }
+    }
+
+    #[test]
+    fn recall_about_bare_topic_returns_related_with_empty_audit_and_chain() {
+        let _guard = env_lock();
+        let (root, _db) = recall_fixture("about-bare");
+        std::env::set_var("MEMORY_ROOT", &root);
+        // Use a topic that cannot possibly resolve to a note by path or name.
+        let out = run_recall(&["--about".into(), "something-nonexistent-xyz".into()])
+            .expect("recall --about with unknown topic returns Ok");
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Must still return a well-formed object (not an error).
+        assert!(out.is_object(), "result is a JSON object");
+        assert_eq!(out["about"].as_str(), Some("something-nonexistent-xyz"), "about echoed back");
+        assert!(out["resolved"].is_null(), "resolved is null for unresolvable topic");
+
+        // Audit and chain are empty when no note was resolved.
+        let audit = out["audit"].as_array().unwrap();
+        assert!(audit.is_empty(), "audit is empty when note unresolved");
+        let chain = out["chain"].as_array().unwrap();
+        assert!(chain.is_empty(), "chain is empty when note unresolved");
+
+        // related may be empty too (no semantic match), but must be an array.
+        assert!(out["related"].is_array(), "related is always an array");
+    }
+
 }
