@@ -46,6 +46,28 @@ async function check(name, keys, expectAny) {
   }
 }
 
+// ⌘\ toggles a split: a second WorkspacePanel mounts on the right. Assert it
+// structurally (two visible "Open documents" tab strips) rather than by text,
+// since the right panel mirrors the left and shares its copy.
+async function visibleTablists() {
+  return browser.execute(() =>
+    Array.from(document.querySelectorAll('[role="tablist"][aria-label="Open documents"]'))
+      .filter((el) => el.getBoundingClientRect().width > 0).length,
+  )
+}
+async function checkSplit() {
+  // The split state is persisted (localStorage), so the starting count is either
+  // 1 (single) or 2 (split). Assert ⌘\ FLIPS it between 1 and 2 either way.
+  await resetHome()
+  const before = await visibleTablists()
+  await browser.keys([Key.Command, '\\'])
+  await browser.pause(600)
+  const after = await visibleTablists()
+  const pass = before !== after && Math.max(before, after) === 2 && Math.min(before, after) === 1
+  results.push({ name: '⌘\\  split panel', pass, hit: pass ? `${before}→${after}` : null })
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ⌘\\  split panel  ${pass ? `(toggled ${before} → ${after} document panels)` : `(panels ${before} → ${after}, expected a 1↔2 flip)`}`)
+}
+
 try {
   console.log('url:', await browser.getUrl(), '| title:', await browser.getTitle())
 
@@ -53,12 +75,14 @@ try {
   await check('⌘⇧N quick capture', [Key.Command, Key.Shift, 'n'], ['Quick capture', "What's on your mind"])
   await check('⌘,  settings', [Key.Command, ','], ['Memory root', 'Embedding API key', 'Agents'])
   await check('⌘R  launcher', [Key.Command, 'r'], ['Pick a prompt to begin', 'Prompts', 'Run'])
-  await check('⌘T  transcripts', [Key.Command, 't'], ['Transcripts', 'Search transcripts', 'No sessions'])
+  // The view was renamed Transcripts → Sessions; its title/nav label is "Sessions"
+  // (the "Search transcripts…" placeholder is an attribute getText can't see).
+  await check('⌘T  sessions', [Key.Command, 't'], ['Sessions', 'No transcripts root configured', 'No sessions'])
   // 'LinksDiff' x2 confirms the right panel opened on its Diff tab; the diff
   // body then shows real git state (or the calm "Could not read git status"
   // when no working directory is configured — first-run with no agents).
   await check('⌘D  diff tab', [Key.Command, 'd'], ['Changes', 'Nothing changed yet', "isn't a git repository", 'Reading changes', 'Could not read git status'])
-  await check('⌘\\  split panel', [Key.Command, '\\'], ['LinksDiff'])
+  await checkSplit() // ⌘\ now opens a second WorkspacePanel, not the old Links/Diff tabs
 } catch (e) {
   console.log('RUN ERROR:', e.message)
 } finally {

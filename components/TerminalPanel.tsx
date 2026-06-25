@@ -247,6 +247,8 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
 
       {/* Terminal dock — full-height right column */}
       <div
+        data-testid="terminal-dock"
+        data-open={isOpen ? 'true' : 'false'}
         style={{
           height: '100%',
           width: isOpen ? `${termWidth}px` : 0,
@@ -274,6 +276,7 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
           }}
         >
           <span
+            title="Toggle terminal (⌘J)"
             style={{
               fontSize: '11px',
               fontWeight: 500,

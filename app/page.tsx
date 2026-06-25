@@ -1162,6 +1162,14 @@ export default function Home() {
         setActiveView((v) => (v === 'transcripts' ? 'workspace' : 'transcripts'))
         return
       }
+      if (mod && (e.key === 'j' || e.key === 'J')) {
+        // Toggle the terminal side-dock (TIN-1709 / VS Code's panel-toggle key).
+        // The dock otherwise only opens as a side effect of launching a session,
+        // leaving no way to reopen it after closing — this is its entry point.
+        e.preventDefault()
+        setTerminalOpen((o) => !o)
+        return
+      }
       if (mod && (e.key === 'g' || e.key === 'G')) {
         // Toggle the knowledge graph view (TIN-1639).
         e.preventDefault()
