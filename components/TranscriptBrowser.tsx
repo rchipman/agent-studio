@@ -34,6 +34,7 @@ import {
   estimateCost,
   formatCost,
   formatTokens,
+  sumUsage,
   totalTokens,
 } from '@/lib/sessionMetrics'
 import type { UsageRollup } from '@/lib/sessionMetrics'
@@ -985,6 +986,13 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
 
   // ── List header ────────────────────────────────────────────────────────────
 
+  // Cost/token roll-up across the currently-visible (filtered) sessions, so the
+  // header answers "what did this project / day / search cost?", not just a count.
+  const rollupUsage = useMemo(
+    () => sumUsage(visibleSessions.map(s => s.usage)),
+    [visibleSessions],
+  )
+
   const listHeader = (
     <div
       style={{
@@ -1002,10 +1010,17 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
       }}
     >
       {selectedDay ? (
-        <>
-          <span style={{ color: color.inkSoft, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-            {formatDate(selectedDay)} · {sessionsLabel(visibleSessions.length)}
-          </span>
+        <span style={{ color: color.inkSoft, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+          {formatDate(selectedDay)} · {sessionsLabel(visibleSessions.length)}
+        </span>
+      ) : (
+        <span style={{ flexShrink: 0 }}>All sessions · {visibleSessions.length}</span>
+      )}
+
+      {/* Right group: cost/token roll-up of the visible set, then the day-clear. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: space[2], flexShrink: 0 }}>
+        <SessionMetaLine usage={rollupUsage} compact />
+        {selectedDay && (
           <button
             onClick={clearDay}
             aria-label="Clear day filter"
@@ -1031,10 +1046,8 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               <line x1="12" y1="4" x2="4" y2="12" />
             </svg>
           </button>
-        </>
-      ) : (
-        <span>All sessions · {visibleSessions.length}</span>
-      )}
+        )}
+      </div>
     </div>
   )
 

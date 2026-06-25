@@ -105,3 +105,22 @@ export function totalTokens(usage: UsageRollup): number {
     usage.cacheReadInputTokens
   )
 }
+
+/** Sum a list of usage rollups into one — for a cost/token roll-up across the
+ *  visible sessions. Skips null/undefined entries. */
+export function sumUsage(usages: (UsageRollup | null | undefined)[]): UsageRollup {
+  const acc: UsageRollup = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  }
+  for (const u of usages) {
+    if (!u) continue
+    acc.inputTokens += u.inputTokens || 0
+    acc.outputTokens += u.outputTokens || 0
+    acc.cacheCreationInputTokens += u.cacheCreationInputTokens || 0
+    acc.cacheReadInputTokens += u.cacheReadInputTokens || 0
+  }
+  return acc
+}

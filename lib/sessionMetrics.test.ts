@@ -4,6 +4,7 @@ import {
   formatCost,
   estimateCost,
   totalTokens,
+  sumUsage,
   RATES_PER_M,
   type UsageRollup,
 } from './sessionMetrics'
@@ -111,5 +112,36 @@ describe('totalTokens', () => {
       cacheReadInputTokens: 300,
     }
     expect(totalTokens(usage)).toBe(2000)
+  })
+})
+
+// ── sumUsage ─────────────────────────────────────────────────────────────────
+
+describe('sumUsage', () => {
+  it('sums each field across rollups (fires)', () => {
+    const a: UsageRollup = { inputTokens: 100, outputTokens: 10, cacheCreationInputTokens: 5, cacheReadInputTokens: 1 }
+    const b: UsageRollup = { inputTokens: 200, outputTokens: 20, cacheCreationInputTokens: 7, cacheReadInputTokens: 3 }
+    expect(sumUsage([a, b])).toEqual({
+      inputTokens: 300,
+      outputTokens: 30,
+      cacheCreationInputTokens: 12,
+      cacheReadInputTokens: 4,
+    })
+  })
+
+  it('skips null/undefined entries and returns zeros for empty (edge)', () => {
+    const a: UsageRollup = { inputTokens: 50, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }
+    expect(sumUsage([a, null, undefined])).toEqual({
+      inputTokens: 50,
+      outputTokens: 5,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    })
+    expect(sumUsage([])).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    })
   })
 })
