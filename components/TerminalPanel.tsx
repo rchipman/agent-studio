@@ -1,9 +1,11 @@
 'use client'
 
 import '@xterm/xterm/css/xterm.css'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { color } from '@/lib/tokens'
+import PanelDivider from './PanelDivider'
 
 /** A fully-composed launch: the agent to spawn, where, and the briefing bundle.
  *  The launcher passes one of these to run(). */
@@ -28,6 +30,10 @@ interface TerminalPanelProps {
   runRef?: React.MutableRefObject<((req: RunRequest) => void) | null>
 }
 
+const TERM_WIDTH_KEY = 'agent-studio-terminal-width'
+const DEFAULT_WIDTH = 440
+const MIN_WIDTH = 320
+
 export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: TerminalPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -39,6 +45,62 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
   const sessionActiveRef = useRef(false)
   const inputBoundRef = useRef(false)
   const unlistenRef = useRef<UnlistenFn | null>(null)
+
+  // Terminal dock width — persisted to localStorage, draggable via PanelDivider.
+  const [termWidth, setTermWidthRaw] = useState<number>(() => {
+    if (typeof window === 'undefined') return DEFAULT_WIDTH
+    const stored = localStorage.getItem(TERM_WIDTH_KEY)
+    const parsed = stored ? Number(stored) : NaN
+    return Number.isFinite(parsed) && parsed >= MIN_WIDTH ? parsed : DEFAULT_WIDTH
+  })
+
+  const setTermWidth = useCallback((w: number) => {
+    const maxW = Math.round(window.innerWidth * 0.6)
+    const clamped = Math.min(maxW, Math.max(MIN_WIDTH, Math.round(w)))
+    setTermWidthRaw(clamped)
+    localStorage.setItem(TERM_WIDTH_KEY, String(clamped))
+  }, [])
+
+  // onResize is required by PanelDivider's interface but is superseded by
+  // onMouseDownOverride — the pixel handler below handles all actual resizing.
+  const handleDividerResize = useCallback(() => {}, [])
+
+  // Pixel-accurate left-edge drag. PanelDivider takes over visual/cursor duties;
+  // we attach our own global mousemove during drag to compute width from screen X.
+  const isDraggingRef = useRef(false)
+
+  const handleDividerMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      isDraggingRef.current = true
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+
+      const onMove = (ev: MouseEvent) => {
+        if (!isDraggingRef.current) return
+        // Terminal dock is the rightmost sibling. Its right edge = viewport right edge
+        // (minus any further siblings, but LinearPanel is a modal overlay).
+        // New dock width = viewport right - cursor X.
+        const newWidth = window.innerWidth - ev.clientX
+        setTermWidth(newWidth)
+        // Refit after each drag step
+        requestAnimationFrame(() => fitAddonRef.current?.fit())
+      }
+
+      const onUp = () => {
+        isDraggingRef.current = false
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        fitAddonRef.current?.fit()
+      }
+
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [setTermWidth]
+  )
 
   // Initialize xterm once container is available and panel first opens
   useEffect(() => {
@@ -106,6 +168,25 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
     }
   }, [isOpen])
 
+  // Refit whenever the dock width changes (drag resize)
+  useEffect(() => {
+    if (isOpen && fitAddonRef.current) {
+      fitAddonRef.current.fit()
+    }
+  }, [isOpen, termWidth])
+
+  // ResizeObserver on the xterm container — refits whenever the container size
+  // changes for any reason (window resize, dock drag, etc.)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      fitAddonRef.current?.fit()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   // Legacy direct-claude entry (kept for compatibility; the launcher path is
   // runRef). Spawns via the Rust command like everything else.
   useEffect(() => {
@@ -153,19 +234,27 @@ export default function TerminalPanel({ isOpen, onClose, spawnRef, runRef }: Ter
 
   return (
     <>
+      {/* Left-edge drag handle — rendered outside the dock so it overlaps the
+          content column by a few pixels and is easy to grab. Reuses PanelDivider
+          for visual/cursor/aria consistency; actual resize is pixel-based. */}
+      {isOpen && (
+        <PanelDivider
+          onResize={handleDividerResize}
+          onSnap={() => setTermWidth(DEFAULT_WIDTH)}
+          onMouseDownOverride={handleDividerMouseDown}
+        />
+      )}
+
+      {/* Terminal dock — full-height right column */}
       <div
         style={{
-          height: isOpen ? '280px' : '0',
-          // Mounted as a row sibling of the rail + main column, so a closed panel
-          // must collapse its WIDTH too — otherwise its content min-width (the
-          // "Terminal" header) reserves a ~104px empty band on the right. When open
-          // it docks at its natural width; when closed it takes no space.
-          width: isOpen ? undefined : 0,
+          height: '100%',
+          width: isOpen ? `${termWidth}px` : 0,
           minWidth: 0,
           flexShrink: 0,
           overflow: 'hidden',
-          transition: 'height 0.2s ease',
-          borderTop: isOpen ? '1px solid rgba(0,0,0,0.18)' : 'none',
+          transition: 'width 0.18s ease',
+          borderLeft: isOpen ? `1px solid ${color.hairSoft}` : 'none',
           background: '#1a1917',
           display: 'flex',
           flexDirection: 'column',
