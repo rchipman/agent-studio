@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { driftBadgeLabel, reconcileTooltip } from './NavRail'
+import { driftBadgeLabel, reconcileTooltip, suggestionsTooltip } from './NavRail'
 
 // Pure helpers behind the calm drift badge on the Check rail item (TIN-1761).
 
@@ -28,5 +28,18 @@ describe('reconcileTooltip', () => {
 
   it('uses the plural for more than one', () => {
     expect(reconcileTooltip(3)).toBe('Consistency · 3 to reconcile')
+  })
+})
+
+// Pure helper behind the calm suggestions badge on the Fields rail item (TIN-1762).
+
+describe('suggestionsTooltip', () => {
+  it('uses singular "1 ready" for one', () => {
+    expect(suggestionsTooltip(1)).toBe('Fields · 1 ready')
+  })
+
+  it('uses the count for more than one', () => {
+    expect(suggestionsTooltip(3)).toBe('Fields · 3 ready')
+    expect(suggestionsTooltip(10)).toBe('Fields · 10 ready')
   })
 })
