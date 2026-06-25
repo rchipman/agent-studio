@@ -14,6 +14,7 @@ mod local_embed;
 mod maintenance;
 mod memory_audit;
 mod memory_reads;
+mod outcomes;
 mod reason;
 mod salience;
 mod search;
@@ -185,6 +186,7 @@ pub fn run() {
       transcript::list_transcript_projects,
       transcript::list_sessions,
       transcript::get_session,
+      transcript::session_outcomes,
       transcript::search_transcripts,
       transcript::sessions_by_day,
       transcript::refresh_transcripts,

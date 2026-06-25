@@ -1428,6 +1428,27 @@ pub fn get_session<R: tauri::Runtime>(
     Err(format!("session file not found: {}", payload.path))
 }
 
+/// Extract a session's outcomes (PRs, tickets, memories, files, images,
+/// commits) for the Session detail "Outcomes" ribbon (TIN-1771). Reads the live
+/// or archived transcript and scans it; see `outcomes::extract_outcomes`.
+#[tauri::command]
+pub fn session_outcomes<R: tauri::Runtime>(
+    payload: GetSessionInput,
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<crate::outcomes::Outcome>, String> {
+    let path = PathBuf::from(&payload.path);
+    let transcripts_root = transcripts_root_from_settings(&app);
+    let archive_root = crate::archive::archive_root(&app)?;
+    let ctx = ReadCtx {
+        transcripts_root: &transcripts_root,
+        archive_root: &archive_root,
+    };
+    let raw = read_transcript_text(&path, Some(ctx))
+        .ok_or_else(|| format!("session file not found: {}", payload.path))?;
+    let memory_root = crate::settings::resolved_memory_root(&app);
+    Ok(crate::outcomes::extract_outcomes(&raw, &memory_root))
+}
+
 #[tauri::command]
 pub fn search_transcripts(
     payload: SearchTranscriptsInput,

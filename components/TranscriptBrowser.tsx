@@ -68,6 +68,18 @@ interface Turn {
   hasToolUse: boolean
   toolSummary: string
   images: { mediaType: string; data: string }[]
+  // ── Threading (TIN-1721) — present on every turn; drives spine vs Work split ──
+  isSidechain: boolean
+  agentId: string | null
+  agentLabel: string | null
+  spawnedBy: string | null
+}
+
+/** A produced artifact (TIN-1771). kind: pr | ticket | memory | file | image | commit. */
+interface Outcome {
+  kind: string
+  label: string
+  address: string
 }
 
 interface TranscriptSearchResult {
@@ -222,6 +234,192 @@ function ProjectBadge({ label }: { label: string }) {
     >
       {label}
     </span>
+  )
+}
+
+// ── Session detail: segments, outcomes ribbon, work list (TIN-1771) ───────────
+
+/** Per-kind display metadata for the Outcomes ribbon. Calm tints only. */
+const OUTCOME_META: Record<string, { singular: string; plural: string; bg: string; fg: string }> = {
+  pr: { singular: 'PR', plural: 'PRs', bg: color.forestTint, fg: color.forest },
+  ticket: { singular: 'ticket', plural: 'tickets', bg: color.forestTint, fg: color.forest },
+  memory: { singular: 'memory', plural: 'memories', bg: color.tanTint, fg: color.tan },
+  file: { singular: 'file', plural: 'files', bg: color.neutralTint, fg: color.inkSoft },
+  image: { singular: 'image', plural: 'images', bg: color.neutralTint, fg: color.inkSoft },
+  commit: { singular: 'commit', plural: 'commits', bg: color.neutralTint, fg: color.inkSoft },
+}
+const OUTCOME_ORDER = ['pr', 'ticket', 'memory', 'file', 'image', 'commit']
+
+/** Two views of one session: the transcript spine, or the subagent work. */
+function SegmentBar({
+  view, workCount, onSelect,
+}: {
+  view: 'transcript' | 'work'
+  workCount: number
+  onSelect: (v: 'transcript' | 'work') => void
+}) {
+  const seg = (v: 'transcript' | 'work', label: string) => {
+    const active = view === v
+    return (
+      <button
+        onClick={() => onSelect(v)}
+        style={{
+          background: active ? color.bgApp : 'transparent',
+          color: active ? color.ink : color.inkSoft,
+          border: 'none',
+          cursor: 'pointer',
+          ...typeToken.meta,
+          fontWeight: active ? 600 : 400,
+          padding: `${space[1]}px ${space[3]}px`,
+          borderRadius: radius.sm,
+        }}
+      >
+        {label}
+      </button>
+    )
+  }
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        gap: 2,
+        padding: 2,
+        background: color.bgFieldStrong,
+        borderRadius: radius.md,
+        marginBottom: space[5],
+      }}
+    >
+      {seg('transcript', 'Transcript')}
+      {seg('work', `Work (${workCount})`)}
+    </div>
+  )
+}
+
+/** The masthead of the spine: grouped outcome chips that expand to a list and
+ *  index back into the transcript. Never shown when there are no outcomes. */
+function OutcomesRibbon({
+  outcomes, openGroup, onToggleGroup, onActivate, onOpenExternal,
+}: {
+  outcomes: Outcome[]
+  openGroup: string | null
+  onToggleGroup: (kind: string) => void
+  onActivate: (o: Outcome) => void
+  onOpenExternal: (o: Outcome) => void
+}) {
+  const groups = OUTCOME_ORDER
+    .map(kind => ({ kind, items: outcomes.filter(o => o.kind === kind) }))
+    .filter(g => g.items.length > 0)
+  const openItems = groups.find(g => g.kind === openGroup)?.items ?? []
+
+  return (
+    <div style={{ marginBottom: space[5], paddingBottom: space[4], borderBottom: `1px solid ${color.hairSoft}` }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
+        {groups.map(g => {
+          const meta = OUTCOME_META[g.kind]
+          const n = g.items.length
+          const open = openGroup === g.kind
+          return (
+            <button
+              key={g.kind}
+              onClick={() => onToggleGroup(g.kind)}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: space[1],
+                background: meta.bg,
+                color: meta.fg,
+                border: 'none',
+                cursor: 'pointer',
+                borderRadius: radius.chip,
+                padding: `2px ${space[2]}px`,
+                ...typeToken.micro,
+              }}
+            >
+              <span>{n} {n === 1 ? meta.singular : meta.plural}</span>
+              <span style={{ opacity: 0.55, fontSize: 8 }}>{open ? '▾' : '▸'}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {openItems.length > 0 && (
+        <div style={{ marginTop: space[3], display: 'flex', flexDirection: 'column', gap: space[1] }}>
+          {openItems.map((o, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: space[2] }}>
+              <button
+                onClick={() => onActivate(o)}
+                title="Jump to where this happened"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  ...typeToken.meta,
+                  color: color.ink,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  flex: 1,
+                  minWidth: 0,
+                }}
+              >
+                {o.label}
+              </button>
+              {o.address.startsWith('http') && (
+                <button
+                  onClick={() => onOpenExternal(o)}
+                  aria-label="Open in browser"
+                  title="Open in browser"
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: color.inkFaint, fontSize: 12, flexShrink: 0 }}
+                >
+                  ↗
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+interface WorkThreadInfo {
+  agentId: string
+  label: string
+  turns: Turn[]
+  spawnedBy: string | null
+}
+
+/** The Work segment's thread list — one row per subagent conversation. */
+function WorkList({ threads, onOpen }: { threads: WorkThreadInfo[]; onOpen: (agentId: string) => void }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
+      {threads.map(t => (
+        <button
+          key={t.agentId}
+          onClick={() => onOpen(t.agentId)}
+          style={{
+            textAlign: 'left',
+            background: color.bgRaised,
+            border: `1px solid ${color.hairSoft}`,
+            borderRadius: radius.card,
+            padding: `${space[3]}px ${space[4]}px`,
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}
+        >
+          <span style={{ ...typeToken.body, color: color.ink, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {t.label}
+          </span>
+          <span style={{ ...typeToken.meta, color: color.inkFaint }}>
+            {t.turns.length} {t.turns.length === 1 ? 'turn' : 'turns'}
+          </span>
+        </button>
+      ))}
+    </div>
   )
 }
 
@@ -775,6 +973,14 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
   const [turns, setTurns] = useState<Turn[]>([])
   const [turnsLoading, setTurnsLoading] = useState(false)
 
+  // Session detail (TIN-1771): outcomes ribbon + the Transcript/Work segments.
+  const [outcomes, setOutcomes] = useState<Outcome[]>([])
+  const [readerView, setReaderView] = useState<'transcript' | 'work'>('transcript')
+  /** The open Work thread (subagent agentId), or null = the thread list. */
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null)
+  /** Which outcome group is expanded in the ribbon (kind), or null = all collapsed. */
+  const [openOutcomeGroup, setOpenOutcomeGroup] = useState<string | null>(null)
+
   // FTS search composes as a client-side filter over the in-memory list.
   const [searchQuery, setSearchQuery] = useState('')
   const [searchHits, setSearchHits] = useState<Map<string, string>>(new Map()) // path → snippet
@@ -862,22 +1068,81 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
     setTurnsLoading(true)
     setTurns([])
     setHighlightTurnIdx(null)
-    invoke<Turn[]>('get_session', { payload: { path: selectedSession.path } })
+    // Reset the detail view to the spine for each newly opened session.
+    setReaderView('transcript')
+    setActiveAgentId(null)
+    setOpenOutcomeGroup(null)
+    setOutcomes([])
+    const path = selectedSession.path
+    invoke<Turn[]>('get_session', { payload: { path } })
       .then(t => {
         setTurns(t)
         setTurnsLoading(false)
       })
       .catch(() => setTurnsLoading(false))
+    // Outcomes load independently (and never block the transcript).
+    invoke<Outcome[]>('session_outcomes', { payload: { path } })
+      .then(o => setOutcomes(o))
+      .catch(() => setOutcomes([]))
   }, [selectedSession])
+
+  // The spine is the main thread; subagent (sidechain) turns become Work threads.
+  const spineTurns = useMemo(() => turns.filter(t => !t.isSidechain), [turns])
+
+  // Group sidechain turns into Work threads by subagent id, preserving order.
+  const workThreads = useMemo(() => {
+    const byId = new Map<string, { agentId: string; label: string; turns: Turn[]; spawnedBy: string | null }>()
+    for (const t of turns) {
+      if (!t.isSidechain || !t.agentId) continue
+      let th = byId.get(t.agentId)
+      if (!th) {
+        th = { agentId: t.agentId, label: t.agentLabel || 'agent', turns: [], spawnedBy: t.spawnedBy ?? null }
+        byId.set(t.agentId, th)
+      }
+      th.turns.push(t)
+    }
+    return Array.from(byId.values())
+  }, [turns])
+
+  // Jump to the spine turn that produced an outcome (or a search hit): switch to
+  // the transcript, find the first matching turn, highlight + scroll it.
+  const jumpToContent = useCallback((needle: string) => {
+    const n = needle.toLowerCase()
+    const idx = spineTurns.findIndex(t => t.content.toLowerCase().includes(n))
+    if (idx < 0) return
+    setReaderView('transcript')
+    setActiveAgentId(null)
+    setHighlightTurnIdx(idx)
+  }, [spineTurns])
+
+  // Clicking an outcome chip jumps to where it happened in the spine — outcomes
+  // are an index into the transcript, not a parallel list (TIN-1771). Images
+  // jump to the first turn that carries one.
+  const activateOutcome = useCallback((o: Outcome) => {
+    if (o.kind === 'image') {
+      const idx = spineTurns.findIndex(t => t.images && t.images.length > 0)
+      setReaderView('transcript')
+      setActiveAgentId(null)
+      setHighlightTurnIdx(idx >= 0 ? idx : null)
+      return
+    }
+    jumpToContent(o.kind === 'pr' ? o.address : o.label)
+  }, [spineTurns, jumpToContent])
+
+  // The secondary affordance: open an addressable artifact (a PR) in the browser.
+  const openOutcomeExternal = useCallback((o: Outcome) => {
+    if (!o.address.startsWith('http')) return
+    import('@tauri-apps/plugin-opener').then(m => m.openUrl(o.address)).catch(() => {})
+  }, [])
 
   // After a search-hit session loads, scroll to + wash the first matching turn.
   useEffect(() => {
-    if (!pendingSearchHit || turnsLoading || turns.length === 0) return
+    if (!pendingSearchHit || turnsLoading || spineTurns.length === 0) return
     const needle = pendingSearchHit.toLowerCase()
-    const idx = turns.findIndex(t => t.content.toLowerCase().includes(needle))
+    const idx = spineTurns.findIndex(t => t.content.toLowerCase().includes(needle))
     setHighlightTurnIdx(idx >= 0 ? idx : null)
     setPendingSearchHit(null)
-  }, [pendingSearchHit, turnsLoading, turns])
+  }, [pendingSearchHit, turnsLoading, spineTurns])
 
   // ── FTS search (debounced 300ms; composes as a filter) ─────────────────────
 
@@ -1090,6 +1355,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
       </div>
     )
   } else {
+    const activeThread = workThreads.find(t => t.agentId === activeAgentId) ?? null
     readerBody = (
       <div style={{ maxWidth: 720, margin: '0 auto' }}>
         {/* Session detail header — date + quiet metrics (TIN-1725) */}
@@ -1100,7 +1366,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
             justifyContent: 'space-between',
             gap: space[4],
             paddingBottom: space[5],
-            marginBottom: space[5],
+            marginBottom: space[4],
             borderBottom: `1px solid ${color.hairSoft}`,
           }}
         >
@@ -1114,14 +1380,62 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
             <SessionMetaLine usage={selectedSession.usage} />
           )}
         </div>
-        {turns.map((turn, i) => (
-          <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
-            <ConversationTurn
-              turn={turn}
-              highlight={highlightTurnIdx === i}
-            />
+
+        {/* Segmented control — only when there is Work to switch to (TIN-1771). */}
+        {workThreads.length > 0 && (
+          <SegmentBar
+            view={readerView}
+            workCount={workThreads.length}
+            onSelect={(v) => {
+              setReaderView(v)
+              if (v === 'transcript') setActiveAgentId(null)
+            }}
+          />
+        )}
+
+        {readerView === 'transcript' ? (
+          <>
+            {/* Outcomes ribbon — the masthead of the spine; absent when empty. */}
+            {outcomes.length > 0 && (
+              <OutcomesRibbon
+                outcomes={outcomes}
+                openGroup={openOutcomeGroup}
+                onToggleGroup={(k) => setOpenOutcomeGroup(g => (g === k ? null : k))}
+                onActivate={activateOutcome}
+                onOpenExternal={openOutcomeExternal}
+              />
+            )}
+            {/* The spine — main-thread turns only. */}
+            {spineTurns.map((turn, i) => (
+              <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
+                <ConversationTurn turn={turn} highlight={highlightTurnIdx === i} />
+              </div>
+            ))}
+          </>
+        ) : activeThread == null ? (
+          <WorkList threads={workThreads} onOpen={setActiveAgentId} />
+        ) : (
+          <div>
+            <button
+              onClick={() => setActiveAgentId(null)}
+              style={{
+                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                ...typeToken.meta, color: color.forest, marginBottom: space[4],
+                display: 'flex', alignItems: 'center', gap: space[1],
+              }}
+            >
+              ← All work
+            </button>
+            <div style={{ ...typeToken.label, color: color.inkSoft, marginBottom: space[4] }}>
+              {activeThread.label}
+            </div>
+            {activeThread.turns.map((turn, i) => (
+              <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
+                <ConversationTurn turn={turn} highlight={false} />
+              </div>
+            ))}
           </div>
-        ))}
+        )}
       </div>
     )
   }
