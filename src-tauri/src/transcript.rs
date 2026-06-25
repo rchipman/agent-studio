@@ -942,115 +942,120 @@ fn cwd_from_session(path: &Path) -> String {
 fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()> {
     ensure_schema(conn)?;
 
-    let tx = conn.unchecked_transaction()?;
-    {
-        // Fetch mtime AND turn_count (NULL = metrics not yet cached).
-        let mut check_row = tx.prepare(
-            "SELECT mtime, turn_count FROM transcript_sessions WHERE path = ?1",
-        )?;
-        let mut upsert_session = tx.prepare(
-            "INSERT INTO transcript_sessions (
-                path, project, date_iso, mtime, first_msg, cwd,
-                turn_count, subagent_count,
-                input_tokens, output_tokens,
-                cache_creation_input_tokens, cache_read_input_tokens,
-                models
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(path) DO UPDATE SET
-               project=excluded.project,
-               date_iso=excluded.date_iso,
-               mtime=excluded.mtime,
-               first_msg=excluded.first_msg,
-               cwd=excluded.cwd,
-               turn_count=excluded.turn_count,
-               subagent_count=excluded.subagent_count,
-               input_tokens=excluded.input_tokens,
-               output_tokens=excluded.output_tokens,
-               cache_creation_input_tokens=excluded.cache_creation_input_tokens,
-               cache_read_input_tokens=excluded.cache_read_input_tokens,
-               models=excluded.models",
-        )?;
-        let mut delete_fts = tx.prepare("DELETE FROM transcript_fts WHERE path_ref = ?1")?;
-        let mut insert_fts =
-            tx.prepare("INSERT INTO transcript_fts (path_ref, project, body) VALUES (?1, ?2, ?3)")?;
+    // Statements are prepared once on the connection; each changed file is parsed
+    // with NO write transaction open, then written in its own tiny per-file
+    // transaction. This is the key contention fix (TIN-1773): an active session
+    // can be tens of MB, and parsing it inside the write transaction held the
+    // SQLite write lock for seconds, so the maintenance worker's writes timed out
+    // ("database is locked"). Parsing off-lock + committing per file keeps the
+    // write lock held only for the fast row writes (milliseconds).
+    let mut check_row =
+        conn.prepare("SELECT mtime, turn_count FROM transcript_sessions WHERE path = ?1")?;
+    let mut upsert_session = conn.prepare(
+        "INSERT INTO transcript_sessions (
+            path, project, date_iso, mtime, first_msg, cwd,
+            turn_count, subagent_count,
+            input_tokens, output_tokens,
+            cache_creation_input_tokens, cache_read_input_tokens,
+            models
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(path) DO UPDATE SET
+           project=excluded.project,
+           date_iso=excluded.date_iso,
+           mtime=excluded.mtime,
+           first_msg=excluded.first_msg,
+           cwd=excluded.cwd,
+           turn_count=excluded.turn_count,
+           subagent_count=excluded.subagent_count,
+           input_tokens=excluded.input_tokens,
+           output_tokens=excluded.output_tokens,
+           cache_creation_input_tokens=excluded.cache_creation_input_tokens,
+           cache_read_input_tokens=excluded.cache_read_input_tokens,
+           models=excluded.models",
+    )?;
+    let mut delete_fts = conn.prepare("DELETE FROM transcript_fts WHERE path_ref = ?1")?;
+    let mut insert_fts =
+        conn.prepare("INSERT INTO transcript_fts (path_ref, project, body) VALUES (?1, ?2, ?3)")?;
 
-        for (project, jsonl_path) in collect_jsonl_files(root) {
-            let current_mtime = mtime_secs(&jsonl_path);
-            let path_str = jsonl_path.to_string_lossy().to_string();
+    for (project, jsonl_path) in collect_jsonl_files(root) {
+        let current_mtime = mtime_secs(&jsonl_path);
+        let path_str = jsonl_path.to_string_lossy().to_string();
 
-            // (stored_mtime, metrics_cached)
-            let stored: Option<(u64, bool)> = check_row
-                .query_row(params![path_str], |r| {
-                    let mtime = r.get::<_, i64>(0).map(|v| v as u64)?;
-                    let has_metrics = r.get::<_, Option<i64>>(1)?.is_some();
-                    Ok((mtime, has_metrics))
-                })
-                .ok();
+        // (stored_mtime, metrics_cached) — a plain read; no write lock held.
+        let stored: Option<(u64, bool)> = check_row
+            .query_row(params![path_str], |r| {
+                let mtime = r.get::<_, i64>(0).map(|v| v as u64)?;
+                let has_metrics = r.get::<_, Option<i64>>(1)?.is_some();
+                Ok((mtime, has_metrics))
+            })
+            .ok();
 
-            let mtime_unchanged = stored.map(|(m, _)| m) == Some(current_mtime);
-            let metrics_cached = stored.map(|(_, h)| h).unwrap_or(false);
+        let mtime_unchanged = stored.map(|(m, _)| m) == Some(current_mtime);
+        let metrics_cached = stored.map(|(_, h)| h).unwrap_or(false);
 
-            if mtime_unchanged && metrics_cached {
-                // Row is current and metrics are populated — skip entirely.
-                continue;
-            }
-
-            let date = date_from_path_or_mtime(&jsonl_path);
-            let turns = parse_session_file(&jsonl_path);
-
-            let first_msg = turns
-                .iter()
-                .find(|t| t.role == "human")
-                .map(|t| t.content.trim().chars().take(200).collect::<String>())
-                .unwrap_or_default();
-
-            // FTS body: main thread text PLUS all subagent text, so a hit inside
-            // a subagent matches — but the row's path_ref stays the parent.
-            let mut full_text: String = turns
-                .iter()
-                .map(|t| t.content.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            for agent_file in collect_subagent_files(&jsonl_path) {
-                let sub = parse_session_file(&agent_file);
-                if !sub.is_empty() {
-                    full_text.push(' ');
-                    full_text.push_str(
-                        &sub.iter()
-                            .map(|t| t.content.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    );
-                }
-            }
-
-            // Compute metrics when mtime changed or they were never stored.
-            let (subagent_count, turn_count, usage, models, cwd) =
-                compute_session_metrics(&jsonl_path);
-            let models_json =
-                serde_json::to_string(&models).unwrap_or_else(|_| "[]".to_string());
-
-            delete_fts.execute(params![path_str])?;
-            upsert_session.execute(params![
-                path_str,
-                project,
-                date,
-                current_mtime as i64,
-                first_msg,
-                cwd,
-                turn_count as i64,
-                subagent_count as i64,
-                usage.input_tokens as i64,
-                usage.output_tokens as i64,
-                usage.cache_creation_input_tokens as i64,
-                usage.cache_read_input_tokens as i64,
-                models_json,
-            ])?;
-            insert_fts.execute(params![path_str, project, full_text])?;
+        if mtime_unchanged && metrics_cached {
+            // Row is current and metrics are populated — skip entirely.
+            continue;
         }
+
+        // ── Parse OFF the write lock (no transaction open here). ──
+        let date = date_from_path_or_mtime(&jsonl_path);
+        let turns = parse_session_file(&jsonl_path);
+
+        let first_msg = turns
+            .iter()
+            .find(|t| t.role == "human")
+            .map(|t| t.content.trim().chars().take(200).collect::<String>())
+            .unwrap_or_default();
+
+        // FTS body: main thread text PLUS all subagent text, so a hit inside
+        // a subagent matches — but the row's path_ref stays the parent.
+        let mut full_text: String = turns
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for agent_file in collect_subagent_files(&jsonl_path) {
+            let sub = parse_session_file(&agent_file);
+            if !sub.is_empty() {
+                full_text.push(' ');
+                full_text.push_str(
+                    &sub.iter()
+                        .map(|t| t.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+        }
+
+        // Compute metrics when mtime changed or they were never stored.
+        let (subagent_count, turn_count, usage, models, cwd) =
+            compute_session_metrics(&jsonl_path);
+        let models_json = serde_json::to_string(&models).unwrap_or_else(|_| "[]".to_string());
+
+        // ── Write this file in its own short transaction (lock held briefly). ──
+        let tx = conn.unchecked_transaction()?;
+        delete_fts.execute(params![path_str])?;
+        upsert_session.execute(params![
+            path_str,
+            project,
+            date,
+            current_mtime as i64,
+            first_msg,
+            cwd,
+            turn_count as i64,
+            subagent_count as i64,
+            usage.input_tokens as i64,
+            usage.output_tokens as i64,
+            usage.cache_creation_input_tokens as i64,
+            usage.cache_read_input_tokens as i64,
+            models_json,
+        ])?;
+        insert_fts.execute(params![path_str, project, full_text])?;
+        tx.commit()?;
     }
-    tx.commit()
+    Ok(())
 }
 
 /// TIN-1759: run the archive pass under the indexer's lock when archiving is
