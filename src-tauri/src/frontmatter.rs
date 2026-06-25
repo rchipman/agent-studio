@@ -1069,8 +1069,11 @@ pub async fn suggest_all(
 
     for (idx, (path, content)) in work.into_iter().enumerate() {
         let res = suggest_one(&path, &content, &today, &root, &known, model_up).await;
-        out.push(res);
+        // Stream each suggestion the moment it is ready, so rows light up live
+        // instead of the user waiting for the whole pass (TIN-1758 follow-up).
+        let _ = app.emit("suggest://result", &res);
         let _ = app.emit("audit://progress", AuditProgress { done: idx + 1, total });
+        out.push(res);
     }
 
     Ok(out)

@@ -13,6 +13,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 // ── Types (mirror frontmatter.rs) ──────────────────────────────────────────────
 
@@ -156,6 +157,16 @@ export async function suggestWithConfidence(
  */
 export async function suggestAll(): Promise<ConfidenceResult[]> {
   return invoke<ConfidenceResult[]>('suggest_all')
+}
+
+/**
+ * Subscribe to each suggestion as `suggest_all` produces it (one per file),
+ * so rows can light up live instead of waiting for the whole pass. Returns an
+ * unlisten fn. The final {@link suggestAll} resolution still returns the full
+ * set as a backstop.
+ */
+export async function onSuggestResult(cb: (r: ConfidenceResult) => void): Promise<UnlistenFn> {
+  return listen<ConfidenceResult>('suggest://result', (e) => cb(e.payload))
 }
 
 /** One file's apply payload: the reviewed suggestion + the recording actor. */
