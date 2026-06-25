@@ -182,22 +182,29 @@ fn is_url_segment(s: &str) -> bool {
 fn scan_tickets(text: &str) -> Vec<Outcome> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let bytes = text.as_bytes();
+    // Work entirely on bytes. `TIN-` and the digits are ASCII, so byte-slice
+    // comparison is correct AND safe — slicing a `&str` by arbitrary byte indices
+    // panics when an index lands inside a multi-byte char (e.g. an em dash).
+    let b = text.as_bytes();
+    let n = b.len();
     let mut i = 0;
-    while i + 4 <= bytes.len() {
-        if &text[i..i + 4] == "TIN-" {
-            // Must be a word boundary before TIN- (not e.g. "XTIN-").
-            let prev_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-            let digits: String = text[i + 4..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if prev_ok && !digits.is_empty() {
+    while i + 4 <= n {
+        if &b[i..i + 4] == b"TIN-" {
+            // Must be a word boundary before TIN- (not e.g. "XTIN-"). A non-ASCII
+            // lead byte (a multi-byte char) is a boundary too.
+            let prev_ok = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+            let mut j = i + 4;
+            while j < n && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if prev_ok && j > i + 4 {
+                // b[i+4..j] is all ASCII digits → valid UTF-8.
+                let digits = std::str::from_utf8(&b[i + 4..j]).unwrap_or("");
                 let id = format!("TIN-{digits}");
                 if seen.insert(id.clone()) {
                     out.push(Outcome::new("ticket", id.clone(), id));
                 }
-                i += 4 + digits.len();
+                i = j;
                 continue;
             }
         }
@@ -278,6 +285,24 @@ mod tests {
         // "XTIN-9" must not match; "(TIN-9)" must.
         assert!(scan_tickets("XTIN-9").is_empty());
         assert_eq!(scan_tickets("(TIN-9)")[0].label, "TIN-9");
+    }
+
+    #[test]
+    fn scan_tickets_handles_multibyte_chars_without_panicking() {
+        // Regression: byte-index slicing used to panic inside a multi-byte char
+        // like an em dash. This must extract the ticket and never panic.
+        let text = "Kickoff — TIN-1714 then some — more — dashes and TIN-1715 done";
+        let t = scan_tickets(text);
+        let ids: Vec<&str> = t.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(ids, vec!["TIN-1714", "TIN-1715"]);
+    }
+
+    #[test]
+    fn extract_outcomes_survives_command_message_with_em_dash() {
+        // The exact crashing shape: a /poppy command line with an em dash.
+        let raw = r#"{"type":"user","message":{"role":"user","content":"<command-name>/poppy</command-name>\n<command-args># Kickoff — TIN-1714 (the thing) — go</command-args>"}}"#;
+        let out = extract_outcomes(raw, &mem_root());
+        assert!(out.iter().any(|o| o.kind == "ticket" && o.label == "TIN-1714"));
     }
 
     #[test]
