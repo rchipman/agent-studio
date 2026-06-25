@@ -25,6 +25,21 @@ use search::Db;
 use settings::MemoryRoot;
 use tauri::Manager;
 
+/// Cancellation flags for long-running background passes.
+pub struct TaskControl {
+    pub audit_cancel: std::sync::atomic::AtomicBool,
+    pub suggest_cancel: std::sync::atomic::AtomicBool,
+}
+
+impl Default for TaskControl {
+    fn default() -> Self {
+        Self {
+            audit_cancel: std::sync::atomic::AtomicBool::new(false),
+            suggest_cancel: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   // Headless write path (TIN-1731): if invoked as `add-memory ...` / `supersede
@@ -84,6 +99,7 @@ pub fn run() {
       app.manage(Db(Mutex::new(conn)));
       app.manage(MemoryRoot(Mutex::new(root)));
       app.manage(terminal::TerminalState::default());
+      app.manage(TaskControl::default());
 
       Ok(())
     })
@@ -116,6 +132,8 @@ pub fn run() {
       frontmatter::apply_suggestion,
       frontmatter::apply_suggestions_bulk,
       audit::consistency_audit,
+      audit::cancel_audit,
+      frontmatter::cancel_suggest,
       continuity::score_memory,
       memory_audit::record_memory_change,
       memory_audit::get_memory_history,

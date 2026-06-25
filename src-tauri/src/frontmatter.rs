@@ -1025,8 +1025,13 @@ const DEFAULT_PROJECTS: &[&str] =
 pub async fn suggest_all(
     app: tauri::AppHandle,
     memory: State<'_, crate::settings::MemoryRoot>,
+    control: tauri::State<'_, crate::TaskControl>,
+    #[allow(clippy::default_trait_access)]
+    skip: Option<Vec<String>>,
 ) -> Result<Vec<ConfidenceResult>, String> {
     use tauri::Emitter;
+    control.suggest_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    let skip_set: std::collections::HashSet<String> = skip.unwrap_or_default().into_iter().collect();
 
     let root = memory
         .0
@@ -1045,6 +1050,9 @@ pub async fn suggest_all(
             work.push((path.to_string_lossy().to_string(), raw));
         }
     }
+
+    // Exclude paths the caller already has results for (resume-via-skip).
+    let work: Vec<(String, String)> = work.into_iter().filter(|(p, _)| !skip_set.contains(p)).collect();
 
     let known: Vec<String> = {
         // Reuse known projects from defaults + any folder names actually present.
@@ -1068,6 +1076,9 @@ pub async fn suggest_all(
     let mut out = Vec::with_capacity(total);
 
     for (idx, (path, content)) in work.into_iter().enumerate() {
+        if control.suggest_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let res = suggest_one(&path, &content, &today, &root, &known, model_up).await;
         // Stream each suggestion the moment it is ready, so rows light up live
         // instead of the user waiting for the whole pass (TIN-1758 follow-up).
@@ -1077,6 +1088,12 @@ pub async fn suggest_all(
     }
 
     Ok(out)
+}
+
+/// Cancel an in-progress suggest_all pass. Safe to call at any time.
+#[tauri::command]
+pub fn cancel_suggest(control: tauri::State<'_, crate::TaskControl>) {
+    control.suggest_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Progress payload (mirrors `audit.rs`'s, kept local so the two passes stay
@@ -1179,6 +1196,31 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// skip filtering excludes the listed paths from the work list.
+    #[test]
+    fn skip_set_excludes_paths() {
+        let paths = vec![
+            ("/m/a.md".to_string(), "body a".to_string()),
+            ("/m/b.md".to_string(), "body b".to_string()),
+            ("/m/c.md".to_string(), "body c".to_string()),
+        ];
+        let skip: std::collections::HashSet<String> = vec!["/m/b.md".to_string()].into_iter().collect();
+        let filtered: Vec<_> = paths.into_iter().filter(|(p, _)| !skip.contains(p)).collect();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|(p, _)| p != "/m/b.md"));
+    }
+
+    /// suggest_cancel flag can be set and cleared.
+    #[test]
+    fn suggest_cancel_flag_round_trips() {
+        let ctrl = crate::TaskControl::default();
+        assert!(!ctrl.suggest_cancel.load(std::sync::atomic::Ordering::Relaxed));
+        ctrl.suggest_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(ctrl.suggest_cancel.load(std::sync::atomic::Ordering::Relaxed));
+        ctrl.suggest_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!ctrl.suggest_cancel.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     // ── extract_title (resolver) ─────────────────────────────────────────────

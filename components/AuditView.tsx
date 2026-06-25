@@ -25,6 +25,7 @@ import {
   auditFrontmatter,
   updateFrontmatter,
   suggestAll,
+  cancelSuggest,
   onSuggestResult,
   applySuggestion,
   applySuggestionsBulk,
@@ -315,7 +316,9 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
       if (r.degraded) setDegraded(true)
     })
     try {
-      const results = await suggestAll()
+      // Pass already-computed paths as skip so a stopped pass resumes from where it left off.
+      const alreadyDone = Object.keys(suggestions)
+      const results = await suggestAll(alreadyDone)
       setSuggestions((prev) => {
         const map = { ...prev }
         for (const r of results) map[r.path] = r
@@ -330,7 +333,7 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
       setRunning(false)
       setProgress(null)
     }
-  }, [])
+  }, [suggestions])
 
   // ── Apply one (the per-row primary) ──
   const applyOne = useCallback(
@@ -461,9 +464,15 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
               <TypeChip label="Need a little" active={filter === 'partial'} onClick={() => setFilter('partial')} />
               <TypeChip label="Not yet" active={filter === 'missing'} onClick={() => setFilter('missing')} />
               <div style={{ flex: 1 }} />
-              <Button variant="tertiary" tone="forest" size="sm" onClick={runSuggestAll} disabled={busy}>
-                {running ? 'Reading…' : 'Suggest all'}
-              </Button>
+              {running ? (
+                <Button variant="secondary" size="sm" onClick={() => cancelSuggest()}>
+                  Stop
+                </Button>
+              ) : (
+                <Button variant="tertiary" tone="forest" size="sm" onClick={runSuggestAll} disabled={busy}>
+                  Suggest all
+                </Button>
+              )}
               <Button variant="tertiary" tone="forest" size="sm" onClick={openFixAll} disabled={busy}>
                 Fix all
               </Button>

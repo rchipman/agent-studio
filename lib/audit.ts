@@ -39,3 +39,16 @@ export async function consistencyAudit(): Promise<Finding[]> {
 export async function onAuditProgress(cb: (p: AuditProgress) => void): Promise<UnlistenFn> {
   return listen<AuditProgress>('audit://progress', (e) => cb(e.payload))
 }
+
+/**
+ * Subscribe to individual findings as they arrive during an audit run.
+ * Findings stream live, before the final batch resolves. Returns an unlisten fn.
+ */
+export async function onFinding(cb: (f: Finding) => void): Promise<UnlistenFn> {
+  return listen<Finding>('audit://finding', (e) => cb(e.payload))
+}
+
+/** Cancel an in-progress consistency audit. Partial results remain visible. */
+export function cancelAudit(): Promise<void> {
+  return invoke('cancel_audit')
+}
