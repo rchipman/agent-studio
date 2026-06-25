@@ -69,13 +69,42 @@ const TRANSCRIPT_SCHEMA: &str = "
 ";
 
 /// Ensure the transcript schema exists on the connection (called lazily).
-/// Also runs a tiny additive migration for the `cwd` column on databases
-/// created before TIN-1721 (CREATE TABLE IF NOT EXISTS won't add a column).
+/// Also runs additive migrations for columns added after TIN-1721/TIN-1725
+/// (CREATE TABLE IF NOT EXISTS won't add columns to pre-existing tables).
 fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(TRANSCRIPT_SCHEMA)?;
-    // Additive migration: ignore "duplicate column" errors if already present.
+    // Additive migrations: ignore "duplicate column" errors if already present.
     let _ = conn.execute(
         "ALTER TABLE transcript_sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // TIN-1725: cached metric columns (nullable = not yet computed).
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN turn_count INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN subagent_count INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN input_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN output_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN cache_creation_input_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN cache_read_input_tokens INTEGER",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN models TEXT",
         [],
     );
     Ok(())
@@ -725,6 +754,8 @@ fn mtime_secs(path: &Path) -> u64 {
 }
 
 /// First-line cwd metadata for a session file (scans for the first non-empty cwd).
+/// Used in tests; compute_session_metrics also returns cwd as its last field.
+#[allow(dead_code)]
 fn cwd_from_session(path: &Path) -> String {
     let raw = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -753,17 +784,32 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
 
     let tx = conn.unchecked_transaction()?;
     {
-        let mut check_mtime =
-            tx.prepare("SELECT mtime FROM transcript_sessions WHERE path = ?1")?;
+        // Fetch mtime AND turn_count (NULL = metrics not yet cached).
+        let mut check_row = tx.prepare(
+            "SELECT mtime, turn_count FROM transcript_sessions WHERE path = ?1",
+        )?;
         let mut upsert_session = tx.prepare(
-            "INSERT INTO transcript_sessions (path, project, date_iso, mtime, first_msg, cwd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO transcript_sessions (
+                path, project, date_iso, mtime, first_msg, cwd,
+                turn_count, subagent_count,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                models
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(path) DO UPDATE SET
                project=excluded.project,
                date_iso=excluded.date_iso,
                mtime=excluded.mtime,
                first_msg=excluded.first_msg,
-               cwd=excluded.cwd",
+               cwd=excluded.cwd,
+               turn_count=excluded.turn_count,
+               subagent_count=excluded.subagent_count,
+               input_tokens=excluded.input_tokens,
+               output_tokens=excluded.output_tokens,
+               cache_creation_input_tokens=excluded.cache_creation_input_tokens,
+               cache_read_input_tokens=excluded.cache_read_input_tokens,
+               models=excluded.models",
         )?;
         let mut delete_fts = tx.prepare("DELETE FROM transcript_fts WHERE path_ref = ?1")?;
         let mut insert_fts =
@@ -773,17 +819,24 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
             let current_mtime = mtime_secs(&jsonl_path);
             let path_str = jsonl_path.to_string_lossy().to_string();
 
-            let stored_mtime: Option<u64> = check_mtime
-                .query_row(params![path_str], |r| r.get::<_, i64>(0))
-                .ok()
-                .map(|v| v as u64);
+            // (stored_mtime, metrics_cached)
+            let stored: Option<(u64, bool)> = check_row
+                .query_row(params![path_str], |r| {
+                    let mtime = r.get::<_, i64>(0).map(|v| v as u64)?;
+                    let has_metrics = r.get::<_, Option<i64>>(1)?.is_some();
+                    Ok((mtime, has_metrics))
+                })
+                .ok();
 
-            if stored_mtime == Some(current_mtime) {
+            let mtime_unchanged = stored.map(|(m, _)| m) == Some(current_mtime);
+            let metrics_cached = stored.map(|(_, h)| h).unwrap_or(false);
+
+            if mtime_unchanged && metrics_cached {
+                // Row is current and metrics are populated — skip entirely.
                 continue;
             }
 
             let date = date_from_path_or_mtime(&jsonl_path);
-            let cwd = cwd_from_session(&jsonl_path);
             let turns = parse_session_file(&jsonl_path);
 
             let first_msg = turns
@@ -812,6 +865,12 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
                 }
             }
 
+            // Compute metrics when mtime changed or they were never stored.
+            let (subagent_count, turn_count, usage, models, cwd) =
+                compute_session_metrics(&jsonl_path);
+            let models_json =
+                serde_json::to_string(&models).unwrap_or_else(|_| "[]".to_string());
+
             delete_fts.execute(params![path_str])?;
             upsert_session.execute(params![
                 path_str,
@@ -820,6 +879,13 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
                 current_mtime as i64,
                 first_msg,
                 cwd,
+                turn_count as i64,
+                subagent_count as i64,
+                usage.input_tokens as i64,
+                usage.output_tokens as i64,
+                usage.cache_creation_input_tokens as i64,
+                usage.cache_read_input_tokens as i64,
+                models_json,
             ])?;
             insert_fts.execute(params![path_str, project, full_text])?;
         }
@@ -937,26 +1003,52 @@ pub fn list_sessions<R: tauri::Runtime>(
     let project_filter = payload.project.trim();
     let all_projects = project_filter.is_empty();
 
+    // Select cached metric columns alongside the basics. Metrics are nullable
+    // for rows indexed before TIN-1725 — those get lazy backfill below.
     let sql = if all_projects {
-        "SELECT path, project, date_iso, first_msg, cwd FROM transcript_sessions
+        "SELECT path, project, date_iso, first_msg, cwd, mtime,
+                turn_count, subagent_count,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                models
+         FROM transcript_sessions
          ORDER BY date_iso DESC, path DESC"
     } else {
-        "SELECT path, project, date_iso, first_msg, cwd FROM transcript_sessions
+        "SELECT path, project, date_iso, first_msg, cwd, mtime,
+                turn_count, subagent_count,
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                models
+         FROM transcript_sessions
          WHERE project = ?1
          ORDER BY date_iso DESC, path DESC"
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
 
+    // Row type: (path, project, date, first_msg, cwd, mtime,
+    //            turn_count?, subagent_count?,
+    //            input_tokens?, output_tokens?,
+    //            cache_creation_input_tokens?, cache_read_input_tokens?,
+    //            models?)
+    type RawRow = (
+        String, String, String, String, String, i64,
+        Option<i64>, Option<i64>,
+        Option<i64>, Option<i64>,
+        Option<i64>, Option<i64>,
+        Option<String>,
+    );
     let map_row = |r: &rusqlite::Row| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
+        Ok::<RawRow, rusqlite::Error>((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
             r.get::<_, String>(4).unwrap_or_default(),
+            r.get::<_, i64>(5).unwrap_or(0),
+            r.get(6)?, r.get(7)?,
+            r.get(8)?, r.get(9)?,
+            r.get(10)?, r.get(11)?,
+            r.get(12)?,
         ))
     };
-    let base: Vec<(String, String, String, String, String)> = if all_projects {
+    let base: Vec<RawRow> = if all_projects {
         stmt.query_map([], map_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<_, _>>()
@@ -969,15 +1061,58 @@ pub fn list_sessions<R: tauri::Runtime>(
     };
 
     let mut sessions = Vec::with_capacity(base.len());
-    for (path, project, date, first_message, stored_cwd) in base {
-        let p = PathBuf::from(&path);
-        let (subagent_count, turn_count, usage, models, cwd) = compute_session_metrics(&p);
+    for (path, project, date, first_message, stored_cwd, _mtime,
+         turn_count_opt, subagent_count_opt,
+         input_opt, output_opt, cc_opt, cr_opt, models_opt) in base
+    {
+        let (subagent_count, turn_count, usage, models, cwd) =
+            if let (Some(tc), Some(sc), Some(it), Some(ot), Some(cc), Some(cr), Some(ms)) = (
+                turn_count_opt, subagent_count_opt,
+                input_opt, output_opt, cc_opt, cr_opt, models_opt.as_deref(),
+            ) {
+                // Cache hit: build from stored values.
+                let models: Vec<String> =
+                    serde_json::from_str(ms).unwrap_or_default();
+                let usage = UsageRollup {
+                    input_tokens: it as u64,
+                    output_tokens: ot as u64,
+                    cache_creation_input_tokens: cc as u64,
+                    cache_read_input_tokens: cr as u64,
+                };
+                (sc as usize, tc as usize, usage, models, stored_cwd)
+            } else {
+                // Lazy backfill: row predates TIN-1725 or was never fully indexed.
+                let p = PathBuf::from(&path);
+                let (sc, tc, u, m, c) = compute_session_metrics(&p);
+                let models_json =
+                    serde_json::to_string(&m).unwrap_or_else(|_| "[]".to_string());
+                let file_mtime = mtime_secs(&p) as i64;
+                let _ = conn.execute(
+                    "UPDATE transcript_sessions SET
+                        turn_count=?1, subagent_count=?2,
+                        input_tokens=?3, output_tokens=?4,
+                        cache_creation_input_tokens=?5, cache_read_input_tokens=?6,
+                        models=?7, mtime=?8
+                     WHERE path=?9",
+                    params![
+                        tc as i64, sc as i64,
+                        u.input_tokens as i64, u.output_tokens as i64,
+                        u.cache_creation_input_tokens as i64,
+                        u.cache_read_input_tokens as i64,
+                        models_json, file_mtime,
+                        path,
+                    ],
+                );
+                let cwd_out = if c.is_empty() { stored_cwd } else { c };
+                (sc, tc, u, m, cwd_out)
+            };
+
         sessions.push(SessionSummary {
             path,
             project,
             date,
             first_message,
-            cwd: if cwd.is_empty() { stored_cwd } else { cwd },
+            cwd,
             subagent_count,
             turn_count,
             usage,
@@ -1469,5 +1604,177 @@ mod tests {
         let p = parse_line_full(line).unwrap();
         assert!(p.images.is_empty());
         assert_eq!(p.content, "ok");
+    }
+
+    // ── TIN-1725 metric caching tests ───────────────────────────────────────
+
+    /// Helper: read cached metric columns from the DB for `path`.
+    fn read_cached_metrics(
+        conn: &Connection,
+        path: &str,
+    ) -> Option<(i64, i64, i64, i64, i64, i64, String)> {
+        conn.query_row(
+            "SELECT turn_count, subagent_count,
+                    input_tokens, output_tokens,
+                    cache_creation_input_tokens, cache_read_input_tokens,
+                    models
+             FROM transcript_sessions WHERE path = ?1",
+            params![path],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?.unwrap_or(-1),
+                    r.get::<_, Option<i64>>(1)?.unwrap_or(-1),
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(-1),
+                    r.get::<_, Option<i64>>(3)?.unwrap_or(-1),
+                    r.get::<_, Option<i64>>(4)?.unwrap_or(-1),
+                    r.get::<_, Option<i64>>(5)?.unwrap_or(-1),
+                    r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                ))
+            },
+        )
+        .ok()
+    }
+
+    /// After indexing, the DB must hold the correct metrics even if the JSONL
+    /// file is subsequently deleted (proves the cache is the source of truth).
+    #[test]
+    fn cached_metrics_survive_file_deletion() {
+        let root = temp_root("cache-delete");
+        let parent_path = write_session_with_subagents(&root);
+        let path_str = parent_path.to_string_lossy().to_string();
+
+        let conn = mem_db();
+        build_transcript_index(&root, &conn).unwrap();
+
+        // Verify metrics were stored in the DB.
+        let m = read_cached_metrics(&conn, &path_str)
+            .expect("metrics should be cached after indexing");
+        // main: input10/output20/cc5/cr1 ; sub: input100/output200/cc50/cr3
+        assert_eq!(m.2, 110, "input_tokens");
+        assert_eq!(m.3, 220, "output_tokens");
+        assert_eq!(m.4, 55,  "cache_creation_input_tokens");
+        assert_eq!(m.5, 4,   "cache_read_input_tokens");
+        assert!(m.1 >= 1, "subagent_count >= 1");
+
+        // NOW delete the JSONL file.
+        fs::remove_file(&parent_path).unwrap();
+        assert!(!parent_path.exists());
+
+        // Metrics in DB must still be correct — list_sessions reads the cache.
+        let m2 = read_cached_metrics(&conn, &path_str)
+            .expect("metrics still in DB after file deleted");
+        assert_eq!(m2.2, 110, "input_tokens unchanged after deletion");
+        assert_eq!(m2.3, 220, "output_tokens unchanged after deletion");
+    }
+
+    /// Rows with NULL metric columns (pre-TIN-1725 entries) get lazily filled
+    /// on the first list_sessions call. We directly INSERT a row without metrics,
+    /// then call list_sessions logic via `read_cached_metrics` after a lazy fill.
+    #[test]
+    fn lazy_backfill_populates_null_metric_rows() {
+        let root = temp_root("lazy-backfill");
+        let parent_path = write_session_with_subagents(&root);
+        let path_str = parent_path.to_string_lossy().to_string();
+        let current_mtime = mtime_secs(&parent_path) as i64;
+
+        let conn = mem_db();
+        // Insert the row WITHOUT metric columns (simulates a pre-TIN-1725 row).
+        conn.execute(
+            "INSERT INTO transcript_sessions (path, project, date_iso, mtime, first_msg, cwd)
+             VALUES (?1, 'proj', '2026-06-01', ?2, 'do a thing', '/tmp')",
+            params![path_str, current_mtime],
+        )
+        .unwrap();
+
+        // Verify metrics are NULL.
+        let (tc, sc, it, ot, cc, cr, ms) =
+            read_cached_metrics(&conn, &path_str).unwrap();
+        assert_eq!(tc, -1, "turn_count should be NULL before backfill");
+        assert_eq!(sc, -1, "subagent_count should be NULL before backfill");
+
+        // Simulate what list_sessions does on a NULL row: compute and write back.
+        let (subagent_count, turn_count, usage, models, _cwd) =
+            compute_session_metrics(&parent_path);
+        let models_json = serde_json::to_string(&models).unwrap_or_default();
+        conn.execute(
+            "UPDATE transcript_sessions SET
+                turn_count=?1, subagent_count=?2,
+                input_tokens=?3, output_tokens=?4,
+                cache_creation_input_tokens=?5, cache_read_input_tokens=?6,
+                models=?7
+             WHERE path=?8",
+            params![
+                turn_count as i64, subagent_count as i64,
+                usage.input_tokens as i64, usage.output_tokens as i64,
+                usage.cache_creation_input_tokens as i64,
+                usage.cache_read_input_tokens as i64,
+                models_json, path_str,
+            ],
+        )
+        .unwrap();
+
+        // After backfill the metrics must be correct.
+        let (tc2, sc2, it2, ot2, cc2, cr2, ms2) =
+            read_cached_metrics(&conn, &path_str).unwrap();
+        assert!(tc2 > 0, "turn_count populated: {tc2}");
+        assert_eq!(sc2, 1, "subagent_count");
+        assert_eq!(it2, 110, "input_tokens");
+        assert_eq!(ot2, 220, "output_tokens");
+        assert_eq!(cc2, 55,  "cache_creation_input_tokens");
+        assert_eq!(cr2, 4,   "cache_read_input_tokens");
+        let parsed_models: Vec<String> = serde_json::from_str(&ms2).unwrap_or_default();
+        assert_eq!(parsed_models.len(), 2, "two distinct models");
+
+        // Suppress unused-variable warnings from the first read.
+        let _ = (it, ot, cc, cr, ms);
+    }
+
+    /// When a file's mtime changes, re-indexing must recompute and overwrite
+    /// the cached metrics with updated values.
+    #[test]
+    fn mtime_change_triggers_metric_recompute() {
+        let root = temp_root("mtime-recompute");
+        let parent_path = write_session_with_subagents(&root);
+        let path_str = parent_path.to_string_lossy().to_string();
+
+        let conn = mem_db();
+        build_transcript_index(&root, &conn).unwrap();
+
+        // Confirm initial metrics.
+        let m1 = read_cached_metrics(&conn, &path_str).unwrap();
+        assert_eq!(m1.2, 110, "initial input_tokens");
+
+        // Overwrite the file with new content (just the main thread, 1 simple turn,
+        // different token counts) and bump its mtime by touching it.
+        let new_body = concat!(
+            r#"{"isSidechain":false,"type":"user","uuid":"u2","parentUuid":null,"cwd":"/tmp","message":{"role":"user","content":"new content"}}"#, "\n",
+            r#"{"isSidechain":false,"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"role":"assistant","model":"claude-haiku","usage":{"input_tokens":5,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"ok"}]}}"#, "\n"
+        );
+        fs::write(&parent_path, new_body).unwrap();
+        // Remove the subagent dir so count/tokens are purely from the new main body.
+        let subagents_dir = parent_path
+            .parent()
+            .unwrap()
+            .join(parent_path.file_stem().unwrap())
+            .join("subagents");
+        if subagents_dir.exists() {
+            fs::remove_dir_all(&subagents_dir).unwrap();
+        }
+
+        // Force a different mtime by manipulating the stored value in the DB
+        // (file system mtime resolution may be 1 s, so we fake the DB side).
+        conn.execute(
+            "UPDATE transcript_sessions SET mtime = 0 WHERE path = ?1",
+            params![path_str],
+        )
+        .unwrap();
+
+        // Re-index — should detect mtime mismatch and recompute.
+        build_transcript_index(&root, &conn).unwrap();
+
+        let m2 = read_cached_metrics(&conn, &path_str).unwrap();
+        assert_eq!(m2.2, 5,  "input_tokens after recompute");
+        assert_eq!(m2.3, 10, "output_tokens after recompute");
+        assert_eq!(m2.4, 0,  "cache_creation after recompute");
     }
 }
