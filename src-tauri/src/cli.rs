@@ -38,13 +38,14 @@ use gray_matter::{Matter, ParsedEntity, Pod};
 use serde_json::json;
 
 use crate::continuity::{score_content, ScoreMemoryInput};
+use crate::embeddings::{chunk_text, fingerprint};
 use crate::frontmatter::{apply_frontmatter, generate, slugify, summarize_note, SummarizeNoteInput, Suggestion};
 use crate::memory_audit::{content_hash, ensure_schema as ensure_audit_schema, history_for, record_change, AuditEntry, RecordMemoryChangeInput};
 use crate::memory_reads;
 use crate::reason;
 use crate::salience;
-use crate::search::{build_index, init_db, search_core, Db, SearchInput};
-use crate::settings::default_memory_root;
+use crate::search::{build_index, embedding_to_blob, init_db, search_core, Db, SearchInput};
+use crate::settings::{default_memory_root, STORE_FILE};
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -110,15 +111,85 @@ pub fn maybe_run() {
     }
 }
 
-/// Resolve the memory root for the headless path. We do NOT load the Tauri store
-/// here (no `AppHandle` without an app), so we honour an explicit override via
-/// `MEMORY_ROOT` and otherwise fall back to the default `~/Projects/tfl/memory`,
-/// which is the same default the GUI resolves to out of the box.
+/// Resolve the memory root for the headless path.
+///
+/// Precedence (first non-empty value wins):
+/// 1. `MEMORY_ROOT` environment variable — explicit override.
+/// 2. GUI's persisted settings store (`settings.json` under the OS app-config
+///    dir), key `settings.memoryRoot`. Read directly as JSON — no Tauri
+///    `AppHandle` needed — so the CLI shares the user's GUI configuration.
+/// 3. `default_memory_root()` — `~/Projects/tfl/memory`.
+///
+/// Each tier degrades silently: if the store file is missing, unreadable, or
+/// doesn't contain the key, we fall through to the next tier.
 fn resolve_root() -> PathBuf {
-    match std::env::var("MEMORY_ROOT") {
-        Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
-        _ => default_memory_root(),
+    // Tier 1: env override.
+    if let Ok(s) = std::env::var("MEMORY_ROOT") {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return expand_tilde(trimmed);
+        }
     }
+
+    // Tier 2: GUI persisted settings store.
+    if let Some(root) = read_root_from_store() {
+        return root;
+    }
+
+    // Tier 3: compile-time default.
+    default_memory_root()
+}
+
+/// Attempt to read `memoryRoot` from the GUI's tauri-plugin-store JSON file.
+/// Returns `None` on any missing file, parse error, or missing/empty value.
+fn read_root_from_store() -> Option<PathBuf> {
+    let store_path = gui_store_path()?;
+    let raw = fs::read_to_string(&store_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // Store layout: { "settings": { "memoryRoot": "...", ... } }
+    let memory_root = json
+        .get("settings")
+        .and_then(|s| s.get("memoryRoot"))
+        .and_then(|v| v.as_str())?;
+    let trimmed = memory_root.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(expand_tilde(trimmed))
+}
+
+/// The OS path to the GUI's tauri-plugin-store file.
+/// On macOS: `~/Library/Application Support/com.tinyforestlabs.agent-studio/<store>`
+/// On Linux: `~/.config/com.tinyforestlabs.agent-studio/<store>`
+fn gui_store_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let home = std::path::Path::new(&home);
+
+    #[cfg(target_os = "macos")]
+    let config_dir = home.join("Library/Application Support/com.tinyforestlabs.agent-studio");
+
+    #[cfg(target_os = "linux")]
+    let config_dir = home.join(".config/com.tinyforestlabs.agent-studio");
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let config_dir = home.join(".config/com.tinyforestlabs.agent-studio");
+
+    Some(config_dir.join(STORE_FILE))
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    if s == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(s)
 }
 
 /// Open the shared index DB under `root` and wrap it as a `Db` (the same managed
@@ -213,8 +284,14 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
         build_index(&root, &conn).map_err(|e| e.to_string())?;
     }
 
-    // 5. Record an `agent` audit row.
+    // 4b. Embed the new note's chunks so that headless `recall` is semantic
+    // immediately (TIN-1743). Degrades gracefully: on any error we log and
+    // continue — the write is already committed and the JSON contract is
+    // unchanged. The JSON output is NOT modified by this step.
     let path_str = file_path.to_string_lossy().to_string();
+    embed_new_note_chunks(&db, &path_str, &body);
+
+    // 5. Record an `agent` audit row.
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         record_change(
@@ -237,6 +314,78 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
         "conflicts": score.conflicts,
         "superseded": false,
     }))
+}
+
+/// Embed the chunks for a newly-written note and store their vectors so that
+/// headless `recall` returns semantic results immediately.
+///
+/// `body` is the frontmatter-FREE note content — the same text `build_index`
+/// indexes (gray_matter strips the YAML), so we never embed frontmatter into the
+/// semantic vector. It is chunked, embedded with the bundled local model, and
+/// upserted into the `chunks` table.
+///
+/// **Degrade-safe**: any error (model not cached, DB lock failure, dim mismatch)
+/// is logged at WARN level and the function returns normally — it NEVER fails
+/// the write or alters the JSON output.
+fn embed_new_note_chunks(db: &Db, file_path: &str, body: &str) {
+    let chunks = chunk_text(body);
+    if chunks.is_empty() {
+        return;
+    }
+
+    // Compute fingerprints for cache-skip logic (matches the GUI pipeline).
+    let chunk_data: Vec<(i64, String, String)> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, text)| (i as i64, text.clone(), fingerprint(text)))
+        .collect();
+
+    let texts: Vec<String> = chunk_data.iter().map(|(_, t, _)| t.clone()).collect();
+
+    // Embed all chunks with the bundled local model. Called directly (no
+    // spawn_blocking) because run_add_memory is already on a plain OS thread —
+    // the same pattern search_core uses for query embedding.
+    let embeddings = match crate::local_embed::embed(texts) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[add-memory] embed: local_embed failed (model not cached?): {e}");
+            return;
+        }
+    };
+
+    if embeddings.len() != chunk_data.len() {
+        log::warn!(
+            "[add-memory] embed: got {} embeddings for {} chunks; skipping",
+            embeddings.len(),
+            chunk_data.len()
+        );
+        return;
+    }
+
+    // Upsert each chunk + embedding into the DB.
+    let conn = match db.0.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[add-memory] embed: DB lock failed: {e}");
+            return;
+        }
+    };
+
+    for ((chunk_idx, content, sha256), embedding) in chunk_data.iter().zip(embeddings.iter()) {
+        let blob = embedding_to_blob(embedding);
+        if let Err(e) = conn.execute(
+            "INSERT INTO chunks (file_path, chunk_idx, content, sha256, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(file_path, chunk_idx) DO UPDATE SET
+               content   = excluded.content,
+               sha256    = excluded.sha256,
+               embedding = excluded.embedding",
+            rusqlite::params![file_path, chunk_idx, content, sha256, blob],
+        ) {
+            log::warn!("[add-memory] embed: upsert chunk {chunk_idx} failed: {e}");
+            // Continue with remaining chunks — partial embedding is better than none.
+        }
+    }
 }
 
 /// Override suggestion fields from explicit CLI flags. A provided flag always
@@ -1089,6 +1238,99 @@ mod tests {
             .unwrap()
     }
 
+    // ── resolve_root (TIN-1736) ───────────────────────────────────────────────
+
+    /// Write a minimal GUI store JSON file to `path` with the given memory root.
+    fn write_store_json(path: &std::path::Path, memory_root: &str) {
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        let store = serde_json::json!({
+            "settings": {
+                "memoryRoot": memory_root,
+                "promptsRoot": "",
+                "skillsRoot": "",
+                "transcriptsRoot": "",
+                "agents": []
+            }
+        });
+        fs::write(path, store.to_string()).unwrap();
+    }
+
+    #[test]
+    fn resolve_root_env_wins_over_store() {
+        let _guard = env_lock();
+
+        // Set up a store file pointing at a different path.
+        let store_dir = temp_root("rr-env-store");
+        let fake_store_path = store_dir.join("settings.json");
+        let store_root = temp_root("rr-env-store-root");
+        write_store_json(&fake_store_path, &store_root.to_string_lossy());
+
+        // Override HOME so gui_store_path() resolves to our fake store.
+        // We set MEMORY_ROOT to yet another path — it must win.
+        let env_root = temp_root("rr-env-root");
+        std::env::set_var("MEMORY_ROOT", &env_root);
+
+        // Point HOME at a fake dir so gui_store_path points at our temp store
+        // (we bypass this because MEMORY_ROOT is set — it short-circuits).
+        let result = resolve_root();
+        std::env::remove_var("MEMORY_ROOT");
+
+        assert_eq!(result, env_root, "MEMORY_ROOT env var wins over everything");
+    }
+
+    #[test]
+    fn resolve_root_store_wins_when_no_env() {
+        let _guard = env_lock();
+        // Ensure MEMORY_ROOT is clear.
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Stand up a fake store file.
+        let store_root = temp_root("rr-store-root");
+        let store_file = temp_root("rr-store-home")
+            .join("Library/Application Support/com.tinyforestlabs.agent-studio/settings.json");
+        write_store_json(&store_file, &store_root.to_string_lossy());
+
+        // Override HOME so our fake store is found.
+        let fake_home = store_file
+            .parent().unwrap()   // .../com.tinyforestlabs.agent-studio
+            .parent().unwrap()   // .../Application Support
+            .parent().unwrap()   // .../Library
+            .parent().unwrap();  // fake_home
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        std::env::set_var("HOME", fake_home);
+
+        let result = resolve_root();
+
+        std::env::set_var("HOME", real_home);
+
+        assert_eq!(result, store_root, "store value wins when env var is absent");
+    }
+
+    #[test]
+    fn resolve_root_falls_back_to_default_when_store_missing() {
+        let _guard = env_lock();
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Point HOME at a tmp dir with no store file.
+        let empty_home = temp_root("rr-no-store");
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        std::env::set_var("HOME", &empty_home);
+
+        let result = resolve_root();
+
+        std::env::set_var("HOME", real_home);
+
+        // Should equal default_memory_root() in that (restored) HOME.
+        // After HOME is restored, default_memory_root() uses the real HOME.
+        // So just check the result ends with the expected suffix.
+        let result_str = result.to_string_lossy();
+        assert!(
+            result_str.ends_with("Projects/tfl/memory"),
+            "falls back to default memory root: {result_str}"
+        );
+    }
+
     // ── add-memory core ───────────────────────────────────────────────────────
 
     #[test]
@@ -1215,6 +1457,80 @@ mod tests {
             "content/file required"
         );
         std::env::remove_var("MEMORY_ROOT");
+    }
+
+    // ── TIN-1743: embed on write ──────────────────────────────────────────────
+
+    /// Full round-trip test: write a note via `run_add_memory` and assert the
+    /// new note's chunks have non-NULL embeddings.
+    ///
+    /// Gated with `#[ignore]` because it requires the bundled embedding model to
+    /// be already cached in `~/.agent-studio/models/`. Run with:
+    ///   cargo test -- --ignored cli::tests::add_memory_embeds_chunks_with_model
+    #[test]
+    #[ignore = "needs the bundled embedding model cached"]
+    fn add_memory_embeds_chunks_with_model() {
+        let _guard = env_lock();
+        let root = temp_root("embed-chunks");
+        let _ = fixture_db(&root);
+
+        std::env::set_var("MEMORY_ROOT", &root);
+        let out = run_add_memory(&[
+            "--content".into(),
+            "Attic Pro is a home-management app that helps homeowners record and track appliances and repairs.".into(),
+            "--agent".into(),
+            "tester".into(),
+            "--project".into(),
+            "attic".into(),
+        ])
+        .expect("add-memory succeeds");
+        std::env::remove_var("MEMORY_ROOT");
+
+        let path_str = out["path"].as_str().expect("path in response");
+
+        // Open the DB and check that at least one chunk for this file has a
+        // non-NULL embedding.
+        let db = fixture_db(&root);
+        let conn = db.0.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_path = ?1 AND embedding IS NOT NULL",
+                rusqlite::params![path_str],
+                |r| r.get(0),
+            )
+            .expect("query chunks table");
+        assert!(count > 0, "at least one chunk should have a non-NULL embedding after write");
+    }
+
+    /// Non-ignored degrade-safety test: `run_add_memory` must return `Ok` even
+    /// when the embedding model is not available. The write succeeds; missing
+    /// embeddings are a soft failure.
+    #[test]
+    fn add_memory_write_succeeds_even_when_embedding_fails() {
+        // This test runs without the model cached. `embed_new_note_chunks` will
+        // fail to load the model and log a warning, but `run_add_memory` must
+        // return Ok with the standard JSON shape.
+        let _guard = env_lock();
+        let root = temp_root("embed-degrade");
+        let _ = fixture_db(&root);
+
+        std::env::set_var("MEMORY_ROOT", &root);
+        let result = run_add_memory(&[
+            "--content".into(),
+            "A degrade-safety note: the write must succeed even if embedding fails.".into(),
+            "--agent".into(),
+            "tester".into(),
+            "--project".into(),
+            "studio".into(),
+        ]);
+        std::env::remove_var("MEMORY_ROOT");
+
+        // The write must succeed regardless of whether embedding worked.
+        let out = result.expect("add-memory returns Ok even when embedding is unavailable");
+        assert_eq!(out["superseded"], json!(false));
+        assert!(out["path"].as_str().is_some(), "path is present in response");
+        let path = out["path"].as_str().unwrap();
+        assert!(fs::read_to_string(path).is_ok(), "the note file was written to disk");
     }
 
     // ── supersede ─────────────────────────────────────────────────────────────
