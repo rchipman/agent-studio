@@ -21,6 +21,13 @@ import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
+import {
+  estimateCost,
+  formatCost,
+  formatTokens,
+  totalTokens,
+} from '@/lib/sessionMetrics'
+import type { UsageRollup } from '@/lib/sessionMetrics'
 
 // ── IPC types (mirror transcript.rs) ─────────────────────────────────────────
 
@@ -34,6 +41,12 @@ interface SessionSummary {
   path: string
   date: string
   firstMessage: string
+  // TIN-1725 — fields emitted by the Rust backend (camelCase via serde rename_all)
+  cwd: string
+  subagentCount: number
+  turnCount: number
+  usage: UsageRollup
+  models: string[]
 }
 
 interface Turn {
@@ -122,6 +135,54 @@ function intensityBgSelected(count: number): string {
   if (count === 0) return color.forestWash
   if (count === 1) return color.forestTint
   return color.forestLine
+}
+
+// ── Session metrics (TIN-1725) ────────────────────────────────────────────────
+
+/**
+ * Quiet meta line showing token count + approximate cost for a session.
+ * Uses inkFaint + typeToken.meta — recessive metadata, not a headline.
+ * `compact` = true → single-line chip for the session list row.
+ */
+interface SessionMetaLineProps {
+  usage: UsageRollup
+  compact?: boolean
+}
+
+function SessionMetaLine({ usage, compact = false }: SessionMetaLineProps) {
+  const total = totalTokens(usage)
+  if (total === 0) return null
+
+  const tokens = formatTokens(total)
+  const cost = formatCost(estimateCost(usage))
+
+  if (compact) {
+    return (
+      <span
+        style={{
+          ...typeToken.meta,
+          color: color.inkFaint,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {tokens} · {cost}
+      </span>
+    )
+  }
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: space[4],
+        ...typeToken.meta,
+        color: color.inkFaint,
+      }}
+    >
+      <span>{tokens} tokens</span>
+      <span>{cost}</span>
+    </div>
+  )
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -776,6 +837,11 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
       path: result.sessionPath,
       date: '',
       firstMessage: result.snippet,
+      cwd: '',
+      subagentCount: 0,
+      turnCount: 0,
+      usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      models: [],
     }
     setSelectedSession(fake)
   }
@@ -1046,10 +1112,11 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
                           (e.currentTarget as HTMLDivElement).style.background = 'transparent'
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space[3], marginBottom: 2 }}>
                         <span style={{ ...typeToken.body, color: color.ink }}>
                           {formatDate(s.date)}
                         </span>
+                        {s.usage && <SessionMetaLine usage={s.usage} compact />}
                       </div>
                       <div
                         style={{
@@ -1126,6 +1193,28 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               </div>
             ) : (
               <div style={{ maxWidth: 720, margin: '0 auto' }}>
+                {/* Session detail header — date + quiet metrics (TIN-1725) */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    gap: space[4],
+                    paddingBottom: space[5],
+                    marginBottom: space[5],
+                    borderBottom: `1px solid ${color.hairSoft}`,
+                  }}
+                >
+                  <span style={{ ...typeToken.meta, color: color.inkSoft }}>
+                    {formatDate(selectedSession.date)}
+                    {selectedSession.subagentCount > 0 && (
+                      <> · {selectedSession.subagentCount} {selectedSession.subagentCount === 1 ? 'subagent' : 'subagents'}</>
+                    )}
+                  </span>
+                  {selectedSession.usage && (
+                    <SessionMetaLine usage={selectedSession.usage} />
+                  )}
+                </div>
                 {turns.map((turn, i) => (
                   <div key={i} style={{ borderBottom: `1px solid ${color.hairSoft}` }}>
                     <ConversationTurn
