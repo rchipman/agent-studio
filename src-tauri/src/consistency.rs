@@ -163,9 +163,11 @@ pub fn set_seeded(conn: &Connection, seeded: bool) -> rusqlite::Result<()> {
 pub struct ConsistencyMonitor;
 
 impl ConsistencyMonitor {
-    /// Re-score `path`/`content` and persist its findings. Factored out so the
-    /// runtime-driving + DB work is testable without the maintenance dispatch.
-    fn refresh(conn: &Connection, path: &str, content: &str) -> rusqlite::Result<()> {
+    /// Re-score `path`/`content` and persist its findings. Driven by the off-lock
+    /// maintenance worker (TIN-1766) on its OWN connection — NEVER inline under
+    /// the shared `Db` mutex, because `score_content_conn` makes a blocking local
+    /// model call and would otherwise stall every command (Sessions beachball).
+    pub(crate) fn refresh(conn: &Connection, path: &str, content: &str) -> rusqlite::Result<()> {
         // A changed note's findings are fully refreshed: clear, then re-add.
         clear_path(conn, path)?;
 
@@ -224,11 +226,17 @@ impl MaintenanceHandler for ConsistencyMonitor {
 
     fn on_change(&self, conn: &Connection, change: &NoteChange) -> rusqlite::Result<()> {
         match change.kind {
+            // Model work (the contradiction judge) must NOT run under the shared
+            // index lock — enqueue for the off-lock worker (TIN-1766) instead.
             ChangeKind::Added | ChangeKind::Edited => {
                 let content = change.content.as_deref().unwrap_or("");
-                Self::refresh(conn, &change.path, content)
+                crate::maintenance::enqueue(conn, &change.path, change.kind, content)
             }
-            ChangeKind::Deleted => clear_path(conn, &change.path),
+            // Delete is cheap (no model): clear inline and drop any pending entry.
+            ChangeKind::Deleted => {
+                clear_path(conn, &change.path)?;
+                crate::maintenance::dequeue_remove(conn, &change.path)
+            }
         }
     }
 }
@@ -341,8 +349,20 @@ mod tests {
 
     fn mem_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        ensure_schema(&conn).unwrap();
+        // Full maintenance schema so the queue table (used by on_change) exists.
+        crate::maintenance::ensure_schema(&conn).unwrap();
         conn
+    }
+
+    /// Queued paths in the maintenance work queue, ordered.
+    fn queued(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT path FROM maintenance_queue ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     /// Helper: every (path_lo, path_hi, name_lo, name_hi, summary) row, ordered.
@@ -442,21 +462,17 @@ mod tests {
         assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("b.md", "c.md"));
     }
 
-    // ── Monitor refresh: replace prior findings, key by sorted pair ───────────
+    // ── on_change ENQUEUES; the worker's refresh does the model work (TIN-1766) ─
     //
-    // `refresh` (and thus on_change for Added/Edited) drives the real scorer,
-    // which with no reasoning model degrades to ZERO conflicts. So in the test
-    // env the refresh path: (1) clears the note's prior findings, (2) adds none.
-    // We assert exactly that — the degrade-safe behaviour the ticket calls out.
+    // The contradiction judge is a blocking local-model call, so it must NEVER
+    // run under the shared index lock. on_change(Added/Edited) therefore only
+    // enqueues — it must NOT clear or recompute findings inline. These tests pin
+    // that contract so the model call can never sneak back under the lock.
 
     #[test]
-    fn monitor_edited_clears_prior_findings_and_degrades_to_none() {
+    fn on_change_edited_enqueues_and_leaves_findings_untouched() {
         let conn = mem_db();
-        // Seed two prior findings for a.md (as if from an earlier sweep).
         upsert_finding(&conn, "a.md", "A", "b.md", "B", "stale-ab").unwrap();
-        upsert_finding(&conn, "a.md", "A", "c.md", "C", "stale-ac").unwrap();
-        // An unrelated pair must survive (it does not involve a.md).
-        upsert_finding(&conn, "b.md", "B", "c.md", "C", "bc").unwrap();
 
         let monitor = ConsistencyMonitor;
         monitor
@@ -470,26 +486,60 @@ mod tests {
             )
             .unwrap();
 
+        // Inline on_change must not touch findings — only queue the work.
+        assert_eq!(rows(&conn).len(), 1, "on_change does not clear inline");
+        assert_eq!(queued(&conn), vec!["a.md".to_string()], "note is queued");
+    }
+
+    #[test]
+    fn on_change_deleted_clears_findings_and_dequeues() {
+        let conn = mem_db();
+        upsert_finding(&conn, "a.md", "A", "b.md", "B", "ab").unwrap();
+        upsert_finding(&conn, "b.md", "B", "c.md", "C", "bc").unwrap();
+        crate::maintenance::enqueue(&conn, "a.md", ChangeKind::Edited, "body").unwrap();
+
+        let monitor = ConsistencyMonitor;
+        monitor
+            .on_change(
+                &conn,
+                &NoteChange {
+                    path: "a.md".to_string(),
+                    kind: ChangeKind::Deleted,
+                    content: None,
+                },
+            )
+            .unwrap();
+
         let r = rows(&conn);
-        // No model in test env → scorer degrades → a.md's prior findings are
-        // cleared and none are re-added; the unrelated b–c pair is untouched.
+        assert_eq!(r.len(), 1, "every pair touching a.md is dropped inline");
+        assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("b.md", "c.md"));
+        assert!(queued(&conn).is_empty(), "deleted note → dequeued");
+    }
+
+    // ── refresh: the worker path — clears prior findings, degrades to none ────
+    //
+    // `refresh` drives the real scorer, which with no reasoning model degrades to
+    // ZERO conflicts. So in the test env it (1) clears the note's prior findings,
+    // (2) adds none — the degrade-safe behaviour the ticket calls out.
+
+    #[test]
+    fn refresh_clears_prior_findings_and_degrades_to_none() {
+        let conn = mem_db();
+        upsert_finding(&conn, "a.md", "A", "b.md", "B", "stale-ab").unwrap();
+        upsert_finding(&conn, "a.md", "A", "c.md", "C", "stale-ac").unwrap();
+        upsert_finding(&conn, "b.md", "B", "c.md", "C", "bc").unwrap();
+
+        ConsistencyMonitor::refresh(&conn, "a.md", "some new body").unwrap();
+
+        let r = rows(&conn);
         assert_eq!(r.len(), 1, "a.md's stale findings cleared, none re-added");
         assert_eq!((r[0].0.as_str(), r[0].1.as_str()), ("b.md", "c.md"));
     }
 
     #[test]
-    fn monitor_added_degrades_without_error_and_adds_no_findings() {
-        // The degrade path (no model) must add no findings and not error.
+    fn refresh_degrades_without_error_and_adds_no_findings() {
         let conn = mem_db();
-        let monitor = ConsistencyMonitor;
-        let res = monitor.on_change(
-            &conn,
-            &NoteChange {
-                path: "new.md".to_string(),
-                kind: ChangeKind::Added,
-                content: Some("a brand new note".to_string()),
-            },
-        );
+        let res = ConsistencyMonitor::refresh(&conn, "new.md", "a brand new note");
         assert!(res.is_ok(), "degrade path must not error: {res:?}");
         assert!(rows(&conn).is_empty(), "no model → no findings added");
     }

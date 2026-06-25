@@ -238,6 +238,11 @@ pub fn init_db(root: &Path) -> rusqlite::Result<Connection> {
     let db_path = root.join(".studio-index.db");
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // The ambient maintenance worker (TIN-1766) opens its OWN connection to this
+    // same file so its local-model work never holds the shared `Db` mutex. WAL
+    // already lets readers and writers coexist; a busy_timeout makes the brief
+    // window where both connections write retry rather than error out.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch(SCHEMA)?;
     ensure_chunks_table(&conn)?;
     Ok(conn)

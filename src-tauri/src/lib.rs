@@ -99,6 +99,35 @@ pub fn run() {
         rt.block_on(embeddings::index_embeddings_local(bg_root));
       });
 
+      // Ambient maintenance worker (TIN-1766). The consistency monitor's
+      // contradiction judge is a blocking local-model call; running it inline
+      // under the shared `Db` mutex stalled every command (Sessions beachballed
+      // for minutes). So the ambient handlers only ENQUEUE changed notes under
+      // the lock; this worker drains that queue on its OWN connection — same
+      // own-a-connection pattern as the embeddings thread above — so the model
+      // work never holds the shared mutex. WAL + busy_timeout keep the two
+      // connections from blocking each other.
+      let worker_root = root.clone();
+      std::thread::spawn(move || {
+        let conn = match search::init_db(&worker_root) {
+          Ok(c) => c,
+          Err(e) => {
+            log::error!("[maintenance] worker DB open failed; ambient maintenance disabled: {e}");
+            return;
+          }
+        };
+        loop {
+          let processed = maintenance::drain_once(&conn).unwrap_or_else(|e| {
+            log::warn!("[maintenance] drain failed: {e}");
+            0
+          });
+          // Idle when the queue is empty; keep draining promptly when it is not.
+          if processed == 0 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+          }
+        }
+      });
+
       app.manage(Db(Mutex::new(conn)));
       app.manage(MemoryRoot(Mutex::new(root)));
       app.manage(terminal::TerminalState::default());
