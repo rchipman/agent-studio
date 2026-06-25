@@ -129,9 +129,10 @@ fn upsert_suggestion(
 pub struct SuggesterMonitor;
 
 impl SuggesterMonitor {
-    /// Audit `path`/`content`; refresh its suggestion row accordingly. Factored
-    /// out so the runtime-driving + DB work is testable without the dispatch.
-    fn refresh(conn: &Connection, path: &str, content: &str) -> rusqlite::Result<()> {
+    /// Audit `path`/`content`; refresh its suggestion row accordingly. Driven by
+    /// the off-lock maintenance worker (TIN-1766) on its OWN connection, so it
+    /// never runs under the shared `Db` mutex.
+    pub(crate) fn refresh(conn: &Connection, path: &str, content: &str) -> rusqlite::Result<()> {
         // Complete frontmatter → no suggestion; drop any stale row and return.
         let audit = audit_one(path, content);
         if audit.status == "complete" {
@@ -187,11 +188,17 @@ impl MaintenanceHandler for SuggesterMonitor {
 
     fn on_change(&self, conn: &Connection, change: &NoteChange) -> rusqlite::Result<()> {
         match change.kind {
+            // Off-lock worker does the refresh (TIN-1766); just enqueue here.
+            // (A coalescing upsert, so enqueuing from both ambient handlers for
+            // the same note collapses to one unit of work.)
             ChangeKind::Added | ChangeKind::Edited => {
                 let content = change.content.as_deref().unwrap_or("");
-                Self::refresh(conn, &change.path, content)
+                crate::maintenance::enqueue(conn, &change.path, change.kind, content)
             }
-            ChangeKind::Deleted => clear_path(conn, &change.path),
+            ChangeKind::Deleted => {
+                clear_path(conn, &change.path)?;
+                crate::maintenance::dequeue_remove(conn, &change.path)
+            }
         }
     }
 }
@@ -312,8 +319,20 @@ mod tests {
 
     fn mem_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        ensure_schema(&conn).unwrap();
+        // Full maintenance schema so the queue table (used by on_change) exists.
+        crate::maintenance::ensure_schema(&conn).unwrap();
         conn
+    }
+
+    /// Queued paths in the maintenance work queue, ordered.
+    fn queued(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT path FROM maintenance_queue ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     /// Helper: (path, content_hash, overall, degraded) rows, ordered by path.
@@ -372,15 +391,45 @@ mod tests {
         assert!(rows(&conn).is_empty());
     }
 
-    // ── Monitor: incomplete note → upsert keyed by path ───────────────────────
+    // ── on_change ENQUEUES; the worker's refresh does the work (TIN-1766) ─────
+    //
+    // After the off-lock split, on_change(Added/Edited) only enqueues — it does
+    // NOT touch the suggestions table. The actual refresh (below) is what the
+    // worker drives. These two tests pin that contract so the model call can
+    // never sneak back under the shared index lock.
 
     #[test]
-    fn monitor_added_upserts_suggestion_for_incomplete_note() {
+    fn on_change_added_enqueues_and_writes_no_row() {
         let conn = mem_db();
         let monitor = SuggesterMonitor;
         monitor
             .on_change(&conn, &changed("/m/a.md", ChangeKind::Added, Some(INCOMPLETE)))
             .unwrap();
+        assert!(rows(&conn).is_empty(), "on_change must not write a row inline");
+        assert_eq!(queued(&conn), vec!["/m/a.md".to_string()], "note is queued");
+    }
+
+    #[test]
+    fn on_change_deleted_clears_row_and_dequeues() {
+        let conn = mem_db();
+        let monitor = SuggesterMonitor;
+        // Pretend the worker already produced a row, and the note is queued.
+        upsert_suggestion(&conn, &dummy_result("/m/a.md", 0.5, true), "h").unwrap();
+        crate::maintenance::enqueue(&conn, "/m/a.md", ChangeKind::Edited, INCOMPLETE).unwrap();
+        // Delete clears inline (no model) and drops the pending queue entry.
+        monitor
+            .on_change(&conn, &changed("/m/a.md", ChangeKind::Deleted, None))
+            .unwrap();
+        assert!(rows(&conn).is_empty(), "deleted note → suggestion row removed");
+        assert!(queued(&conn).is_empty(), "deleted note → dequeued");
+    }
+
+    // ── refresh: the worker path (incomplete → upsert keyed by path) ──────────
+
+    #[test]
+    fn refresh_upserts_suggestion_for_incomplete_note() {
+        let conn = mem_db();
+        SuggesterMonitor::refresh(&conn, "/m/a.md", INCOMPLETE).unwrap();
         let rs = rows(&conn);
         assert_eq!(rs.len(), 1, "an incomplete note gets a row");
         assert_eq!(rs[0].0, "/m/a.md");
@@ -390,43 +439,33 @@ mod tests {
         assert_eq!(rs[0].1, content_hash(INCOMPLETE));
     }
 
-    // ── Monitor: a now-complete note has its row deleted ──────────────────────
+    // ── refresh: a now-complete note has its row deleted ──────────────────────
 
     #[test]
-    fn monitor_edited_to_complete_deletes_row() {
+    fn refresh_to_complete_deletes_row() {
         let conn = mem_db();
-        let monitor = SuggesterMonitor;
         // First it is incomplete → row created.
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Added, Some(INCOMPLETE)))
-            .unwrap();
+        SuggesterMonitor::refresh(&conn, "/m/a.md", INCOMPLETE).unwrap();
         assert_eq!(rows(&conn).len(), 1);
-        // Then it is edited to be complete → row dropped.
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Edited, Some(COMPLETE)))
-            .unwrap();
+        // Then it is complete → row dropped.
+        SuggesterMonitor::refresh(&conn, "/m/a.md", COMPLETE).unwrap();
         assert!(rows(&conn).is_empty(), "complete note → no suggestion row");
     }
 
-    // ── Monitor: unchanged incomplete note is skipped (no recompute) ──────────
+    // ── refresh: unchanged incomplete note is skipped (no recompute) ──────────
 
     #[test]
-    fn monitor_unchanged_hash_is_skipped() {
+    fn refresh_unchanged_hash_is_skipped() {
         let conn = mem_db();
-        let monitor = SuggesterMonitor;
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Added, Some(INCOMPLETE)))
-            .unwrap();
+        SuggesterMonitor::refresh(&conn, "/m/a.md", INCOMPLETE).unwrap();
         // Stamp a sentinel created_ts we can detect a recompute by.
         conn.execute(
             "UPDATE frontmatter_suggestions SET created_ts = 'SENTINEL' WHERE path = '/m/a.md'",
             [],
         )
         .unwrap();
-        // Re-dispatch the SAME body → hash matches → no recompute → ts untouched.
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Edited, Some(INCOMPLETE)))
-            .unwrap();
+        // Re-run the SAME body → hash matches → no recompute → ts untouched.
+        SuggesterMonitor::refresh(&conn, "/m/a.md", INCOMPLETE).unwrap();
         let ts: String = conn
             .query_row(
                 "SELECT created_ts FROM frontmatter_suggestions WHERE path = '/m/a.md'",
@@ -437,30 +476,12 @@ mod tests {
         assert_eq!(ts, "SENTINEL", "unchanged note must not be recomputed");
     }
 
-    // ── Monitor: Deleted removes the row ──────────────────────────────────────
-
-    #[test]
-    fn monitor_deleted_removes_row() {
-        let conn = mem_db();
-        let monitor = SuggesterMonitor;
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Added, Some(INCOMPLETE)))
-            .unwrap();
-        assert_eq!(rows(&conn).len(), 1);
-        monitor
-            .on_change(&conn, &changed("/m/a.md", ChangeKind::Deleted, None))
-            .unwrap();
-        assert!(rows(&conn).is_empty(), "deleted note → row removed");
-    }
-
     // ── Degrade path: no model still upserts and never errors ─────────────────
 
     #[test]
-    fn monitor_degrades_without_model_and_never_errors() {
+    fn refresh_degrades_without_model_and_never_errors() {
         let conn = mem_db();
-        let monitor = SuggesterMonitor;
-        let res =
-            monitor.on_change(&conn, &changed("/m/new.md", ChangeKind::Added, Some(INCOMPLETE)));
+        let res = SuggesterMonitor::refresh(&conn, "/m/new.md", INCOMPLETE);
         assert!(res.is_ok(), "degrade path must not error: {res:?}");
         let rs = rows(&conn);
         assert_eq!(rs.len(), 1, "rules+path result is still persisted");

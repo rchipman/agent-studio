@@ -127,6 +127,12 @@ const STATE_SCHEMA: &str = "
         mtime        INTEGER NOT NULL DEFAULT 0,
         content_hash TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS maintenance_queue (
+        path        TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL DEFAULT 'edited',
+        content     TEXT NOT NULL DEFAULT '',
+        enqueued_at TEXT NOT NULL DEFAULT ''
+    );
 ";
 
 /// Ensure the change-detection state table AND every handler's own store exists.
@@ -289,6 +295,109 @@ fn dispatch_one(conn: &Connection, handler: &dyn MaintenanceHandler, change: &No
             change.path,
             change.kind.as_str()
         ),
+    }
+}
+
+// ── Off-lock work queue (TIN-1766) ──────────────────────────────────────────────
+//
+// The ambient handlers that need the LOCAL MODEL (consistency's contradiction
+// judge) must NOT run inline under the shared `search::Db` mutex — a multi-second
+// Ollama call held under that lock stalls every other command (Sessions hung for
+// minutes). So those handlers only *enqueue* a changed note here (a cheap SQL
+// upsert under the lock); a dedicated background worker thread (spawned in
+// `lib.rs`, owning its OWN connection) drains the queue OFF the shared mutex and
+// does the model work there. Delete is handled inline by the handlers (cheap,
+// no model) and also de-queues any pending entry for that path.
+
+/// Enqueue a changed note for off-lock ambient processing. Idempotent: a note
+/// already queued is coalesced (latest content/kind wins), so repeated edits
+/// before the worker catches up collapse to one unit of work.
+pub fn enqueue(conn: &Connection, path: &str, kind: ChangeKind, content: &str) -> rusqlite::Result<()> {
+    let ts = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO maintenance_queue (path, kind, content, enqueued_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+           kind = excluded.kind,
+           content = excluded.content,
+           enqueued_at = excluded.enqueued_at",
+        params![path, kind.as_str(), content, ts],
+    )?;
+    Ok(())
+}
+
+/// Remove a path from the queue (e.g. it was just deleted, so the pending
+/// add/edit is moot). Safe to call when the path is not queued.
+pub fn dequeue_remove(conn: &Connection, path: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM maintenance_queue WHERE path = ?1", params![path])?;
+    Ok(())
+}
+
+/// One queued unit of ambient work.
+pub struct QueuedNote {
+    pub path: String,
+    pub content: String,
+}
+
+/// Atomically take up to `limit` queued notes (claim-and-delete in one
+/// transaction so a crash mid-drain cannot silently lose them to a half-state —
+/// either they are still queued, or they are returned to the caller to process).
+pub fn dequeue_batch(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<QueuedNote>> {
+    let tx = conn.unchecked_transaction()?;
+    let batch: Vec<QueuedNote> = {
+        let mut stmt = tx.prepare(
+            "SELECT path, content FROM maintenance_queue ORDER BY enqueued_at LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(QueuedNote {
+                path: r.get::<_, String>(0)?,
+                content: r.get::<_, String>(1)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for n in &batch {
+        tx.execute("DELETE FROM maintenance_queue WHERE path = ?1", params![n.path])?;
+    }
+    tx.commit()?;
+    Ok(batch)
+}
+
+/// Number of notes currently waiting for ambient processing. A utility for tests
+/// and a future queue-depth surface; not yet wired to a command.
+#[allow(dead_code)]
+pub fn queue_len(conn: &Connection) -> rusqlite::Result<usize> {
+    ensure_schema(conn)?;
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM maintenance_queue", [], |r| r.get(0))?;
+    Ok(n as usize)
+}
+
+/// Drain one batch of queued notes through the model-using ambient refreshers,
+/// each panic/error-isolated so one bad note never stalls the worker. Returns the
+/// number of notes processed this call (0 = queue was empty). Runs on the worker
+/// thread's OWN connection — never the shared `Db` mutex.
+pub fn drain_once(conn: &Connection) -> rusqlite::Result<usize> {
+    ensure_schema(conn)?;
+    let batch = dequeue_batch(conn, 16)?;
+    for note in &batch {
+        run_isolated("ConsistencyMonitor", &note.path, || {
+            crate::consistency::ConsistencyMonitor::refresh(conn, &note.path, &note.content)
+        });
+        run_isolated("SuggesterMonitor", &note.path, || {
+            crate::suggestions::SuggesterMonitor::refresh(conn, &note.path, &note.content)
+        });
+    }
+    Ok(batch.len())
+}
+
+/// Run one refresher, catching panics and errors so a single bad note can never
+/// kill the worker loop. Mirrors `dispatch_one`'s degrade-safe contract.
+fn run_isolated<F: FnOnce() -> rusqlite::Result<()>>(who: &str, path: &str, f: F) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("[maintenance] worker '{who}' failed on {path}: {e}"),
+        Err(_) => log::warn!("[maintenance] worker '{who}' panicked on {path} — skipped"),
     }
 }
 
@@ -480,6 +589,70 @@ mod tests {
                 ("a.md".to_string(), "deleted".to_string()),
             ]
         );
+    }
+
+    // ── Off-lock queue (TIN-1766) ─────────────────────────────────────────────
+
+    #[test]
+    fn enqueue_dequeue_round_trips_and_coalesces() {
+        let conn = mem_db();
+        enqueue(&conn, "a.md", ChangeKind::Added, "body-a").unwrap();
+        enqueue(&conn, "b.md", ChangeKind::Edited, "body-b").unwrap();
+        // Re-enqueue a.md with new content → coalesced to one row, latest wins.
+        enqueue(&conn, "a.md", ChangeKind::Edited, "body-a2").unwrap();
+        assert_eq!(queue_len(&conn).unwrap(), 2, "a.md coalesced, not duplicated");
+
+        let batch = dequeue_batch(&conn, 16).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert_eq!(queue_len(&conn).unwrap(), 0, "dequeue removes claimed rows");
+        let a = batch.iter().find(|n| n.path == "a.md").unwrap();
+        assert_eq!(a.content, "body-a2", "latest content wins");
+    }
+
+    #[test]
+    fn dequeue_batch_respects_limit() {
+        let conn = mem_db();
+        for i in 0..5 {
+            enqueue(&conn, &format!("n{i}.md"), ChangeKind::Added, "x").unwrap();
+        }
+        let first = dequeue_batch(&conn, 2).unwrap();
+        assert_eq!(first.len(), 2, "only `limit` claimed");
+        assert_eq!(queue_len(&conn).unwrap(), 3, "rest remain queued");
+    }
+
+    #[test]
+    fn dequeue_remove_drops_a_pending_entry() {
+        let conn = mem_db();
+        enqueue(&conn, "a.md", ChangeKind::Added, "x").unwrap();
+        dequeue_remove(&conn, "a.md").unwrap();
+        assert_eq!(queue_len(&conn).unwrap(), 0);
+        // Idempotent: removing a non-queued path is a no-op, not an error.
+        dequeue_remove(&conn, "missing.md").unwrap();
+    }
+
+    #[test]
+    fn drain_once_processes_queue_off_the_real_handlers() {
+        // End-to-end: an enqueued incomplete note drains through the real
+        // refreshers. With no reasoning model the suggester degrades to a
+        // rules+path row; consistency degrades to none. Either way the queue
+        // empties and drain_once reports the count.
+        let conn = mem_db();
+        let incomplete = "# Note\n\nBody with no frontmatter.";
+        enqueue(&conn, "/m/a.md", ChangeKind::Added, incomplete).unwrap();
+        enqueue(&conn, "/m/b.md", ChangeKind::Added, incomplete).unwrap();
+
+        let n = drain_once(&conn).unwrap();
+        assert_eq!(n, 2, "both queued notes processed");
+        assert_eq!(queue_len(&conn).unwrap(), 0, "queue drained");
+
+        // The suggester (degraded) produced a row per incomplete note.
+        let sugg: i64 = conn
+            .query_row("SELECT COUNT(*) FROM frontmatter_suggestions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sugg, 2, "worker ran the suggester refresh off-lock");
+
+        // Empty queue → drain reports zero and does nothing.
+        assert_eq!(drain_once(&conn).unwrap(), 0);
     }
 
     #[test]
