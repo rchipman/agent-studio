@@ -22,7 +22,7 @@ import { NotePill } from '@/components/ConsistencyView'
 import Button from '@/components/Button'
 import { linkSuggest } from '@/lib/links'
 import { recordNoteOpen } from '@/lib/reads'
-import { suggestFrontmatter, summarizeNote, importMarkdown, type Suggestion } from '@/lib/frontmatter'
+import { suggestFrontmatter, summarizeNote, importMarkdown, suggestionsStatus, type Suggestion } from '@/lib/frontmatter'
 import { scoreMemory, recordMemoryChange, bodyHash, type Conflict } from '@/lib/continuity'
 import { initTheme } from '@/lib/theme'
 import { getSettings, rebuildIndex } from '@/lib/settings'
@@ -516,6 +516,9 @@ export default function Home() {
     seeded: false,
     count: 0,
   })
+  // Ambient suggestions status (TIN-1762): drives the calm count on the Fields
+  // rail item. Polled on mount, on a ~30s interval, and on window focus.
+  const [suggestionsCount, setSuggestionsCount] = useState(0)
   // Frontmatter manager (TIN-1638): import queue + drag affordance.
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
   const [draggingImport, setDraggingImport] = useState(false)
@@ -563,16 +566,23 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── Maintained consistency drift (TIN-1761) ──
-  // The background check updates the picture as notes change but emits no event,
-  // so keep the rail badge fresh with a cheap status read on mount, a light
-  // interval, and on window focus.
+  // ── Maintained consistency drift (TIN-1761) + ambient suggestions (TIN-1762) ──
+  // Both polls are cheap status reads; run them together on mount, a ~30s
+  // interval, and on window focus so the rail badges stay fresh without hammering
+  // the backend.
   useEffect(() => {
     let cancelled = false
     const refresh = () => {
       consistencyStatus()
         .then((s) => {
           if (!cancelled) setConsistency(s)
+        })
+        .catch(() => {
+          /* leave the last-known count; the badge degrades to hidden on first failure */
+        })
+      suggestionsStatus()
+        .then((s) => {
+          if (!cancelled) setSuggestionsCount(s.count)
         })
         .catch(() => {
           /* leave the last-known count; the badge degrades to hidden on first failure */
@@ -1273,6 +1283,7 @@ export default function Home() {
         onOpenSettings={() => setShowSettings(true)}
         consistencyCount={consistency.count}
         consistencySeeded={consistency.seeded}
+        suggestionsCount={suggestionsCount}
       />
 
       {/* Main column — workspace, or the active full view, right of the rail. The

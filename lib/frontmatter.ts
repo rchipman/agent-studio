@@ -197,3 +197,29 @@ export async function applySuggestionsBulk(payloads: ApplySuggestionPayload[]): 
 export function cancelSuggest(): Promise<void> {
   return invoke('cancel_suggest')
 }
+
+// ── Ambient pre-computed suggestions (TIN-1762) ───────────────────────────────
+
+/**
+ * Read every note's pre-computed suggestion (maintained ambiently as notes
+ * change, same shape as `suggest_all` results). Use this to populate the
+ * Fields view on mount without running the model — it reads the cached table.
+ */
+export async function allSuggestions(): Promise<ConfidenceResult[]> {
+  return invoke<ConfidenceResult[]>('all_suggestions')
+}
+
+/** Status summary for the ambient suggestions table (TIN-1762). */
+export interface SuggestionsStatus {
+  /** Number of notes that currently have a pending suggestion. */
+  count: number
+}
+
+/**
+ * How many notes have a pending pre-computed suggestion. Cheap to read —
+ * use on mount, on a ~30s interval, and on window focus for the Fields rail
+ * badge.
+ */
+export async function suggestionsStatus(): Promise<SuggestionsStatus> {
+  return invoke<SuggestionsStatus>('suggestions_status')
+}

@@ -29,6 +29,7 @@ import {
   onSuggestResult,
   applySuggestion,
   applySuggestionsBulk,
+  allSuggestions,
   bandOf,
   type AuditEntry,
   type AuditStatus,
@@ -223,6 +224,29 @@ export default function AuditView({ onClose, knownTypes, knownProjects }: AuditV
   useEffect(() => {
     load()
   }, [load])
+
+  // Load pre-computed ambient suggestions on mount and on window focus so the
+  // view shows dots / bands / "Apply N" immediately (TIN-1762). The backend
+  // maintains this table as notes change; we just read it.
+  const loadPrecomputed = useCallback(() => {
+    allSuggestions()
+      .then((results) => {
+        if (results.length === 0) return
+        setSuggestions((prev) => {
+          const map = { ...prev }
+          for (const r of results) map[r.path] = r
+          return map
+        })
+        if (results.some((r) => r.degraded)) setDegraded(true)
+      })
+      .catch(() => { /* calm: leave the current map on failure */ })
+  }, [])
+
+  useEffect(() => {
+    loadPrecomputed()
+    window.addEventListener('focus', loadPrecomputed)
+    return () => window.removeEventListener('focus', loadPrecomputed)
+  }, [loadPrecomputed])
 
   // Escape: close the editor first, then the confirm, then the view.
   useEffect(() => {

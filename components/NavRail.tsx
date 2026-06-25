@@ -31,6 +31,11 @@ export function reconcileTooltip(count: number): string {
   return `Consistency · ${count} to reconcile`
 }
 
+/** The Fields item's "{n} ready" tooltip (TIN-1762). Singular "1 ready". */
+export function suggestionsTooltip(count: number): string {
+  return `Fields · ${count === 1 ? '1 ready' : `${count} ready`}`
+}
+
 interface NavRailProps {
   active: RailDest
   onSelect: (dest: RailDest) => void
@@ -39,6 +44,9 @@ interface NavRailProps {
    *  item, shown only when seeded and count > 0. */
   consistencyCount?: number
   consistencySeeded?: boolean
+  /** Ambient pre-computed suggestion count (TIN-1762): a calm forest count on
+   *  the Fields item, shown when count > 0. */
+  suggestionsCount?: number
 }
 
 // ── Icons (16px stroke, matching the app's icon style) ──────────────────────────
@@ -227,6 +235,7 @@ export default function NavRail({
   onOpenSettings,
   consistencyCount = 0,
   consistencySeeded = false,
+  suggestionsCount = 0,
 }: NavRailProps) {
   // Show the calm drift count only once seeded and there is something to look at.
   const showDrift = consistencySeeded && consistencyCount > 0
@@ -234,6 +243,13 @@ export default function NavRail({
   const checkTitle = showDrift
     ? `Consistency audit (⌘⇧C)\n${reconcileTooltip(consistencyCount)}`
     : 'Consistency audit (⌘⇧C)'
+
+  // Fields badge: shown when there are pre-computed suggestions pending (TIN-1762).
+  const showSuggestions = suggestionsCount > 0
+  const suggestionsBadge = showSuggestions ? driftBadgeLabel(suggestionsCount) : undefined
+  const fieldsTitle = showSuggestions
+    ? `Frontmatter audit (⌘⇧A)\n${suggestionsTooltip(suggestionsCount)}`
+    : 'Frontmatter audit (⌘⇧A)'
   return (
     <nav
       aria-label="Main"
@@ -272,7 +288,7 @@ export default function NavRail({
       <Divider />
 
       <RailItem dest="graph" label="Graph" active={active === 'graph'} onClick={() => onSelect('graph')} title="Knowledge graph (⌘G)" />
-      <RailItem dest="frontmatter" label="Fields" active={active === 'frontmatter'} onClick={() => onSelect('frontmatter')} title="Frontmatter audit (⌘⇧A)" />
+      <RailItem dest="frontmatter" label="Fields" active={active === 'frontmatter'} onClick={() => onSelect('frontmatter')} title={fieldsTitle} badge={suggestionsBadge} />
       <RailItem dest="consistency" label="Check" active={active === 'consistency'} onClick={() => onSelect('consistency')} title={checkTitle} badge={driftBadge} />
 
       <Divider />
