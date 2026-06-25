@@ -14,17 +14,31 @@
  * tokens — all from lib/tokens.ts.
  */
 
-import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
+import { color, space, radius, type as typeRamp } from '@/lib/tokens'
 
 /** Rail destinations. `search` is the workspace home. */
 export type RailDest = 'search' | 'graph' | 'frontmatter' | 'consistency' | 'launch' | 'transcripts' | 'changes'
 
 const RAIL_WIDTH = 52
 
+/** The calm drift badge caps at "9+" (TIN-1761). Pure so it can be unit-tested. */
+export function driftBadgeLabel(count: number): string {
+  return count > 9 ? '9+' : String(count)
+}
+
+/** The Check item's "{n} to reconcile" tooltip, with a singular "1". (TIN-1761) */
+export function reconcileTooltip(count: number): string {
+  return `Consistency · ${count} to reconcile`
+}
+
 interface NavRailProps {
   active: RailDest
   onSelect: (dest: RailDest) => void
   onOpenSettings: () => void
+  /** Maintained consistency drift (TIN-1761): a calm forest count on the Check
+   *  item, shown only when seeded and count > 0. */
+  consistencyCount?: number
+  consistencySeeded?: boolean
 }
 
 // ── Icons (16px stroke, matching the app's icon style) ──────────────────────────
@@ -115,12 +129,15 @@ function RailItem({
   active,
   onClick,
   title,
+  badge,
 }: {
   dest: RailDest | 'settings'
   label: string
   active: boolean
   onClick: () => void
   title: string
+  /** Optional calm count badge over the icon (the neutral-badge idiom, forest tint). */
+  badge?: string
 }) {
   return (
     <button
@@ -173,6 +190,26 @@ function RailItem({
         />
       )}
       <Icon name={dest} />
+      {/* Calm drift badge — forest tint (fresh-and-calm), top-right of the icon,
+          clear of the micro-label. Reuses the neutral-badge idiom (TIN-1761). */}
+      {badge && (
+        <span
+          aria-hidden
+          style={{
+            position: 'absolute',
+            top: space[1],
+            right: space[2],
+            ...typeRamp.micro,
+            color: color.forest,
+            background: color.forestTint,
+            borderRadius: radius.chip,
+            padding: '0 4px',
+            lineHeight: 1.4,
+          }}
+        >
+          {badge}
+        </span>
+      )}
       <span style={{ ...typeRamp.micro, fontSize: 9, letterSpacing: '0.01em', lineHeight: 1 }}>{label}</span>
     </button>
   )
@@ -184,7 +221,19 @@ function Divider() {
 
 // ── Rail ────────────────────────────────────────────────────────────────────────
 
-export default function NavRail({ active, onSelect, onOpenSettings }: NavRailProps) {
+export default function NavRail({
+  active,
+  onSelect,
+  onOpenSettings,
+  consistencyCount = 0,
+  consistencySeeded = false,
+}: NavRailProps) {
+  // Show the calm drift count only once seeded and there is something to look at.
+  const showDrift = consistencySeeded && consistencyCount > 0
+  const driftBadge = showDrift ? driftBadgeLabel(consistencyCount) : undefined
+  const checkTitle = showDrift
+    ? `Consistency audit (⌘⇧C)\n${reconcileTooltip(consistencyCount)}`
+    : 'Consistency audit (⌘⇧C)'
   return (
     <nav
       aria-label="Main"
@@ -224,7 +273,7 @@ export default function NavRail({ active, onSelect, onOpenSettings }: NavRailPro
 
       <RailItem dest="graph" label="Graph" active={active === 'graph'} onClick={() => onSelect('graph')} title="Knowledge graph (⌘G)" />
       <RailItem dest="frontmatter" label="Fields" active={active === 'frontmatter'} onClick={() => onSelect('frontmatter')} title="Frontmatter audit (⌘⇧A)" />
-      <RailItem dest="consistency" label="Check" active={active === 'consistency'} onClick={() => onSelect('consistency')} title="Consistency audit (⌘⇧C)" />
+      <RailItem dest="consistency" label="Check" active={active === 'consistency'} onClick={() => onSelect('consistency')} title={checkTitle} badge={driftBadge} />
 
       <Divider />
 
