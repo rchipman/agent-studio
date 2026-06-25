@@ -278,6 +278,99 @@ pub async fn score_content(db: &Db, payload: ScoreMemoryInput) -> Result<Continu
     })
 }
 
+/// Score a candidate note against the base using a BORROWED `&Connection`
+/// instead of a `&Db` (which owns its own `Mutex<Connection>`).
+///
+/// This is the variant the ambient `ConsistencyMonitor` (TIN-1761) needs: that
+/// handler runs *inside* the index pass already holding the index connection, so
+/// it cannot re-lock a `Db`. It interleaves the locked work (neighbour selection,
+/// body loads) with the async embed/judge work between `await` points, exactly
+/// like [`score_content`], but never touches a mutex. Caller is responsible for
+/// driving the returned future (e.g. on a current-thread runtime, as the CLI's
+/// `run_add_memory` does).
+pub async fn score_content_conn(
+    conn: &rusqlite::Connection,
+    payload: ScoreMemoryInput,
+) -> Result<ContinuityScore, String> {
+    let content = payload.content.trim().to_string();
+    if content.is_empty() {
+        return Ok(ContinuityScore {
+            continuity_score: 1.0,
+            conflicts: Vec::new(),
+            degraded: false,
+        });
+    }
+
+    // ── Phase A: embed the candidate (CPU-bound; no conn touched) ────────────
+    let query_vec: Option<Vec<f32>> = {
+        let c = content.clone();
+        match tokio::task::spawn_blocking(move || crate::local_embed::embed(vec![c])).await {
+            Ok(Ok(mut v)) => v.pop(),
+            Ok(Err(e)) => {
+                log::warn!("[continuity] embed failed, treating as novel: {e}");
+                None
+            }
+            Err(e) => {
+                log::warn!("[continuity] embed task failed: {e}");
+                None
+            }
+        }
+    };
+
+    // ── Phase B: select nearest notes + gather bodies (sync, borrowed conn) ──
+    let candidates: Vec<(String, String, String, f32)> = if let Some(qv) = &query_vec {
+        let neighbours =
+            select_candidates(conn, qv, payload.path.as_deref()).map_err(|e| e.to_string())?;
+        neighbours
+            .into_iter()
+            .map(|n| {
+                let (name, body) = load_note(conn, &n.path);
+                (n.path, name, body, n.similarity)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let top_similarity = candidates.first().map(|(_, _, _, sim)| *sim);
+
+    // ── Phase C: degrade calmly if there is no reasoning model ────────────────
+    if !crate::reason::reachable().await {
+        return Ok(ContinuityScore {
+            continuity_score: degraded_score(top_similarity),
+            conflicts: Vec::new(),
+            degraded: true,
+        });
+    }
+
+    // ── Phase D: judge each candidate (async; no conn touched) ────────────────
+    let mut conflicts = Vec::new();
+    for (path, name, body, _sim) in candidates {
+        if body.trim().is_empty() {
+            continue;
+        }
+        match judge_pair("candidate note", &content, &name, &body).await {
+            Ok(found) => {
+                for why in found {
+                    conflicts.push(Conflict {
+                        path: path.clone(),
+                        name: name.clone(),
+                        contradicted_decision: why.clone(),
+                        why,
+                    });
+                }
+            }
+            Err(e) => log::warn!("[continuity] judge against {path} failed: {e}"),
+        }
+    }
+
+    Ok(ContinuityScore {
+        continuity_score: score_from_conflicts(conflicts.len()),
+        conflicts,
+        degraded: false,
+    })
+}
+
 /// Tauri command wrapper — thin shim over [`score_content`] so the frontend IPC
 /// surface is unchanged.
 #[tauri::command]
