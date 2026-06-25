@@ -107,6 +107,12 @@ fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE transcript_sessions ADD COLUMN models TEXT",
         [],
     );
+    // TIN-1759: archive timestamp (NULL = not yet archived). The PK stays the
+    // LIVE path, so FTS / metrics / calendar are entirely untouched.
+    let _ = conn.execute(
+        "ALTER TABLE transcript_sessions ADD COLUMN archived_at INTEGER",
+        [],
+    );
     Ok(())
 }
 
@@ -273,7 +279,7 @@ fn subagents_dir_for(session_path: &Path) -> Option<PathBuf> {
 
 /// Collect the subagent `.jsonl` files for a session, sorted by filename for a
 /// deterministic order (first-timestamp ordering is implicit in the agent root).
-fn collect_subagent_files(session_path: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_subagent_files(session_path: &Path) -> Vec<PathBuf> {
     let dir = match subagents_dir_for(session_path) {
         Some(d) => d,
         None => return Vec::new(),
@@ -507,6 +513,144 @@ fn parse_session_file(path: &Path) -> Vec<Turn> {
         .collect()
 }
 
+/// TIN-1759: read context for the `get_session` archive fallback. Holds the
+/// transcripts root + archive root so a deleted live file can resolve to its
+/// archived `.zst`. `None` means "no archive fallback" (the indexer path, which
+/// only ever reads fresh live files).
+#[derive(Clone, Copy)]
+struct ReadCtx<'a> {
+    transcripts_root: &'a Path,
+    archive_root: &'a Path,
+}
+
+/// Read one transcript file with the archive fallback (TIN-1759):
+///   1. live path exists  → read live (freshest; Claude Code may be appending),
+///   2. else archived `.zst` exists → decode it,
+///   3. else None.
+/// With no ctx, only step 1 applies.
+fn read_transcript_text(path: &Path, ctx: Option<ReadCtx>) -> Option<String> {
+    if path.exists() {
+        return fs::read_to_string(path).ok();
+    }
+    let ctx = ctx?;
+    let archived =
+        crate::archive::live_to_archived(path, ctx.transcripts_root, ctx.archive_root)?;
+    if archived.exists() {
+        return crate::archive::read_maybe_zst(&archived).ok();
+    }
+    None
+}
+
+/// Parse a session file with the archive fallback.
+fn parse_session_file_ctx(path: &Path, ctx: Option<ReadCtx>) -> Vec<Turn> {
+    let raw = match read_transcript_text(path, ctx) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(parse_line_full)
+        .map(parsed_to_turn)
+        .collect()
+}
+
+/// Enumerate a session's subagent `.jsonl` files, falling back to the ARCHIVE
+/// sidecar dir when the live session has been pruned. Returns LIVE paths (the
+/// reader resolves each to its archived copy), so downstream meta/label logic is
+/// unchanged whether the bytes are live or archived.
+fn collect_subagent_files_ctx(session_path: &Path, ctx: Option<ReadCtx>) -> Vec<PathBuf> {
+    let live = collect_subagent_files(session_path);
+    if !live.is_empty() {
+        return live;
+    }
+    // Live session pruned: list the archived sidecar dir and map back to live
+    // paths so live_to_archived round-trips them.
+    let ctx = match ctx {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let archived_session =
+        match crate::archive::live_to_archived(session_path, ctx.transcripts_root, ctx.archive_root)
+        {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+    // archived_session = <arch>/<proj>/<sess>.jsonl.zst ; subagents live under
+    // <arch>/<proj>/<sess>/subagents/agent-*.jsonl.zst.
+    let stem = match archived_session
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".jsonl.zst"))
+    {
+        Some(s) => s.to_string(),
+        None => return Vec::new(),
+    };
+    let archived_dir = match archived_session.parent() {
+        Some(p) => p.join(&stem).join("subagents"),
+        None => return Vec::new(),
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&archived_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.starts_with("agent-") && name.ends_with(".jsonl.zst") {
+                // Map the archived sidecar path back to its LIVE equivalent.
+                let live_name = name.trim_end_matches(".zst");
+                let live_dir = session_path
+                    .parent()
+                    .map(|d| d.join(&stem).join("subagents"))
+                    .unwrap_or_default();
+                out.push(live_dir.join(live_name));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Read an `agent-<id>.meta.json` with the archive fallback. The meta is stored
+/// uncompressed in the archive, so `read_maybe_zst` reads it directly.
+fn read_agent_meta_ctx(agent_jsonl: &Path, ctx: Option<ReadCtx>) -> AgentMeta {
+    let meta_path = agent_jsonl.with_extension("meta.json");
+    if meta_path.exists() {
+        return read_agent_meta(agent_jsonl);
+    }
+    // Live meta gone: resolve via the archive (jsonl → .zst → sibling meta.json).
+    if let Some(ctx) = ctx {
+        if let Some(archived_jsonl) =
+            crate::archive::live_to_archived(agent_jsonl, ctx.transcripts_root, ctx.archive_root)
+        {
+            // archived_jsonl ends with .jsonl.zst; meta sits beside as .meta.json.
+            if let Some(dir) = archived_jsonl.parent() {
+                let archived_meta = dir.join(format!(
+                    "{}.meta.json",
+                    agent_jsonl
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                ));
+                if let Ok(raw) = fs::read_to_string(&archived_meta) {
+                    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                        let s = |k: &str| {
+                            v.get(k)
+                                .and_then(|x| x.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                        };
+                        return AgentMeta {
+                            tool_use_id: s("toolUseId"),
+                            agent_type: s("agentType"),
+                            description: s("description"),
+                        };
+                    }
+                }
+            }
+        }
+    }
+    AgentMeta::default()
+}
+
 /// Convert a ParsedLine into a frontend Turn (main-thread defaults).
 fn parsed_to_turn(p: ParsedLine) -> Turn {
     Turn {
@@ -566,17 +710,25 @@ fn resolve_agent_label(meta: &AgentMeta, line_agent_type: Option<&str>) -> Strin
         .unwrap_or_else(|| "agent".to_string())
 }
 
-/// Build the stitched, threaded turn list for a session: main thread first,
-/// then each subagent's sub-thread appended in filename (≈ spawn) order.
+/// Build the stitched, threaded turn list for a session (no archive fallback).
+/// Thin wrapper kept for existing tests.
+#[cfg(test)]
 fn build_threaded_turns(session_path: &Path) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = parse_session_file(session_path);
+    build_threaded_turns_ctx(session_path, None)
+}
 
-    for agent_file in collect_subagent_files(session_path) {
-        let meta = read_agent_meta(&agent_file);
+/// Build the stitched, threaded turn list for a session: main thread first,
+/// then each subagent's sub-thread appended in filename (≈ spawn) order. With a
+/// `ReadCtx`, a pruned live file resolves to its archived `.zst` (TIN-1759).
+fn build_threaded_turns_ctx(session_path: &Path, ctx: Option<ReadCtx>) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = parse_session_file_ctx(session_path, ctx);
+
+    for agent_file in collect_subagent_files_ctx(session_path, ctx) {
+        let meta = read_agent_meta_ctx(&agent_file, ctx);
         // agentType may also appear on the line as agentType/subagentType.
-        let raw = match fs::read_to_string(&agent_file) {
-            Ok(s) => s,
-            Err(_) => continue,
+        let raw = match read_transcript_text(&agent_file, ctx) {
+            Some(s) => s,
+            None => continue,
         };
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
             // Pull line-level agentType/subagentType as a label fallback when the
@@ -704,7 +856,7 @@ fn date_from_path_or_mtime(path: &Path) -> String {
 }
 
 /// Very simple epoch-days to (year, month, day) without external deps.
-fn days_to_ymd(mut days: u32) -> (u32, u32, u32) {
+pub(crate) fn days_to_ymd(mut days: u32) -> (u32, u32, u32) {
     let mut year = 1970u32;
     loop {
         let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
@@ -742,7 +894,7 @@ fn days_to_ymd(mut days: u32) -> (u32, u32, u32) {
 }
 
 /// Get mtime as u64 seconds.
-fn mtime_secs(path: &Path) -> u64 {
+pub(crate) fn mtime_secs(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .map(|t| {
@@ -893,11 +1045,54 @@ fn build_transcript_index(root: &Path, conn: &Connection) -> rusqlite::Result<()
     tx.commit()
 }
 
+/// TIN-1759: run the archive pass under the indexer's lock when archiving is
+/// enabled, then stamp `archived_at` on each (re)archived session. Called by the
+/// indexing commands right after `build_transcript_index`, with the same `conn`
+/// lock still held, so the archive never races a concurrent reindex. Any error
+/// here is logged and swallowed — archiving must never break browsing/search.
+fn maybe_archive_pass<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    transcripts_root: &Path,
+    conn: &Connection,
+) {
+    let settings = crate::settings::load_settings(app);
+    if !settings.archive_enabled {
+        return;
+    }
+    let archive_root = match crate::archive::archive_root(app) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[archive] could not resolve archive root: {e}");
+            return;
+        }
+    };
+    let mut manifest = crate::archive::load_manifest(&archive_root);
+    let written = match crate::archive::archive_pass(
+        Some(app),
+        transcripts_root,
+        &archive_root,
+        &mut manifest,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!("[archive] archive pass failed: {e}");
+            return;
+        }
+    };
+    // Stamp archived_at on the live-path PK rows for everything just archived.
+    for (_session_id, live_path, archived_at) in &written {
+        let _ = conn.execute(
+            "UPDATE transcript_sessions SET archived_at = ?1 WHERE path = ?2",
+            params![*archived_at as i64, live_path.to_string_lossy()],
+        );
+    }
+}
+
 /// Walk `root`, yielding `(project_name, path_to_jsonl)` for every TOP-LEVEL
 /// session `.jsonl` directly inside a project dir. Subagent sidecar files (under
 /// a `subagents/` directory and/or named `agent-*.jsonl`) are NEVER yielded as
 /// standalone sessions (TIN-1721). Hidden files/dirs are skipped.
-fn collect_jsonl_files(root: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn collect_jsonl_files(root: &Path) -> Vec<(String, PathBuf)> {
     let mut results = Vec::new();
     let entries = match fs::read_dir(root) {
         Ok(e) => e,
@@ -954,6 +1149,7 @@ pub fn list_transcript_projects<R: tauri::Runtime>(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
     build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
+    maybe_archive_pass(&app, &root, &conn);
 
     // One row per project: count, latest date, and a representative cwd (the cwd
     // of the most recent session, so the frontend can show a real path).
@@ -997,6 +1193,7 @@ pub fn list_sessions<R: tauri::Runtime>(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ensure_schema(&conn).map_err(|e| e.to_string())?;
     build_transcript_index(&root, &conn).map_err(|e| e.to_string())?;
+    maybe_archive_pass(&app, &root, &conn);
 
     // An empty/absent project means "all projects": drop the WHERE clause so the
     // list spans every project, newest first (mirrors list_transcript_projects).
@@ -1123,12 +1320,31 @@ pub fn list_sessions<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub fn get_session(payload: GetSessionInput) -> Result<Vec<Turn>, String> {
+pub fn get_session<R: tauri::Runtime>(
+    payload: GetSessionInput,
+    app: tauri::AppHandle<R>,
+) -> Result<Vec<Turn>, String> {
     let path = PathBuf::from(&payload.path);
-    if !path.exists() {
-        return Err(format!("session file not found: {}", payload.path));
+    let transcripts_root = transcripts_root_from_settings(&app);
+    let archive_root = crate::archive::archive_root(&app)?;
+    let ctx = ReadCtx {
+        transcripts_root: &transcripts_root,
+        archive_root: &archive_root,
+    };
+
+    // Live file present → freshest read. Otherwise fall back to the archive (the
+    // .zst may still exist after Claude Code pruned the live transcript).
+    if path.exists() {
+        return Ok(build_threaded_turns_ctx(&path, Some(ctx)));
     }
-    Ok(build_threaded_turns(&path))
+    if let Some(archived) =
+        crate::archive::live_to_archived(&path, &transcripts_root, &archive_root)
+    {
+        if archived.exists() {
+            return Ok(build_threaded_turns_ctx(&path, Some(ctx)));
+        }
+    }
+    Err(format!("session file not found: {}", payload.path))
 }
 
 #[tauri::command]

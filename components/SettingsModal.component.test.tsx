@@ -16,6 +16,19 @@ const MOCK_SETTINGS = {
   agents: [
     { name: 'Claude', command: 'claude', args: ['--print'], cwd: '/projects' },
   ],
+  // TIN-1759: the backend always supplies these via serde defaults.
+  archiveEnabled: true,
+  retentionPolicy: { kind: 'sizeCap', maxBytes: 2_147_483_648 },
+}
+
+const MOCK_ARCHIVE_STATUS = {
+  enabled: true,
+  sessionCount: 0,
+  storedBytes: 0,
+  oldestDate: '',
+  newestDate: '',
+  overCapBytes: 0,
+  prunablePreview: { count: 0, bytes: 0 },
 }
 
 function setupInvoke() {
@@ -25,6 +38,7 @@ function setupInvoke() {
     if (cmd === 'set_settings') return Promise.resolve(undefined)
     if (cmd === 'linear_key_status') return Promise.resolve('unset')
     if (cmd === 'list_linear_teams') return Promise.resolve([])
+    if (cmd === 'archive_status') return Promise.resolve(MOCK_ARCHIVE_STATUS)
     return Promise.resolve(undefined)
   })
 }

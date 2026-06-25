@@ -46,6 +46,35 @@ pub struct Agent {
     pub cwd: String,
 }
 
+/// Retention policy for the durable session archive (TIN-1759). Serialised as a
+/// tagged object so the frontend can switch on `kind`:
+///   { kind: "keepAll" }
+///   { kind: "sizeCap", maxBytes }
+///   { kind: "keepMonths", months }
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RetentionPolicy {
+    KeepAll,
+    #[serde(rename_all = "camelCase")]
+    SizeCap { max_bytes: u64 },
+    #[serde(rename_all = "camelCase")]
+    KeepMonths { months: u32 },
+}
+
+/// Default size cap: 2 GiB. Archives are write-once / read-rarely, so a couple of
+/// gigabytes covers a deep history without unbounded growth.
+pub const DEFAULT_ARCHIVE_CAP_BYTES: u64 = 2_147_483_648;
+
+fn default_archive_enabled() -> bool {
+    true
+}
+
+fn default_retention_policy() -> RetentionPolicy {
+    RetentionPolicy::SizeCap {
+        max_bytes: DEFAULT_ARCHIVE_CAP_BYTES,
+    }
+}
+
 /// The full settings shape persisted to the store. Secrets are excluded.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +85,13 @@ pub struct Settings {
     pub transcripts_root: String,
     #[serde(default)]
     pub agents: Vec<Agent>,
+    /// TIN-1759: whether Studio copies each session out of Claude Code before it
+    /// can prune them. Defaults to on for pre-existing stores.
+    #[serde(default = "default_archive_enabled")]
+    pub archive_enabled: bool,
+    /// TIN-1759: retention policy applied by `run_retention_cleanup`.
+    #[serde(default = "default_retention_policy")]
+    pub retention_policy: RetentionPolicy,
 }
 
 impl Default for Settings {
@@ -66,6 +102,8 @@ impl Default for Settings {
             skills_root: home_join(".claude/skills"),
             transcripts_root: home_join(".claude/projects"),
             agents: Vec::new(),
+            archive_enabled: default_archive_enabled(),
+            retention_policy: default_retention_policy(),
         }
     }
 }
@@ -188,6 +226,29 @@ pub fn set_settings<R: Runtime>(
     Ok(())
 }
 
+/// Input for `set_retention_policy` (TIN-1759). The frontend sends the toggle
+/// and the tagged policy together so they persist atomically.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRetentionPolicyInput {
+    pub policy: RetentionPolicy,
+    pub enabled: bool,
+}
+
+/// Persist the archive enable flag + retention policy to the settings store.
+/// Nothing is archived or pruned here — that is the job of the indexer pass and
+/// `run_retention_cleanup`. This only records intent.
+#[tauri::command]
+pub fn set_retention_policy<R: Runtime>(
+    payload: SetRetentionPolicyInput,
+    app: AppHandle<R>,
+) -> Result<(), String> {
+    let mut settings = load_settings(&app);
+    settings.archive_enabled = payload.enabled;
+    settings.retention_policy = payload.policy;
+    persist_settings(&app, &settings)
+}
+
 /// Rebuild the search index against the currently-configured memory root.
 #[tauri::command]
 pub fn rebuild_index<R: Runtime>(
@@ -288,6 +349,8 @@ mod tests {
                 args: vec!["--print".into()],
                 cwd: "/work".into(),
             }],
+            archive_enabled: true,
+            retention_policy: RetentionPolicy::SizeCap { max_bytes: 1024 },
         };
         let json = serde_json::to_value(&s).unwrap();
         // camelCase on the wire.
@@ -295,5 +358,43 @@ mod tests {
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.agents.len(), 1);
         assert_eq!(back.agents[0].name, "claude");
+        assert_eq!(
+            back.retention_policy,
+            RetentionPolicy::SizeCap { max_bytes: 1024 }
+        );
+    }
+
+    #[test]
+    fn archive_defaults_on_for_legacy_store() {
+        // A store written before TIN-1759 has neither field. Serde defaults must
+        // turn archiving on with the 2 GiB size cap.
+        let legacy = serde_json::json!({
+            "memoryRoot": "/m",
+            "promptsRoot": "/p",
+            "skillsRoot": "/s",
+            "transcriptsRoot": "/t"
+        });
+        let s: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(s.archive_enabled);
+        assert_eq!(
+            s.retention_policy,
+            RetentionPolicy::SizeCap {
+                max_bytes: DEFAULT_ARCHIVE_CAP_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn retention_policy_round_trips_each_variant() {
+        for p in [
+            RetentionPolicy::KeepAll,
+            RetentionPolicy::SizeCap { max_bytes: 999 },
+            RetentionPolicy::KeepMonths { months: 6 },
+        ] {
+            let v = serde_json::to_value(&p).unwrap();
+            assert!(v.get("kind").is_some(), "tagged with kind");
+            let back: RetentionPolicy = serde_json::from_value(v).unwrap();
+            assert_eq!(back, p);
+        }
     }
 }
