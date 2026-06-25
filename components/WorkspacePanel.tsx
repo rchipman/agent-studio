@@ -6,8 +6,10 @@ import { color, radius, space, font, type as typeRamp } from '@/lib/tokens'
 import { MemorySearchResult, OpenDoc, PanelSide, LoadedFile } from '@/lib/types'
 import { fileLinks, type FileLinks, type LinkedFile, type TicketRef } from '@/lib/links'
 import { getMemoryHistory, type AuditEntry } from '@/lib/history'
+import { scoreMemory, type Conflict } from '@/lib/continuity'
 import TypeChip from '@/components/TypeChip'
 import Button from '@/components/Button'
+import { NotePill } from '@/components/ConsistencyView'
 
 const MarkdownEditor = dynamic(() => import('@/components/MarkdownEditor'), { ssr: false })
 
@@ -698,6 +700,209 @@ function HistoryFooterWrapper({ path }: { path: string }) {
   )
 }
 
+// ── Consistency footer (TIN-1761) ────────────────────────────────────────────
+
+type ConsistencyCheckState =
+  | 'idle'
+  | 'checking'
+  | 'conflicts'
+  | 'clear'
+  | 'no-model'
+  | 'error'
+
+/** "Check this note": read the open note against its neighbours with the local
+ *  model, on demand. Same collapsed-header-expands-in-place idiom as History;
+ *  reuses FindingRow's grammar (the OTHER note as a NotePill + the why in serif).
+ *  Calm, recessive, never alarm. */
+function ConsistencyFooter({
+  path,
+  content,
+  onOpenFile,
+}: {
+  path: string
+  /** The open note's body; '' if not yet loaded. */
+  content: string
+  /** plain click = this panel; ⌘-click = the other. */
+  onOpenFile: (path: string, e: React.MouseEvent) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [state, setState] = useState<ConsistencyCheckState>('idle')
+  const [conflicts, setConflicts] = useState<Conflict[]>([])
+
+  // Reset whenever the open note changes — a result belongs to one note.
+  useEffect(() => {
+    setExpanded(false)
+    setState('idle')
+    setConflicts([])
+  }, [path])
+
+  const runCheck = useCallback(async () => {
+    setState('checking')
+    setConflicts([])
+    try {
+      const res = await scoreMemory(content, path)
+      if (res.degraded) {
+        setState('no-model')
+        return
+      }
+      if (res.conflicts.length > 0) {
+        setConflicts(res.conflicts)
+        setState('conflicts')
+      } else {
+        setState('clear')
+      }
+    } catch {
+      setState('error')
+    }
+  }, [content, path])
+
+  // Count appears only after a check has produced conflicts.
+  const headerCount = state === 'conflicts' ? conflicts.length : 0
+
+  return (
+    <div style={{ marginTop: space[7] }}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v) }}
+        style={{ cursor: 'pointer', userSelect: 'none' }}
+        aria-expanded={expanded}
+      >
+        <LinkSectionHeader label="CONSISTENCY" count={headerCount} />
+      </div>
+
+      {expanded && (
+        <div style={{ marginTop: space[3] }}>
+          {/* Not yet run */}
+          {state === 'idle' && (
+            <div>
+              <Button variant="tertiary" padding="none" onClick={runCheck}>
+                Check this note
+              </Button>
+              <div style={{ ...typeRamp.meta, color: color.inkFaint, marginTop: space[2] }}>
+                Read this note against its neighbours with the local model.
+              </div>
+            </div>
+          )}
+
+          {/* In flight — a single-note score is fast, so no spinner, no Stop. */}
+          {state === 'checking' && (
+            <div style={{ ...typeRamp.body, color: color.inkSoft }}>Reading this note…</div>
+          )}
+
+          {/* Conflicts: FindingRow's grammar, but only the OTHER note. */}
+          {state === 'conflicts' && (
+            <div>
+              {conflicts.map((c, i) => (
+                <ConflictCard key={`${c.path}-${i}`} conflict={c} onOpenFile={onOpenFile} />
+              ))}
+            </div>
+          )}
+
+          {/* Clear */}
+          {state === 'clear' && (
+            <div>
+              <div style={{ ...typeRamp.meta, color: color.inkFaint }}>
+                Nothing in tension. This note agrees with its neighbours.
+              </div>
+              <div style={{ marginTop: space[2] }}>
+                <Button variant="tertiary" padding="none" onClick={runCheck}>
+                  Check again
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* No model */}
+          {state === 'no-model' && (
+            <div style={{ ...typeRamp.meta, color: color.inkFaint }}>
+              Checking a note needs the local reasoning model.
+            </div>
+          )}
+
+          {/* Error */}
+          {state === 'error' && (
+            <div>
+              <div style={{ ...typeRamp.meta, color: color.inkFaint }}>
+                Could not check this note just now.
+              </div>
+              <div style={{ marginTop: space[2] }}>
+                <Button variant="tertiary" padding="none" onClick={runCheck}>
+                  Check again
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** One conflict: the OTHER note (a jump-to NotePill) + the why in serif. Reuses
+ *  FindingRow's card chrome; does not render a pill for the open note itself. */
+function ConflictCard({
+  conflict,
+  onOpenFile,
+}: {
+  conflict: Conflict
+  onOpenFile: (path: string, e: React.MouseEvent) => void
+}) {
+  return (
+    <div
+      style={{
+        padding: '12px 16px',
+        background: color.bgCard,
+        border: `1px solid ${color.hairSoft}`,
+        borderRadius: radius.card,
+        marginBottom: space[2],
+      }}
+    >
+      {/* The why — serif hero, like a finding's summary. */}
+      <div
+        style={{
+          fontFamily: font.serif,
+          fontSize: 13,
+          fontWeight: 400,
+          color: color.ink,
+          lineHeight: 1.5,
+        }}
+      >
+        {conflict.why}
+      </div>
+      <div style={{ marginTop: space[3], display: 'flex', flexWrap: 'wrap', gap: space[2] }}>
+        <NotePill name={conflict.name} filePath={conflict.path} onOpenFile={onOpenFile} />
+      </div>
+    </div>
+  )
+}
+
+/** Wraps ConsistencyFooter in the same column geometry as the History footer. */
+function ConsistencyFooterWrapper({
+  path,
+  content,
+  onOpenFile,
+}: {
+  path: string
+  content: string
+  onOpenFile: (path: string, e: React.MouseEvent) => void
+}) {
+  return (
+    <div
+      style={{
+        maxWidth: 720,
+        width: '100%',
+        margin: '0 auto',
+        padding: `0 40px 60px`,
+        boxSizing: 'border-box' as const,
+      }}
+    >
+      <ConsistencyFooter path={path} content={content} onOpenFile={onOpenFile} />
+    </div>
+  )
+}
+
 // ── Shared close glyph (panel-close ✕, reused on doc tabs) ───────────────────
 
 function CloseGlyph() {
@@ -1186,6 +1391,16 @@ export default function WorkspacePanel(props: WorkspacePanelProps) {
                   footer
                 />
                 <HistoryFooterWrapper path={activePath} />
+                <ConsistencyFooterWrapper
+                  path={activePath}
+                  content={loaded?.content ?? ''}
+                  onOpenFile={(p, e) =>
+                    onOpenResult(
+                      { path: p, name: p, type: '', projects: [], created: '', updated: '', tags: [], status: '', excerpt: '' },
+                      e,
+                    )
+                  }
+                />
               </>
             )}
           </>

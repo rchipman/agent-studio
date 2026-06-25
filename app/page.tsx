@@ -26,6 +26,7 @@ import { suggestFrontmatter, summarizeNote, importMarkdown, type Suggestion } fr
 import { scoreMemory, recordMemoryChange, bodyHash, type Conflict } from '@/lib/continuity'
 import { initTheme } from '@/lib/theme'
 import { getSettings, rebuildIndex } from '@/lib/settings'
+import { consistencyStatus } from '@/lib/audit'
 
 // Import flow + audit view (TIN-1638), loaded lazily / client-only.
 const ImportModal = dynamic(() => import('@/components/ImportModal'), { ssr: false })
@@ -508,6 +509,13 @@ export default function Home() {
   // The full-view destinations live behind one `activeView` (the nav rail makes
   // them visible). 'workspace' is the two-panel home.
   const [activeView, setActiveView] = useState<AppView>('workspace')
+  // Maintained consistency status (TIN-1761): drives the calm drift count on the
+  // Check rail item. Cheap to read — refreshed on mount, on a light interval, and
+  // on window focus.
+  const [consistency, setConsistency] = useState<{ seeded: boolean; count: number }>({
+    seeded: false,
+    count: 0,
+  })
   // Frontmatter manager (TIN-1638): import queue + drag affordance.
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
   const [draggingImport, setDraggingImport] = useState(false)
@@ -553,6 +561,31 @@ export default function Home() {
 
     setLayoutReady(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Maintained consistency drift (TIN-1761) ──
+  // The background check updates the picture as notes change but emits no event,
+  // so keep the rail badge fresh with a cheap status read on mount, a light
+  // interval, and on window focus.
+  useEffect(() => {
+    let cancelled = false
+    const refresh = () => {
+      consistencyStatus()
+        .then((s) => {
+          if (!cancelled) setConsistency(s)
+        })
+        .catch(() => {
+          /* leave the last-known count; the badge degrades to hidden on first failure */
+        })
+    }
+    refresh()
+    const id = setInterval(refresh, 30_000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+      window.removeEventListener('focus', refresh)
+    }
   }, [])
 
   function pushRecent(filePath: string) {
@@ -1238,6 +1271,8 @@ export default function Home() {
           else setActiveView(d)
         }}
         onOpenSettings={() => setShowSettings(true)}
+        consistencyCount={consistency.count}
+        consistencySeeded={consistency.seeded}
       />
 
       {/* Main column — workspace, or the active full view, right of the rail. The

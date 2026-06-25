@@ -3,12 +3,15 @@
 /**
  * ConsistencyView.tsx
  *
- * Consistency Audit full view (TIN-1695). A full view in the same family as
- * GraphView and AuditView: top bar with `← Agent Studio` and centred
- * `Consistency` title, a single centered reading column (maxWidth: 680),
- * Escape closes.
+ * Consistency as a live readout (TIN-1761). The check is now ambient: a one-time
+ * seed reads the whole library; after that it keeps itself current in the
+ * background as notes change. This view is a window onto that maintained picture,
+ * not a run-button state machine.
  *
- * State machine: idle → running → findings | all-clear | no-model | error.
+ * On mount we read `consistency_status()`; we re-fetch on window focus / when the
+ * view becomes active (the table updates in the background, no event is emitted).
+ * States: unseeded (the one-time seed invite) → seeding (the existing streaming
+ * UX) → fresh-findings | fresh-clear → no-model | error.
  *
  * A finding is an invitation to look, never an accusation. No severity, no
  * dismiss/resolve, no red, no ⚠. Tokens only, calm copy, curly apostrophes,
@@ -18,18 +21,36 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { color, space, radius, font, type as typeToken } from '@/lib/tokens'
 import Button from '@/components/Button'
-import { consistencyAudit, onAuditProgress, onFinding, cancelAudit, type Finding } from '@/lib/audit'
+import {
+  consistencyAudit,
+  consistencyStatus,
+  consistencyFindings,
+  statusToReadout,
+  onAuditProgress,
+  onFinding,
+  cancelAudit,
+  type Finding,
+} from '@/lib/audit'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type ViewState = 'idle' | 'running' | 'findings' | 'all-clear' | 'no-model' | 'error'
+type ViewState =
+  | 'loading'
+  | 'unseeded'
+  | 'seeding'
+  | 'fresh-findings'
+  | 'fresh-clear'
+  | 'no-model'
+  | 'error'
 
 export interface ConsistencyViewProps {
   /** plain click = this panel; ⌘-click = other panel */
   onOpenFile: (path: string, e: React.MouseEvent) => void
   onClose: () => void
+  /** Note count, if cheaply available, for the seed-invite copy. */
+  noteCount?: number
 }
 
 // ── Reading column wrapper ─────────────────────────────────────────────────────
@@ -66,26 +87,6 @@ function NoticeBlock({ children }: { children: React.ReactNode }) {
     >
       {children}
     </div>
-  )
-}
-
-// ── Primary "Run audit" button ─────────────────────────────────────────────────
-
-function RunButton({ onClick }: { onClick: () => void }) {
-  return (
-    <Button variant="primary" onClick={onClick}>
-      Run audit
-    </Button>
-  )
-}
-
-// ── Ghost "Run again" text button ─────────────────────────────────────────────
-
-function RunAgainButton({ onClick }: { onClick: () => void }) {
-  return (
-    <Button variant="tertiary" padding="none" onClick={onClick}>
-      Run again
-    </Button>
   )
 }
 
@@ -189,18 +190,54 @@ export function NotePill({
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
-export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyViewProps) {
-  const [viewState, setViewState] = useState<ViewState>('idle')
+export default function ConsistencyView({ onOpenFile, onClose, noteCount }: ConsistencyViewProps) {
+  const [viewState, setViewState] = useState<ViewState>('loading')
   const [findings, setFindings] = useState<Finding[]>([])
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
-  // Keep findings from a prior run visible during an error state.
-  const [priorFindings, setPriorFindings] = useState<Finding[] | null>(null)
+  // True once a seed was stopped early, so the partial findings carry a note.
+  const [stoppedEarly, setStoppedEarly] = useState(false)
 
   // Track unlisten fns so we can clean them up.
   const unlistenRef = useRef<(() => void) | null>(null)
   const unlistenFindingRef = useRef<(() => void) | null>(null)
   // Deduplicate live findings by their sorted file-pair key.
   const findingKeysRef = useRef<Set<string>>(new Set())
+  // Don't clobber an in-flight seed with a background status refetch.
+  const seedingRef = useRef(false)
+
+  // ── Status refresh: on mount, on window focus ─────────────────────────────
+  const refresh = useCallback(async () => {
+    if (seedingRef.current) return
+    try {
+      const status = await consistencyStatus()
+      if (seedingRef.current) return
+      const readout = statusToReadout(status)
+      if (readout !== 'fresh-findings') {
+        setFindings([])
+        setViewState(readout)
+        return
+      }
+      const current = await consistencyFindings()
+      if (seedingRef.current) return
+      setFindings(current)
+      setViewState('fresh-findings')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const isNoModel =
+        /reasoning model|ollama|no model|model not found|connection refused/i.test(msg)
+      // On error keep whatever findings are shown; the readout stays useful.
+      setViewState(isNoModel ? 'no-model' : 'error')
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    function onFocus() {
+      refresh()
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refresh])
 
   // Escape closes.
   useEffect(() => {
@@ -219,26 +256,27 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
     }
   }, [])
 
-  const runAudit = useCallback(async () => {
+  // ── The seed: the existing streaming sweep, verbatim UX ────────────────────
+  const runSeed = useCallback(async () => {
     // Unsubscribe any previous listeners.
     unlistenRef.current?.()
     unlistenRef.current = null
     unlistenFindingRef.current?.()
     unlistenFindingRef.current = null
 
-    setViewState('running')
+    seedingRef.current = true
+    setStoppedEarly(false)
+    setViewState('seeding')
     setProgress(null)
-    // Reset live findings and the dedup set for this run.
     setFindings([])
     findingKeysRef.current = new Set()
 
-    // Subscribe to findings and progress before calling audit so we never miss events.
+    // Subscribe before calling so we never miss events.
     const unlistenFinding = await onFinding((f) => {
       const key = [...f.files].sort().join('\0')
       if (!findingKeysRef.current.has(key)) {
         findingKeysRef.current.add(key)
         setFindings((prev) => [...prev, f])
-        setViewState('findings')
       }
     })
     unlistenFindingRef.current = unlistenFinding
@@ -254,6 +292,7 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
       unlistenRef.current = null
       unlistenFinding()
       unlistenFindingRef.current = null
+      seedingRef.current = false
 
       // Reconcile: the returned Vec is authoritative. Dedup by file-pair key.
       const seen = new Set<string>()
@@ -265,54 +304,57 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
       })
 
       if (deduped.length === 0) {
-        setPriorFindings(null)
         setFindings([])
-        setViewState('all-clear')
+        setViewState('fresh-clear')
       } else {
-        setPriorFindings(deduped)
         setFindings(deduped)
-        setViewState('findings')
+        setViewState('fresh-findings')
       }
     } catch (err) {
       unlisten()
       unlistenRef.current = null
       unlistenFinding()
       unlistenFindingRef.current = null
+      seedingRef.current = false
 
       const msg = err instanceof Error ? err.message : String(err)
       const isNoModel =
         /reasoning model|ollama|no model|model not found|connection refused/i.test(msg)
-      // If we cancelled (no error, just stopped), keep the partial findings visible.
       const isCancelled = /cancelled|canceled|cancel/i.test(msg)
 
       if (isCancelled) {
-        // Stay in findings state (or all-clear if nothing found yet).
-        if (findings.length === 0) setViewState('all-clear')
-        // else stay in 'findings' -- already set by live events
+        // Stopped early: keep partial findings, carry the durability note. Fall
+        // back to a sensible state based on what streamed in.
+        setStoppedEarly(true)
+        setViewState(findingKeysRef.current.size > 0 ? 'fresh-findings' : 'fresh-clear')
       } else {
         setViewState(isNoModel ? 'no-model' : 'error')
       }
     }
-  }, [findings.length])
+  }, [])
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-
-  // Top-bar right slot: count only in findings state. Registered into the one
-  // persistent top bar (TIN-1708).
+  // ── Top-bar right slot: count only in fresh-findings ───────────────────────
   const { setRight } = useTopBarSlot()
   useEffect(() => {
     setRight(
-      viewState === 'findings' ? (
-        <span style={{ ...typeToken.meta, color: color.inkSoft }}>{findings.length} worth a look.</span>
+      viewState === 'fresh-findings' ? (
+        <span style={{ ...typeToken.meta, color: color.inkSoft }}>
+          {findings.length} worth a look.
+        </span>
       ) : null,
     )
     return () => setRight(null)
   }, [setRight, viewState, findings.length])
 
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <ViewBody>
-      {/* ── Idle ─────────────────────────────────────────────────────────── */}
-      {viewState === 'idle' && (
+      {/* ── Loading: render nothing (status read is cheap) ─────────────────── */}
+      {viewState === 'loading' && <Column>{null}</Column>}
+
+      {/* ── Unseeded: the one-time seed invitation ─────────────────────────── */}
+      {viewState === 'unseeded' && (
         <Column>
           <div
             style={{
@@ -323,7 +365,7 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
             }}
           >
             <div style={{ ...typeToken.display, color: color.ink }}>
-              Look for notes that disagree.
+              Start watching for notes that disagree.
             </div>
             <div
               style={{
@@ -333,20 +375,25 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
                 lineHeight: 1.5,
               }}
             >
-              This reads your whole library with the local model and points out places where two
-              notes seem to say different things. It can take a minute.
+              The first pass reads all{noteCount != null ? ` ${noteCount}` : ''} notes once with the
+              local model and builds the picture. It can take a minute. After that it keeps itself
+              current as you edit, and you won&rsquo;t need to run it again.
             </div>
             <div>
-              <RunButton onClick={runAudit} />
+              <Button variant="primary" onClick={runSeed}>
+                Do the first pass
+              </Button>
             </div>
           </div>
         </Column>
       )}
 
-      {/* ── Running ──────────────────────────────────────────────────────── */}
-      {viewState === 'running' && (
+      {/* ── Seeding: the existing streaming UX, verbatim ───────────────────── */}
+      {viewState === 'seeding' && (
         <Column>
-          <div style={{ paddingTop: space[8], display: 'flex', flexDirection: 'column', gap: space[4] }}>
+          <div
+            style={{ paddingTop: space[8], display: 'flex', flexDirection: 'column', gap: space[4] }}
+          >
             <div style={{ ...typeToken.body, color: color.inkSoft }}>
               {progress && progress.total > 0
                 ? `Checking ${progress.done} of ${progress.total} related notes…`
@@ -357,15 +404,23 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
                 Stop
               </Button>
             </div>
+
+            {/* Live-streamed findings */}
+            {findings.length > 0 && (
+              <div style={{ marginTop: space[4] }}>
+                {findings.map((f, i) => (
+                  <FindingRow key={i} finding={f} onOpenFile={onOpenFile} />
+                ))}
+              </div>
+            )}
           </div>
         </Column>
       )}
 
-      {/* ── Findings ─────────────────────────────────────────────────────── */}
-      {viewState === 'findings' && (
+      {/* ── Fresh findings: the maintained current contradictions ──────────── */}
+      {viewState === 'fresh-findings' && (
         <Column>
           <div style={{ display: 'flex', flexDirection: 'column', gap: space[6] }}>
-            {/* Header */}
             <div>
               <div
                 style={{
@@ -373,25 +428,27 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
                   alignItems: 'baseline',
                   justifyContent: 'space-between',
                   marginBottom: space[3],
+                  gap: space[4],
                 }}
               >
                 <div style={{ ...typeToken.display, color: color.ink }}>
-                  A few notes to look at.
+                  What&rsquo;s in tension right now.
                 </div>
-                <RunAgainButton onClick={runAudit} />
+                <span style={{ ...typeToken.meta, color: color.inkFaint, whiteSpace: 'nowrap' }}>
+                  Kept current.
+                </span>
               </div>
-              <div
-                style={{
-                  ...typeToken.meta,
-                  color: color.inkSoft,
-                  lineHeight: 1.5,
-                }}
-              >
-                Each pair below seems to say different things. Open them side by side and decide.
+              <div style={{ ...typeToken.meta, color: color.inkSoft, lineHeight: 1.5 }}>
+                These pairs currently say different things. As you edit, they update on their own.
               </div>
             </div>
 
-            {/* Finding rows */}
+            {stoppedEarly && (
+              <div style={{ ...typeToken.meta, color: color.inkFaint, lineHeight: 1.5 }}>
+                Stopped early. The rest will fill in as you edit, or you can do a full pass again.
+              </div>
+            )}
+
             <div>
               {findings.map((f, i) => (
                 <FindingRow key={i} finding={f} onOpenFile={onOpenFile} />
@@ -401,8 +458,8 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
         </Column>
       )}
 
-      {/* ── All clear ────────────────────────────────────────────────────── */}
-      {viewState === 'all-clear' && (
+      {/* ── Fresh clear: nothing in tension ────────────────────────────────── */}
+      {viewState === 'fresh-clear' && (
         <Column>
           <div
             style={{
@@ -414,50 +471,35 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
           >
             <div style={{ ...typeToken.display, color: color.ink }}>Your notes agree.</div>
             <div style={{ ...typeToken.meta, color: color.inkFaint, lineHeight: 1.5 }}>
-              Nothing in your library contradicts itself. Run this again whenever you have written a
-              lot.
+              Nothing in your library is in tension. This stays current as you write, so
+              there&rsquo;s nothing to run.
             </div>
+
+            {stoppedEarly && (
+              <div style={{ ...typeToken.meta, color: color.inkFaint, lineHeight: 1.5 }}>
+                Stopped early. The rest will fill in as you edit, or you can do a full pass again.
+              </div>
+            )}
+
             <div style={{ marginTop: space[3] }}>
-              <RunAgainButton onClick={runAudit} />
+              <Button variant="tertiary" padding="none" onClick={runSeed}>
+                Do a full pass again
+              </Button>
             </div>
           </div>
         </Column>
       )}
 
-      {/* ── No model ─────────────────────────────────────────────────────── */}
+      {/* ── No model ───────────────────────────────────────────────────────── */}
       {viewState === 'no-model' && (
         <Column>
-          <div
-            style={{
-              paddingTop: space[8],
-              display: 'flex',
-              flexDirection: 'column',
-              gap: space[5],
-            }}
-          >
-            <NoticeBlock>
-              <div>The audit needs a local reasoning model.</div>
-              <div style={{ marginTop: space[2] }}>
-                Start Ollama, or pull one with{' '}
-                <span
-                  style={{
-                    ...typeToken.mono,
-                    color: color.inkSoft,
-                  }}
-                >
-                  ollama pull llama3.1:8b
-                </span>
-                , then run the audit again.
-              </div>
-            </NoticeBlock>
-            <div>
-              <RunButton onClick={runAudit} />
-            </div>
+          <div style={{ paddingTop: space[8] }}>
+            <NoticeBlock>The check needs a local reasoning model.</NoticeBlock>
           </div>
         </Column>
       )}
 
-      {/* ── Error ────────────────────────────────────────────────────────── */}
+      {/* ── Error: keep the table visible under a recessive notice ─────────── */}
       {viewState === 'error' && (
         <Column>
           <div
@@ -468,24 +510,13 @@ export default function ConsistencyView({ onOpenFile, onClose }: ConsistencyView
               gap: space[5],
             }}
           >
-            <NoticeBlock>The audit could not finish just now.</NoticeBlock>
-            <div>
-              <RunButton onClick={runAudit} />
-            </div>
+            <NoticeBlock>
+              The background check paused. What&rsquo;s shown is still current as of your last edit.
+            </NoticeBlock>
 
-            {/* Keep prior findings visible if a re-run failed */}
-            {priorFindings && priorFindings.length > 0 && (
-              <div style={{ marginTop: space[6] }}>
-                <div
-                  style={{
-                    ...typeToken.meta,
-                    color: color.inkFaint,
-                    marginBottom: space[4],
-                  }}
-                >
-                  Results from your last run:
-                </div>
-                {priorFindings.map((f, i) => (
+            {findings.length > 0 && (
+              <div>
+                {findings.map((f, i) => (
                   <FindingRow key={i} finding={f} onOpenFile={onOpenFile} />
                 ))}
               </div>
