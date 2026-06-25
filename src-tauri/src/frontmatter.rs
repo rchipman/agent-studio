@@ -631,6 +631,540 @@ pub async fn summarize_note(payload: SummarizeNoteInput) -> SummarizeNoteOutput 
     }
 }
 
+// ── Confidence suggestions (TIN-1758) ───────────────────────────────────────────
+//
+// Per-field confidence by provenance, folded to a per-file band by the MINIMUM
+// across missing fields (a file is only as settled as its weakest field). The
+// scoring composition is a pure function (`compose_field`) so each rung of the
+// confidence ladder is unit-testable without IO or a model.
+
+/// Per-field confidence rungs, by provenance (Jonny's blessed ladder).
+mod conf {
+    /// Folder under the memory root pins the field (e.g. `attic/x.md` → attic).
+    pub const PATH_DERIVED: f32 = 0.97;
+    /// Rule-based and the model independently agree.
+    pub const AGREE: f32 = 0.95;
+    /// `created` taken from the file's modified time.
+    pub const FILE_DATE: f32 = 0.90;
+    /// Rule-based only, an unambiguous single match.
+    pub const RULE_ONLY: f32 = 0.80;
+    /// LLM-only inference is capped here (the model's own score, clamped down).
+    pub const LLM_CAP: f32 = 0.75;
+    /// Two methods disagree, or nothing matched at all.
+    pub const NONE: f32 = 0.30;
+}
+
+/// Band thresholds (inclusive lower bounds). Mirrored by the frontend `bandOf`
+/// in `lib/frontmatter.ts`; the overall score crosses the IPC boundary and the
+/// UI bands it, so these are exercised by `band()` in tests on the Rust side.
+#[allow(dead_code)]
+const BAND_SETTLED: f32 = 0.85;
+#[allow(dead_code)]
+const BAND_LIKELY: f32 = 0.55;
+
+/// One field's resolved value plus how sure we are and where it came from.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldConfidence {
+    pub value: String,
+    pub confidence: f32,
+    /// Provenance tag: `"path"` | `"agree"` | `"file-date"` | `"rules"` |
+    /// `"model"` | `"none"`. Drives the micro-label in the UI.
+    pub source: String,
+}
+
+/// A full confidence-scored suggestion for one file: the suggestion itself, the
+/// per-field confidences for the fields that were missing, the per-file overall
+/// (the minimum across those fields), and whether the model was unavailable.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfidenceResult {
+    /// Absolute path of the file this suggestion is for.
+    pub path: String,
+    pub suggestion: Suggestion,
+    /// Confidence per missing field, keyed by `"type"` | `"projects"` | `"created"`.
+    pub fields: HashMap<String, FieldConfidence>,
+    /// Per-file band score = the MINIMUM across `fields` (1.0 when none missing).
+    pub overall: f32,
+    /// True when no reasoning model was reachable (rules + path only).
+    pub degraded: bool,
+}
+
+/// Map an overall score to its band label. Settled ≥0.85, Likely 0.55–0.84,
+/// else Unsure. Pure so the frontend and tests can agree on the cut points.
+/// (The UI bands the `overall` itself via `bandOf`; this is the Rust mirror,
+/// asserted in tests to keep the two cut-point sets honest.)
+#[allow(dead_code)]
+pub fn band(score: f32) -> &'static str {
+    if score >= BAND_SETTLED {
+        "settled"
+    } else if score >= BAND_LIKELY {
+        "likely"
+    } else {
+        "unsure"
+    }
+}
+
+/// Derive a `project` hint from a file's path relative to the memory root. The
+/// first path segment under the root that is a known project folder pins the
+/// project at `PATH_DERIVED` (e.g. `…/memory/attic/x.md` → attic). Type is never
+/// path-derived today (folders are by project, not type).
+///
+/// Returns `None` when the file is not under a known-project folder (e.g.
+/// directly in the root, or under an unknown folder).
+pub fn path_project(path: &str, root: &Path, known_projects: &[String]) -> Option<String> {
+    let p = Path::new(path);
+    let rel = p.strip_prefix(root).ok()?;
+    // The first component of the relative path is the folder under the root.
+    let first = rel.components().next()?;
+    let folder = first.as_os_str().to_string_lossy().to_string();
+    if folder.is_empty() {
+        return None;
+    }
+    known_projects
+        .iter()
+        .find(|kp| kp.eq_ignore_ascii_case(&folder))
+        .cloned()
+}
+
+/// Compose the confidence for a single field from its three possible sources:
+/// a path-derived value (highest authority), the rule-based value, and an
+/// optional model value with the model's own score. Pure — the heart of the
+/// ladder, unit-tested rung by rung.
+///
+/// Precedence:
+///   1. path-derived present                       → PATH_DERIVED (0.97)
+///   2. rule + model present and equal             → AGREE (0.95)
+///   3. rule + model present and DIFFERENT          → NONE (0.30), keep rule value
+///   4. rule only (non-empty)                      → RULE_ONLY (0.80)
+///   5. model only (non-empty)                     → min(model_score, LLM_CAP)
+///   6. nothing matched                            → NONE (0.30), empty value
+fn compose_field(
+    path_derived: Option<&str>,
+    rule_value: &str,
+    model: Option<(&str, f32)>,
+) -> FieldConfidence {
+    if let Some(pv) = path_derived.filter(|s| !s.is_empty()) {
+        return FieldConfidence { value: pv.to_string(), confidence: conf::PATH_DERIVED, source: "path".into() };
+    }
+    let rule = rule_value.trim();
+    let model = model.filter(|(v, _)| !v.trim().is_empty());
+
+    match (!rule.is_empty(), model) {
+        (true, Some((mv, _))) => {
+            if rule.eq_ignore_ascii_case(mv.trim()) {
+                FieldConfidence { value: rule.to_string(), confidence: conf::AGREE, source: "agree".into() }
+            } else {
+                // Two methods disagree — keep the rule value but mark it unsure.
+                FieldConfidence { value: rule.to_string(), confidence: conf::NONE, source: "none".into() }
+            }
+        }
+        (true, None) => {
+            FieldConfidence { value: rule.to_string(), confidence: conf::RULE_ONLY, source: "rules".into() }
+        }
+        (false, Some((mv, score))) => {
+            let capped = score.min(conf::LLM_CAP).max(0.0);
+            FieldConfidence { value: mv.trim().to_string(), confidence: capped, source: "model".into() }
+        }
+        (false, None) => {
+            FieldConfidence { value: String::new(), confidence: conf::NONE, source: "none".into() }
+        }
+    }
+}
+
+/// The system prompt for the model's frontmatter inference. Asks for a strict,
+/// machine-parseable line per ambiguous field plus a 0..1 confidence. Kept terse
+/// so a small local model stays on-format.
+const SUGGEST_SYSTEM: &str = "\
+You classify a note's frontmatter. Reply with ONLY these lines, nothing else, \
+no preamble:\n\
+TYPE: <one of feedback|reference|user|project> <confidence 0..1>\n\
+PROJECT: <one short project slug, or NONE> <confidence 0..1>\n\
+Confidence is your own certainty as a decimal. No markdown, no explanation.";
+
+/// One field the model returned: a value and the model's self-reported score.
+#[derive(Default, Clone)]
+struct ModelField {
+    value: String,
+    score: f32,
+}
+
+/// Parse the strict two-line model reply into `(type, project)` model fields.
+/// Tolerant of casing and missing lines — an unparseable line yields an empty
+/// field (which `compose_field` treats as "model absent").
+fn parse_model_reply(reply: &str) -> (ModelField, ModelField) {
+    let mut type_f = ModelField::default();
+    let mut proj_f = ModelField::default();
+    for line in reply.lines() {
+        let line = line.trim();
+        let (key, rest) = match line.split_once(':') {
+            Some((k, r)) => (k.trim().to_ascii_uppercase(), r.trim()),
+            None => continue,
+        };
+        // Last whitespace-separated token is the score; the rest is the value.
+        let (value, score) = match rest.rsplit_once(char::is_whitespace) {
+            Some((v, s)) => (v.trim(), s.trim().parse::<f32>().unwrap_or(0.0)),
+            None => (rest, 0.0),
+        };
+        let value = if value.eq_ignore_ascii_case("none") { "" } else { value };
+        match key.as_str() {
+            "TYPE" => type_f = ModelField { value: value.to_string(), score },
+            "PROJECT" => proj_f = ModelField { value: value.to_string(), score },
+            _ => {}
+        }
+    }
+    (type_f, proj_f)
+}
+
+/// Build a confidence result for one file, given its already-computed rule-based
+/// suggestion, the path-derived project hint, the file's mtime date, the set of
+/// missing fields, and an optional model reply. Pure of IO and async so it is
+/// fully unit-testable; the command wrappers do the IO and call this.
+#[allow(clippy::too_many_arguments)]
+fn build_result(
+    path: &str,
+    rules: &Suggestion,
+    path_proj: Option<&str>,
+    file_date: &str,
+    missing: &[String],
+    model_reply: Option<&str>,
+    summary: Option<String>,
+    degraded: bool,
+) -> ConfidenceResult {
+    let (m_type, m_proj) = match model_reply {
+        Some(r) => parse_model_reply(r),
+        None => (ModelField::default(), ModelField::default()),
+    };
+
+    let mut suggestion = rules.clone();
+    suggestion.summary = summary;
+    let mut fields: HashMap<String, FieldConfidence> = HashMap::new();
+
+    for field in missing {
+        match field.as_str() {
+            "type" => {
+                let model = if m_type.value.is_empty() { None } else { Some((m_type.value.as_str(), m_type.score)) };
+                let fc = compose_field(None, &rules.type_, model);
+                suggestion.type_ = fc.value.clone();
+                fields.insert("type".into(), fc);
+            }
+            "projects" => {
+                // Rule-based projects: a single unambiguous match is RULE_ONLY;
+                // zero or many is "no clean rule value" (empty rule input).
+                let rule_one = if rules.projects.len() == 1 { rules.projects[0].as_str() } else { "" };
+                let model = if m_proj.value.is_empty() { None } else { Some((m_proj.value.as_str(), m_proj.score)) };
+                let fc = compose_field(path_proj, rule_one, model);
+                suggestion.projects = if fc.value.is_empty() { Vec::new() } else { vec![fc.value.clone()] };
+                fields.insert("projects".into(), fc);
+            }
+            "created" => {
+                // `created` comes from the file's mtime when absent in the file.
+                let fc = if file_date.is_empty() {
+                    FieldConfidence { value: String::new(), confidence: conf::NONE, source: "none".into() }
+                } else {
+                    FieldConfidence { value: file_date.to_string(), confidence: conf::FILE_DATE, source: "file-date".into() }
+                };
+                suggestion.created = fc.value.clone();
+                fields.insert("created".into(), fc);
+            }
+            _ => {}
+        }
+    }
+
+    // Per-file overall = the MINIMUM across the missing fields (min, never blend).
+    let overall = fields
+        .values()
+        .map(|f| f.confidence)
+        .fold(f32::INFINITY, f32::min);
+    let overall = if overall.is_finite() { overall } else { 1.0 };
+
+    ConfidenceResult { path: path.to_string(), suggestion, fields, overall, degraded }
+}
+
+/// Whether a missing-field set needs the model at all. Path/rule resolve type
+/// and project for free in the common case; we only pay an LLM call when a field
+/// would otherwise be ambiguous (no path hint, and rules gave 0 or >1 matches).
+fn needs_model(missing: &[String], rules: &Suggestion, path_proj: Option<&str>) -> bool {
+    for field in missing {
+        match field.as_str() {
+            "type" => {
+                // Rules always return a type (project is the default), so type is
+                // never *empty* — but the default is a weak guess. We ask the
+                // model to confirm only when rules fell back to the default.
+                if rules.type_.is_empty() || rules.type_ == "project" {
+                    return true;
+                }
+            }
+            "projects" => {
+                if path_proj.is_none() && rules.projects.len() != 1 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+// ── Inputs / outputs ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestWithConfidenceInput {
+    pub path: String,
+    /// The note body. May be empty — when blank, the file is read from `path`,
+    /// so the row-expand path does not need a separate frontend file read.
+    #[serde(default)]
+    pub content: String,
+    /// Known vocab accepted per the blessed payload contract. `known_projects`
+    /// seeds project inference; `known_types` / `known_tags` are reserved for a
+    /// future model prompt and are part of the IPC shape today.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub known_types: Vec<String>,
+    #[serde(default)]
+    pub known_projects: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub known_tags: Vec<String>,
+}
+
+/// File mtime formatted `YYYY-MM-DD`, or empty if unavailable.
+fn file_mtime_date(path: &str) -> String {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            let dt: chrono::DateTime<Local> = t.into();
+            dt.format("%Y-%m-%d").to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Core per-file suggestion: compose path-derived + rule-based + (optional) LLM
+/// confidences. Shared by the single-file command and the bulk pass. Degrades to
+/// rules+path with `degraded: true` when no model is reachable — never errors.
+async fn suggest_one(
+    path: &str,
+    content: &str,
+    today: &str,
+    root: &Path,
+    known_projects: &[String],
+    model_up: bool,
+) -> ConfidenceResult {
+    let audit = audit_one(path, content);
+    let rules = generate(content, today, known_projects);
+    let path_proj = path_project(path, root, known_projects);
+    let file_date = file_mtime_date(path);
+
+    // Only call the model when a field is genuinely ambiguous AND a model is up.
+    let want_model = model_up && needs_model(&audit.missing, &rules, path_proj.as_deref());
+    let model_reply = if want_model {
+        crate::reason::complete(SUGGEST_SYSTEM, content).await.ok()
+    } else {
+        None
+    };
+
+    // Summary via the existing local TLDR, best-effort (only if a model is up).
+    let summary = if model_up {
+        crate::reason::complete(SUMMARIZE_SYSTEM, content)
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    build_result(
+        path,
+        &rules,
+        path_proj.as_deref(),
+        &file_date,
+        &audit.missing,
+        model_reply.as_deref(),
+        summary,
+        !model_up,
+    )
+}
+
+/// Confidence-scored suggestion for a single file (the per-row expand path).
+/// Never errors: with no model it returns the rules+path result, `degraded:true`.
+#[tauri::command]
+pub async fn suggest_with_confidence(
+    payload: SuggestWithConfidenceInput,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<ConfidenceResult, String> {
+    let root = memory
+        .0
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| crate::settings::default_memory_root());
+    let mut known = payload.known_projects.clone();
+    if known.is_empty() {
+        known = DEFAULT_PROJECTS.iter().map(|s| s.to_string()).collect();
+    }
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let model_up = crate::reason::reachable().await;
+    // Empty content → read the file from disk so the caller need not.
+    let content = if payload.content.is_empty() {
+        fs::read_to_string(&payload.path).unwrap_or_default()
+    } else {
+        payload.content.clone()
+    };
+    Ok(suggest_one(&payload.path, &content, &today, &root, &known, model_up).await)
+}
+
+const DEFAULT_PROJECTS: &[&str] =
+    &["attic", "understory", "rearview", "website", "studio", "shared"];
+
+/// Background pass: confidence-score every unhealthy file, emitting
+/// `audit://progress {done,total}` per file. Mirrors `consistency_audit`
+/// structurally. Path/rule-only files cost no LLM call. Degrades calmly with no
+/// model (still covers the folder-certain majority).
+#[tauri::command]
+pub async fn suggest_all(
+    app: tauri::AppHandle,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<Vec<ConfidenceResult>, String> {
+    use tauri::Emitter;
+
+    let root = memory
+        .0
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| crate::settings::default_memory_root());
+
+    // Gather the unhealthy files (collect_md + audit_one), like the audit view.
+    let mut files = Vec::new();
+    collect_md(&root, &mut files);
+    let mut work: Vec<(String, String)> = Vec::new();
+    for path in files {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let entry = audit_one(&path.to_string_lossy(), &raw);
+        if entry.status != "complete" {
+            work.push((path.to_string_lossy().to_string(), raw));
+        }
+    }
+
+    let known: Vec<String> = {
+        // Reuse known projects from defaults + any folder names actually present.
+        let mut set: Vec<String> = DEFAULT_PROJECTS.iter().map(|s| s.to_string()).collect();
+        if let Ok(entries) = fs::read_dir(&root) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if !name.starts_with('.') && !set.iter().any(|x| x == &name) {
+                        set.push(name);
+                    }
+                }
+            }
+        }
+        set
+    };
+
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let model_up = crate::reason::reachable().await;
+    let total = work.len();
+    let mut out = Vec::with_capacity(total);
+
+    for (idx, (path, content)) in work.into_iter().enumerate() {
+        let res = suggest_one(&path, &content, &today, &root, &known, model_up).await;
+        out.push(res);
+        let _ = app.emit("audit://progress", AuditProgress { done: idx + 1, total });
+    }
+
+    Ok(out)
+}
+
+/// Progress payload (mirrors `audit.rs`'s, kept local so the two passes stay
+/// independent while sharing the `audit://progress` channel + frontend listener).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AuditProgress {
+    done: usize,
+    total: usize,
+}
+
+// ── Apply (single + bulk) ────────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySuggestionInput {
+    pub path: String,
+    pub suggestion: Suggestion,
+    /// The actor id to record (the model name, or `"rules"` when degraded).
+    #[serde(default)]
+    pub actor_id: String,
+}
+
+/// Write one file's suggested frontmatter (body-preserving) and record a
+/// memory_audit row. Does NOT rebuild the index here — callers decide when to
+/// reindex (single: right after; bulk: once at the end).
+fn apply_one(
+    conn: &rusqlite::Connection,
+    input: &ApplySuggestionInput,
+) -> Result<(), String> {
+    let raw = fs::read_to_string(&input.path).map_err(|e| e.to_string())?;
+    let new_content = apply_frontmatter(&raw, &input.suggestion);
+    fs::write(&input.path, &new_content).map_err(|e| e.to_string())?;
+
+    let actor_id = if input.actor_id.trim().is_empty() { "rules" } else { input.actor_id.trim() };
+    let record = crate::memory_audit::RecordMemoryChangeInput {
+        path: input.path.clone(),
+        actor_type: "agent".into(),
+        actor_id: actor_id.to_string(),
+        continuity_score: None,
+        change_summary: "filled type, project, created".into(),
+        content_hash: crate::memory_audit::content_hash(&new_content),
+    };
+    crate::memory_audit::record_change(conn, &record).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Apply one file's suggested frontmatter, record the change, and rebuild the
+/// index so the row re-resolves with the new state.
+#[tauri::command]
+pub fn apply_suggestion(
+    payload: ApplySuggestionInput,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    apply_one(&conn, &payload)?;
+    let root = memory.0.lock().map_err(|e| e.to_string())?.clone();
+    crate::search::build_index(&root, &conn).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Apply a batch of suggestions: write each file (body-preserving) + record one
+/// audit row each, emitting `audit://progress` per write. Rebuilds the index
+/// ONCE at the end (not per file). Returns the count successfully applied.
+#[tauri::command]
+pub fn apply_suggestions_bulk(
+    app: tauri::AppHandle,
+    payload: Vec<ApplySuggestionInput>,
+    db: State<'_, Db>,
+    memory: State<'_, crate::settings::MemoryRoot>,
+) -> Result<usize, String> {
+    use tauri::Emitter;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let total = payload.len();
+    let mut done = 0usize;
+    for (idx, input) in payload.iter().enumerate() {
+        match apply_one(&conn, input) {
+            Ok(()) => done += 1,
+            Err(e) => log::warn!("[suggest] bulk apply {} failed: {e}", input.path),
+        }
+        let _ = app.emit("audit://progress", AuditProgress { done: idx + 1, total });
+    }
+
+    // Rebuild the index ONCE, after all writes.
+    let root = memory.0.lock().map_err(|e| e.to_string())?.clone();
+    crate::search::build_index(&root, &conn).map_err(|e| e.to_string())?;
+    Ok(done)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -897,5 +1431,291 @@ mod tests {
         };
         assert_eq!(out.summary, "A short TLDR.");
         assert!(!out.degraded);
+    }
+
+    // ── Confidence ladder (TIN-1758) ──────────────────────────────────────────
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn band_cut_points() {
+        assert_eq!(band(0.97), "settled");
+        assert_eq!(band(0.85), "settled"); // inclusive lower bound
+        assert_eq!(band(0.84), "likely");
+        assert_eq!(band(0.55), "likely"); // inclusive lower bound
+        assert_eq!(band(0.30), "unsure");
+        assert_eq!(band(0.0), "unsure");
+    }
+
+    #[test]
+    fn path_project_pins_folder_under_root() {
+        let root = Path::new("/m");
+        let got = path_project("/m/attic/note.md", root, &known());
+        assert_eq!(got, Some("attic".to_string()));
+    }
+
+    #[test]
+    fn path_project_none_when_not_under_known_folder() {
+        let root = Path::new("/m");
+        // Directly in the root → no folder hint.
+        assert_eq!(path_project("/m/loose.md", root, &known()), None);
+        // Unknown folder → no hint.
+        assert_eq!(path_project("/m/misc/x.md", root, &known()), None);
+    }
+
+    // ── compose_field: each rung of the ladder ────────────────────────────────
+
+    #[test]
+    fn compose_path_derived_is_097() {
+        let fc = compose_field(Some("attic"), "studio", Some(("understory", 0.9)));
+        assert_eq!(fc.value, "attic");
+        assert!(approx(fc.confidence, 0.97), "path-derived wins at 0.97: {}", fc.confidence);
+        assert_eq!(fc.source, "path");
+    }
+
+    #[test]
+    fn compose_rule_and_model_agree_is_095() {
+        let fc = compose_field(None, "feedback", Some(("feedback", 0.6)));
+        assert_eq!(fc.value, "feedback");
+        assert!(approx(fc.confidence, 0.95), "agreement bump to 0.95: {}", fc.confidence);
+        assert_eq!(fc.source, "agree");
+    }
+
+    #[test]
+    fn compose_rule_and_model_disagree_is_030() {
+        let fc = compose_field(None, "feedback", Some(("reference", 0.9)));
+        // Keeps the rule value, but marks it unsure.
+        assert_eq!(fc.value, "feedback");
+        assert!(approx(fc.confidence, 0.30), "disagreement drops to 0.30: {}", fc.confidence);
+        assert_eq!(fc.source, "none");
+    }
+
+    #[test]
+    fn compose_rule_only_is_080() {
+        let fc = compose_field(None, "studio", None);
+        assert_eq!(fc.value, "studio");
+        assert!(approx(fc.confidence, 0.80), "rule-only at 0.80: {}", fc.confidence);
+        assert_eq!(fc.source, "rules");
+    }
+
+    #[test]
+    fn compose_model_only_is_capped_at_075() {
+        // Model returns a high score, but LLM-only is capped at 0.75.
+        let fc = compose_field(None, "", Some(("reference", 0.95)));
+        assert_eq!(fc.value, "reference");
+        assert!(approx(fc.confidence, 0.75), "LLM-only capped at 0.75: {}", fc.confidence);
+        assert_eq!(fc.source, "model");
+        // A lower model score passes through uncapped.
+        let low = compose_field(None, "", Some(("user", 0.4)));
+        assert!(approx(low.confidence, 0.4), "model score below cap passes through: {}", low.confidence);
+    }
+
+    #[test]
+    fn compose_nothing_matched_is_030_empty() {
+        let fc = compose_field(None, "", None);
+        assert!(fc.value.is_empty());
+        assert!(approx(fc.confidence, 0.30), "nothing matched is 0.30: {}", fc.confidence);
+        assert_eq!(fc.source, "none");
+    }
+
+    // ── build_result: overall = min, file-date, missing-field selection ───────
+
+    fn rule_suggestion(type_: &str, projects: Vec<&str>) -> Suggestion {
+        Suggestion {
+            name: "n".into(),
+            title: "N".into(),
+            type_: type_.into(),
+            projects: projects.into_iter().map(|s| s.into()).collect(),
+            tags: vec![],
+            created: String::new(),
+            status: "active".into(),
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn build_result_overall_is_minimum_across_fields() {
+        // type: rule-only (0.80); projects: path-derived (0.97); created: file-date (0.90).
+        // Overall must be the MINIMUM = 0.80.
+        let rules = rule_suggestion("feedback", vec!["studio"]);
+        let missing = vec!["type".to_string(), "projects".to_string(), "created".to_string()];
+        let res = build_result(
+            "/m/attic/x.md",
+            &rules,
+            Some("attic"),
+            "2026-06-20",
+            &missing,
+            None,
+            None,
+            true,
+        );
+        assert!(approx(res.fields["type"].confidence, 0.80));
+        assert!(approx(res.fields["projects"].confidence, 0.97));
+        assert!(approx(res.fields["created"].confidence, 0.90));
+        assert!(approx(res.overall, 0.80), "overall is the min: {}", res.overall);
+        assert_eq!(band(res.overall), "likely");
+        // Path-derived project overrides the rule's project.
+        assert_eq!(res.suggestion.projects, vec!["attic".to_string()]);
+        assert_eq!(res.suggestion.created, "2026-06-20");
+        assert!(res.degraded, "no model → degraded");
+    }
+
+    #[test]
+    fn build_result_full_frontmatter_overall_is_one() {
+        // Nothing missing → no fields → overall defaults to 1.0 (settled).
+        let rules = rule_suggestion("project", vec!["studio"]);
+        let res = build_result("/m/studio/x.md", &rules, Some("studio"), "2026-06-20", &[], None, None, false);
+        assert!(res.fields.is_empty());
+        assert!(approx(res.overall, 1.0), "no missing fields → 1.0: {}", res.overall);
+        assert_eq!(band(res.overall), "settled");
+    }
+
+    #[test]
+    fn build_result_uses_model_reply_for_ambiguous_type() {
+        // Rule type "project" (the weak default), model says reference @0.9.
+        // No path hint, no rule project. Model-only type capped at 0.75.
+        let rules = rule_suggestion("project", vec![]);
+        let missing = vec!["type".to_string()];
+        let reply = "TYPE: reference 0.9\nPROJECT: NONE 0.0";
+        let res = build_result("/m/x.md", &rules, None, "", &missing, Some(reply), None, false);
+        // project rule "project" disagrees with model "reference" → 0.30, keeps rule value.
+        assert_eq!(res.fields["type"].value, "project");
+        assert!(approx(res.fields["type"].confidence, 0.30));
+    }
+
+    #[test]
+    fn parse_model_reply_extracts_value_and_score() {
+        let (t, p) = parse_model_reply("TYPE: feedback 0.82\nPROJECT: attic 0.7");
+        assert_eq!(t.value, "feedback");
+        assert!(approx(t.score, 0.82));
+        assert_eq!(p.value, "attic");
+        assert!(approx(p.score, 0.7));
+    }
+
+    #[test]
+    fn parse_model_reply_treats_none_as_empty() {
+        let (_t, p) = parse_model_reply("TYPE: project 0.5\nPROJECT: NONE 0.0");
+        assert!(p.value.is_empty(), "NONE maps to empty value");
+    }
+
+    #[test]
+    fn needs_model_skips_path_certain_and_strong_rules() {
+        // type "feedback" (not the default) + path-pinned project → no model needed.
+        let rules = rule_suggestion("feedback", vec!["studio"]);
+        let missing = vec!["type".to_string(), "projects".to_string(), "created".to_string()];
+        assert!(!needs_model(&missing, &rules, Some("attic")), "path + strong rules need no model");
+    }
+
+    #[test]
+    fn needs_model_when_type_defaulted_or_project_ambiguous() {
+        // Defaulted type → model wanted.
+        let defaulted = rule_suggestion("project", vec!["studio"]);
+        assert!(needs_model(&["type".to_string()], &defaulted, Some("studio")));
+        // Ambiguous project (zero matches, no path) → model wanted.
+        let no_proj = rule_suggestion("feedback", vec![]);
+        assert!(needs_model(&["projects".to_string()], &no_proj, None));
+    }
+
+    // ── apply_one: body-preserving write + audit row ──────────────────────────
+
+    #[test]
+    fn apply_one_is_body_preserving_and_records_audit_row() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fm-apply-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("note.md");
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            write!(f, "# Real Title\n\nThe body must survive verbatim.").unwrap();
+        }
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::memory_audit::ensure_schema(&conn).unwrap();
+
+        let input = ApplySuggestionInput {
+            path: path.to_string_lossy().to_string(),
+            suggestion: rule_suggestion_full(),
+            actor_id: "llama3.1:8b".into(),
+        };
+        apply_one(&conn, &input).expect("apply succeeds");
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("---\n"), "frontmatter prepended");
+        assert!(written.contains("type: feedback"), "suggested type written");
+        assert!(written.trim_end().ends_with("The body must survive verbatim."), "body preserved");
+
+        let hist = crate::memory_audit::history_for(&conn, &input.path).unwrap();
+        assert_eq!(hist.len(), 1, "one audit row recorded");
+        assert_eq!(hist[0].actor_type, "agent");
+        assert_eq!(hist[0].actor_id, "llama3.1:8b");
+        assert_eq!(hist[0].change_summary, "filled type, project, created");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_one_actor_defaults_to_rules_when_blank() {
+        let dir = std::env::temp_dir().join(format!("fm-apply-rules-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("note.md");
+        fs::write(&path, "# T\n\nBody.").unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::memory_audit::ensure_schema(&conn).unwrap();
+
+        let input = ApplySuggestionInput {
+            path: path.to_string_lossy().to_string(),
+            suggestion: rule_suggestion_full(),
+            actor_id: String::new(),
+        };
+        apply_one(&conn, &input).unwrap();
+        let hist = crate::memory_audit::history_for(&conn, &input.path).unwrap();
+        assert_eq!(hist[0].actor_id, "rules", "blank actor → recorded as rules (degraded)");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_one_does_not_reindex_so_bulk_reindexes_once() {
+        // Contract: apply_one performs NO index rebuild — the bulk command does a
+        // single rebuild after the whole loop. We prove apply_one is self-contained
+        // (write + audit row only) by running it against a connection that has ONLY
+        // the audit schema (no search index tables). If apply_one tried to reindex,
+        // it would need the search schema and fail; it succeeds, so it does not.
+        let dir = std::env::temp_dir().join(format!("fm-bulk-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::memory_audit::ensure_schema(&conn).unwrap();
+
+        for i in 0..3 {
+            let path = dir.join(format!("n{i}.md"));
+            fs::write(&path, format!("# N{i}\n\nBody {i} stays.")).unwrap();
+            let input = ApplySuggestionInput {
+                path: path.to_string_lossy().to_string(),
+                suggestion: rule_suggestion_full(),
+                actor_id: "rules".into(),
+            };
+            apply_one(&conn, &input).expect("apply_one needs no search schema");
+            assert!(
+                fs::read_to_string(&path).unwrap().contains(&format!("Body {i} stays.")),
+                "body {i} preserved",
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn rule_suggestion_full() -> Suggestion {
+        Suggestion {
+            name: "note".into(),
+            title: "Note".into(),
+            type_: "feedback".into(),
+            projects: vec!["studio".into()],
+            tags: vec![],
+            created: "2026-06-20".into(),
+            status: "active".into(),
+            summary: None,
+        }
     }
 }

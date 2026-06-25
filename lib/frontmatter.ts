@@ -85,3 +85,99 @@ export interface SummarizeNoteResult {
 export async function summarizeNote(content: string): Promise<SummarizeNoteResult> {
   return invoke<SummarizeNoteResult>('summarize_note', { payload: { content } })
 }
+
+// ── Confidence suggestions (TIN-1758) ────────────────────────────────────────
+
+/** Provenance of a field's resolved value (drives the micro-label). */
+export type FieldSource = 'path' | 'agree' | 'file-date' | 'rules' | 'model' | 'none'
+
+/** One field's resolved value plus how sure we are and where it came from. */
+export interface FieldConfidence {
+  value: string
+  /** 0..1 per the provenance ladder. */
+  confidence: number
+  source: FieldSource
+}
+
+/** Confidence band for a per-file overall score. */
+export type Band = 'settled' | 'likely' | 'unsure'
+
+/** A confidence-scored suggestion for one file (mirrors Rust `ConfidenceResult`). */
+export interface ConfidenceResult {
+  /** Absolute path of the file this suggestion is for. */
+  path: string
+  suggestion: Suggestion
+  /** Per-missing-field confidence, keyed `type` | `projects` | `created`. */
+  fields: Record<string, FieldConfidence>
+  /** Per-file band score = the minimum across `fields` (1.0 when none missing). */
+  overall: number
+  /** True when no reasoning model was reachable (rules + path only). */
+  degraded: boolean
+}
+
+/** Band cut points, shared with the Rust `band()` (Settled ≥0.85, Likely ≥0.55). */
+export function bandOf(overall: number): Band {
+  if (overall >= 0.85) return 'settled'
+  if (overall >= 0.55) return 'likely'
+  return 'unsure'
+}
+
+export interface KnownVocab {
+  knownTypes?: string[]
+  knownProjects?: string[]
+  knownTags?: string[]
+}
+
+/**
+ * Confidence-scored suggestion for a single file (the per-row expand path).
+ * Never throws on a missing model: returns the rules+path result with
+ * `degraded: true`.
+ */
+export async function suggestWithConfidence(
+  path: string,
+  content: string,
+  vocab: KnownVocab = {},
+): Promise<ConfidenceResult> {
+  return invoke<ConfidenceResult>('suggest_with_confidence', {
+    payload: {
+      path,
+      content,
+      knownTypes: vocab.knownTypes ?? [],
+      knownProjects: vocab.knownProjects ?? [],
+      knownTags: vocab.knownTags ?? [],
+    },
+  })
+}
+
+/**
+ * Background pass: confidence-score every unhealthy file. Emits `audit://progress`
+ * (subscribe with {@link onAuditProgress} from `lib/audit`). Path/rule-only files
+ * cost no model call; degrades calmly with no model.
+ */
+export async function suggestAll(): Promise<ConfidenceResult[]> {
+  return invoke<ConfidenceResult[]>('suggest_all')
+}
+
+/** One file's apply payload: the reviewed suggestion + the recording actor. */
+export interface ApplySuggestionPayload {
+  path: string
+  suggestion: Suggestion
+  /** The model name, or `"rules"` when degraded. */
+  actorId: string
+}
+
+/**
+ * Apply one file's suggested frontmatter (body-preserving), record a memory_audit
+ * row (actor = the model), and rebuild the index so the row re-resolves.
+ */
+export async function applySuggestion(payload: ApplySuggestionPayload): Promise<void> {
+  return invoke('apply_suggestion', { payload })
+}
+
+/**
+ * Apply a batch of suggestions: write + record each, emit `audit://progress` per
+ * write, rebuild the index ONCE at the end. Returns the count applied.
+ */
+export async function applySuggestionsBulk(payloads: ApplySuggestionPayload[]): Promise<number> {
+  return invoke<number>('apply_suggestions_bulk', { payload: payloads })
+}
