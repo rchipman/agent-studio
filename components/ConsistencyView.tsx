@@ -482,7 +482,7 @@ export default function ConsistencyView({ onOpenFile, onClose, noteCount }: Cons
             )}
 
             <div style={{ marginTop: space[3] }}>
-              <Button variant="tertiary" padding="none" onClick={runSeed}>
+              <Button variant="tertiary" padding="none" onClick={runSeed} style={{ color: color.inkFaint }}>
                 Do a full pass again
               </Button>
             </div>
