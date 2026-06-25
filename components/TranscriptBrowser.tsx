@@ -6,7 +6,8 @@
  * Three-pane session transcript browser (TIN-1636).
  * Pane 1: Projects rail (project list + session counts; FTS search switches to
  *          flat result rows).
- * Pane 2: Sessions list (newest first, forest-wash selection).
+ * Pane 2: Sessions list (newest first, forest-wash selection) with a
+ *          List / Calendar toggle at the top (TIN-1751).
  * Pane 3: Conversation (human serif + tan rule, assistant serif + forest rule;
  *          tool-use blocks collapsed to "ran <tool>", expandable).
  *
@@ -16,7 +17,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { color, space, radius, type as typeToken, font } from '@/lib/tokens'
+import { color, space, radius, type as typeToken } from '@/lib/tokens'
 import MarkdownContent from '@/components/MarkdownContent'
 import ViewBody from '@/components/ViewBody'
 import { useTopBarSlot } from '@/components/TopBarSlot'
@@ -48,6 +49,11 @@ interface TranscriptSearchResult {
   snippet: string
 }
 
+interface DayCount {
+  date: string   // YYYY-MM-DD
+  count: number
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
@@ -57,6 +63,64 @@ function formatDate(iso: string): string {
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
   const m = parseInt(mm, 10)
   return `${months[m - 1] ?? mm} ${parseInt(dd, 10)}`
+}
+
+/** Zero-pad a number to 2 digits. */
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n)
+}
+
+/** Today's date as YYYY-MM-DD in local time. */
+function todayIso(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+/** YYYY-MM from a Date. */
+function yearMonth(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`
+}
+
+/** Month label e.g. "Jun 2026". */
+function monthLabel(year: number, month: number): string {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  return `${months[month - 1]} ${year}`
+}
+
+/** Build the grid of day cells for the month. Week starts Monday.
+ *  Returns an array where each element is YYYY-MM-DD (current month) or null
+ *  (adjacent month filler). */
+function buildMonthGrid(year: number, month: number): (string | null)[] {
+  // First day of month (0=Sun..6=Sat), convert to Mon-based (0=Mon..6=Sun)
+  const firstDate = new Date(year, month - 1, 1)
+  const firstDow = (firstDate.getDay() + 6) % 7 // Monday = 0
+  const daysInMonth = new Date(year, month, 0).getDate()
+
+  const cells: (string | null)[] = []
+  // leading filler
+  for (let i = 0; i < firstDow; i++) cells.push(null)
+  // actual days
+  for (let d = 1; d <= daysInMonth; d++) {
+    cells.push(`${year}-${pad2(month)}-${pad2(d)}`)
+  }
+  // trailing filler to complete last row
+  while (cells.length % 7 !== 0) cells.push(null)
+  return cells
+}
+
+/** Intensity band: 0=transparent, 1=forestWash, 2=forestTint, 3=forestLine */
+function intensityBg(count: number): string {
+  if (count === 0) return 'transparent'
+  if (count === 1) return color.forestWash
+  if (count <= 3) return color.forestTint
+  return color.forestLine
+}
+
+/** One step up from the base intensity (for selected day). */
+function intensityBgSelected(count: number): string {
+  if (count === 0) return color.forestWash
+  if (count === 1) return color.forestTint
+  return color.forestLine
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -190,6 +254,338 @@ function ConversationTurn({ turn, highlight }: ConversationTurnProps) {
   )
 }
 
+// ── Calendar pane body ────────────────────────────────────────────────────────
+
+interface CalendarPaneProps {
+  selectedProject: string | null
+  sessions: SessionSummary[]
+  sessionsLoading: boolean
+  selectedSession: SessionSummary | null
+  onSelectSession: (s: SessionSummary) => void
+  sessionRowStyle: (active: boolean) => React.CSSProperties
+}
+
+function CalendarPane({
+  selectedProject,
+  sessions,
+  sessionsLoading,
+  selectedSession,
+  onSelectSession,
+  sessionRowStyle,
+}: CalendarPaneProps) {
+  const today = todayIso()
+  const now = new Date()
+  const [viewYear, setViewYear] = useState(now.getFullYear())
+  const [viewMonth, setViewMonth] = useState(now.getMonth() + 1)
+  const [dayCountMap, setDayCountMap] = useState<Map<string, number>>(new Map())
+  const [countsLoading, setCountsLoading] = useState(false)
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
+
+  // Reload counts when project changes
+  useEffect(() => {
+    if (!selectedProject) {
+      setDayCountMap(new Map())
+      return
+    }
+    setCountsLoading(true)
+    invoke<DayCount[]>('sessions_by_day', { payload: { project: selectedProject } })
+      .then(rows => {
+        const m = new Map<string, number>()
+        for (const r of rows) m.set(r.date, r.count)
+        setDayCountMap(m)
+        setCountsLoading(false)
+      })
+      .catch(() => setCountsLoading(false))
+  }, [selectedProject])
+
+  // Reset selected day when project or month changes
+  useEffect(() => {
+    setSelectedDay(null)
+  }, [selectedProject, viewYear, viewMonth])
+
+  const currentYM = yearMonth(now)
+  const viewYM = `${viewYear}-${pad2(viewMonth)}`
+  const atCurrentMonth = viewYM >= currentYM
+
+  function stepMonth(delta: number) {
+    const d = new Date(viewYear, viewMonth - 1 + delta, 1)
+    if (delta > 0 && yearMonth(d) > currentYM) return
+    setViewYear(d.getFullYear())
+    setViewMonth(d.getMonth() + 1)
+  }
+
+  const cells = buildMonthGrid(viewYear, viewMonth)
+
+  // Sessions for selected day
+  const dayPrefix = selectedDay ? selectedDay : null
+  const daySessions = dayPrefix
+    ? sessions.filter(s => s.date === dayPrefix)
+    : []
+
+  // Month has any sessions
+  const monthHasSessions = cells.some(c => c && (dayCountMap.get(c) ?? 0) > 0)
+
+  if (!selectedProject) {
+    return null // Pane 2 shows the "select a project" message; this is a no-op path
+  }
+
+  if (countsLoading || sessionsLoading) {
+    return (
+      <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
+        Reading sessions...
+      </div>
+    )
+  }
+
+  const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+      {/* Month stepper */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          gap: space[1],
+          padding: `${space[2]}px ${space[3]}px`,
+          borderBottom: `1px solid ${color.hairSoft}`,
+        }}
+      >
+        {/* Back chevron */}
+        <button
+          onClick={() => stepMonth(-1)}
+          aria-label="Previous month"
+          style={{
+            width: 22,
+            height: 22,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: 'none',
+            borderRadius: radius.sm,
+            cursor: 'pointer',
+            color: color.inkSoft,
+            padding: 0,
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.forest }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkSoft }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="10,3 5,8 10,13" />
+          </svg>
+        </button>
+
+        {/* Month label */}
+        <span style={{ ...typeToken.label, color: color.inkSoft, minWidth: 52, textAlign: 'center' }}>
+          {monthLabel(viewYear, viewMonth)}
+        </span>
+
+        {/* Forward chevron - disabled at current month */}
+        <button
+          onClick={() => stepMonth(1)}
+          disabled={atCurrentMonth}
+          aria-label="Next month"
+          style={{
+            width: 22,
+            height: 22,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'transparent',
+            border: 'none',
+            borderRadius: radius.sm,
+            cursor: atCurrentMonth ? 'default' : 'pointer',
+            color: color.inkSoft,
+            opacity: atCurrentMonth ? 0.4 : 1,
+            padding: 0,
+          }}
+          onMouseEnter={e => { if (!atCurrentMonth) { e.currentTarget.style.background = color.bgFieldStrong; e.currentTarget.style.color = color.forest } }}
+          onMouseLeave={e => { if (!atCurrentMonth) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = color.inkSoft } }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="6,3 11,8 6,13" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Calendar grid */}
+      <div style={{ padding: `${space[3]}px ${space[3]}px ${space[2]}px`, flex: '0 0 auto' }}>
+        {/* Weekday headers */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: space[1], marginBottom: space[1] }}>
+          {WEEKDAYS.map(d => (
+            <div
+              key={d}
+              style={{
+                ...typeToken.micro,
+                color: color.inkFaint,
+                textAlign: 'center',
+                padding: `${space[1]}px 0`,
+              }}
+            >
+              {d}
+            </div>
+          ))}
+        </div>
+
+        {/* Day cells */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: space[1] }}>
+          {cells.map((cell, i) => {
+            if (!cell) {
+              return <div key={`filler-${i}`} style={{ minHeight: 36 }} />
+            }
+            const count = dayCountMap.get(cell) ?? 0
+            const isToday = cell === today
+            const isSelected = cell === selectedDay
+            const hasSessions = count > 0
+            const bg = isSelected ? intensityBgSelected(count) : intensityBg(count)
+            const tooltipText = count === 1 ? '1 session' : count > 1 ? `${count} sessions` : undefined
+
+            return (
+              <div
+                key={cell}
+                title={tooltipText}
+                onClick={() => {
+                  if (!hasSessions) return
+                  if (count === 1 && daySessions.length === 0) {
+                    // Will be set below; first set the day so daySessions populates
+                    setSelectedDay(cell)
+                    // find the single session and open it directly
+                    const single = sessions.find(s => s.date === cell)
+                    if (single) onSelectSession(single)
+                  } else if (count === 1) {
+                    setSelectedDay(cell)
+                    const single = sessions.find(s => s.date === cell)
+                    if (single) onSelectSession(single)
+                  } else {
+                    setSelectedDay(isSelected ? null : cell)
+                  }
+                }}
+                style={{
+                  minHeight: 36,
+                  borderRadius: radius.sm,
+                  background: bg,
+                  border: isSelected
+                    ? `1px solid ${color.forest}`
+                    : hasSessions
+                    ? `1px solid transparent`
+                    : `1px solid transparent`,
+                  cursor: hasSessions ? 'pointer' : 'default',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between',
+                  padding: `${space[1]}px`,
+                  boxSizing: 'border-box',
+                  position: 'relative',
+                }}
+                onMouseEnter={e => {
+                  if (hasSessions && !isSelected) {
+                    e.currentTarget.style.border = `1px solid ${color.forestLine}`
+                  }
+                }}
+                onMouseLeave={e => {
+                  if (hasSessions && !isSelected) {
+                    e.currentTarget.style.border = '1px solid transparent'
+                  }
+                }}
+              >
+                {/* Day number */}
+                <span
+                  style={{
+                    ...typeToken.meta,
+                    color: isToday ? color.forest : color.ink,
+                    fontWeight: isToday ? 600 : 400,
+                    lineHeight: 1,
+                    fontSize: 11,
+                  }}
+                >
+                  {parseInt(cell.split('-')[2], 10)}
+                </span>
+                {/* Session count badge */}
+                {count > 0 && (
+                  <span
+                    style={{
+                      ...typeToken.micro,
+                      color: color.inkSoft,
+                      alignSelf: 'flex-end',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {count}
+                  </span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Empty month message */}
+        {!monthHasSessions && (
+          <div
+            style={{
+              ...typeToken.body,
+              color: color.inkFaint,
+              textAlign: 'center',
+              padding: `${space[4]}px 0 ${space[2]}px`,
+            }}
+          >
+            No sessions this month.
+          </div>
+        )}
+      </div>
+
+      {/* Day session list */}
+      {selectedDay && daySessions.length > 0 && (
+        <div
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            borderTop: `1px solid ${color.hairSoft}`,
+            padding: `${space[2]}px ${space[2]}px`,
+          }}
+        >
+          {daySessions.map(s => {
+            const active = selectedSession?.path === s.path
+            return (
+              <div
+                key={s.path}
+                onClick={() => onSelectSession(s)}
+                style={sessionRowStyle(active)}
+                onMouseEnter={e => {
+                  if (!active)
+                    (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
+                }}
+                onMouseLeave={e => {
+                  if (!active)
+                    (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
+                  <span style={{ ...typeToken.body, color: color.ink }}>
+                    {formatDate(s.date)}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    ...typeToken.meta,
+                    color: color.inkSoft,
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                  }}
+                >
+                  {s.firstMessage || 'Empty session'}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface TranscriptBrowserProps {
@@ -233,6 +629,9 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
 
   // No transcripts root configured
   const [noRoot, setNoRoot] = useState(false)
+
+  // Pane 2 toggle: 'list' | 'calendar'
+  const [pane2Mode, setPane2Mode] = useState<'list' | 'calendar'>('list')
 
   // ── Load projects ──────────────────────────────────────────────────────────
 
@@ -384,7 +783,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
           <div style={{ padding: `${space[3]}px ${space[4]}px`, borderBottom: `1px solid ${color.hairSoft}` }}>
             <input
               type="text"
-              placeholder="Search transcripts…"
+              placeholder="Search transcripts..."
               value={searchQuery}
               onChange={handleSearchChange}
               style={{
@@ -410,7 +809,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               // Search results mode
               searching ? (
                 <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                  Loading…
+                  Loading...
                 </div>
               ) : searchDone && searchResults.length === 0 ? (
                 <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
@@ -462,7 +861,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               // Project list mode
               projectsLoading ? (
                 <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                  Loading…
+                  Loading...
                 </div>
               ) : projectsError ? (
                 <div
@@ -524,9 +923,105 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
             overflow: 'hidden',
           }}
         >
-          <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
+          {/* List / Calendar toggle strip */}
+          <div
+            style={{
+              borderBottom: `1px solid ${color.hairSoft}`,
+              padding: `${space[2]}px ${space[3]}px`,
+              display: 'flex',
+              alignItems: 'flex-end',
+              flexShrink: 0,
+            }}
+          >
+            {(['list', 'calendar'] as const).map(id => {
+              const active = pane2Mode === id
+              const label = id === 'list' ? 'List' : 'Calendar'
+              return (
+                <button
+                  key={id}
+                  onClick={() => setPane2Mode(id)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    borderBottom: active ? `1.5px solid ${color.forest}` : '1.5px solid transparent',
+                    padding: `0 0 ${space[2]}px`,
+                    marginRight: space[4],
+                    cursor: 'pointer',
+                    ...typeToken.meta,
+                    color: active ? color.forest : color.inkSoft,
+                    fontWeight: active ? 600 : 400,
+                    transition: 'color 0.1s ease, border-color 0.1s ease',
+                    lineHeight: 1,
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.color = color.ink }}
+                  onMouseLeave={e => { if (!active) e.currentTarget.style.color = color.inkSoft }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
 
-            {noRoot ? (
+          {/* Body */}
+          {pane2Mode === 'list' ? (
+            <div style={{ flex: 1, overflowY: 'auto', padding: `${space[2]}px ${space[2]}px` }}>
+              {noRoot ? (
+                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+                  Set a transcripts root in Settings to browse sessions.
+                </div>
+              ) : !selectedProject ? (
+                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+                  Select a project to see sessions.
+                </div>
+              ) : sessionsLoading ? (
+                <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
+                  Loading...
+                </div>
+              ) : sessions.length === 0 ? (
+                <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
+                  No sessions in this project yet.
+                </div>
+              ) : (
+                sessions.map(s => {
+                  const active = selectedSession?.path === s.path
+                  return (
+                    <div
+                      key={s.path}
+                      onClick={() => setSelectedSession(s)}
+                      style={sessionRowStyle(active)}
+                      onMouseEnter={e => {
+                        if (!active)
+                          (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
+                      }}
+                      onMouseLeave={e => {
+                        if (!active)
+                          (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
+                        <span style={{ ...typeToken.body, color: color.ink }}>
+                          {formatDate(s.date)}
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          ...typeToken.meta,
+                          color: color.inkSoft,
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {s.firstMessage || 'Empty session'}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          ) : (
+            // Calendar mode
+            noRoot ? (
               <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
                 Set a transcripts root in Settings to browse sessions.
               </div>
@@ -534,52 +1029,17 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
                 Select a project to see sessions.
               </div>
-            ) : sessionsLoading ? (
-              <div style={{ padding: space[5], ...typeToken.body, color: color.inkSoft, textAlign: 'center' }}>
-                Loading…
-              </div>
-            ) : sessions.length === 0 ? (
-              <div style={{ padding: space[5], ...typeToken.body, color: color.inkFaint, textAlign: 'center' }}>
-                No sessions in this project yet.
-              </div>
             ) : (
-              sessions.map(s => {
-                const active = selectedSession?.path === s.path
-                return (
-                  <div
-                    key={s.path}
-                    onClick={() => setSelectedSession(s)}
-                    style={sessionRowStyle(active)}
-                    onMouseEnter={e => {
-                      if (!active)
-                        (e.currentTarget as HTMLDivElement).style.background = color.bgFieldStrong
-                    }}
-                    onMouseLeave={e => {
-                      if (!active)
-                        (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'baseline', gap: space[3], marginBottom: 2 }}>
-                      <span style={{ ...typeToken.body, color: color.ink }}>
-                        {formatDate(s.date)}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        ...typeToken.meta,
-                        color: color.inkSoft,
-                        overflow: 'hidden',
-                        whiteSpace: 'nowrap',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {s.firstMessage || 'Empty session'}
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
+              <CalendarPane
+                selectedProject={selectedProject}
+                sessions={sessions}
+                sessionsLoading={sessionsLoading}
+                selectedSession={selectedSession}
+                onSelectSession={setSelectedSession}
+                sessionRowStyle={sessionRowStyle}
+              />
+            )
+          )}
         </div>
 
         {/* ── Pane 3: Conversation ── */}
@@ -610,7 +1070,7 @@ export default function TranscriptBrowser({}: TranscriptBrowserProps) {
               </div>
             ) : turnsLoading ? (
               <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkSoft }}>
-                Loading…
+                Loading...
               </div>
             ) : turns.length === 0 ? (
               <div style={{ textAlign: 'center', paddingTop: 80, ...typeToken.body, color: color.inkFaint }}>

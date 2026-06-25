@@ -118,6 +118,7 @@ pub fn run() {
       transcript::list_sessions,
       transcript::get_session,
       transcript::search_transcripts,
+      transcript::sessions_by_day,
       linear::linear_key_status,
       linear::set_linear_key,
       linear::reveal_linear_key,
