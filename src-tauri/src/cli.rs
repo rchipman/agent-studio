@@ -44,7 +44,7 @@ use crate::memory_reads;
 use crate::reason;
 use crate::salience;
 use crate::search::{build_index, init_db, search_core, Db, SearchInput};
-use crate::settings::default_memory_root;
+use crate::settings::{default_memory_root, STORE_FILE};
 
 // ── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -110,15 +110,85 @@ pub fn maybe_run() {
     }
 }
 
-/// Resolve the memory root for the headless path. We do NOT load the Tauri store
-/// here (no `AppHandle` without an app), so we honour an explicit override via
-/// `MEMORY_ROOT` and otherwise fall back to the default `~/Projects/tfl/memory`,
-/// which is the same default the GUI resolves to out of the box.
+/// Resolve the memory root for the headless path.
+///
+/// Precedence (first non-empty value wins):
+/// 1. `MEMORY_ROOT` environment variable — explicit override.
+/// 2. GUI's persisted settings store (`settings.json` under the OS app-config
+///    dir), key `settings.memoryRoot`. Read directly as JSON — no Tauri
+///    `AppHandle` needed — so the CLI shares the user's GUI configuration.
+/// 3. `default_memory_root()` — `~/Projects/tfl/memory`.
+///
+/// Each tier degrades silently: if the store file is missing, unreadable, or
+/// doesn't contain the key, we fall through to the next tier.
 fn resolve_root() -> PathBuf {
-    match std::env::var("MEMORY_ROOT") {
-        Ok(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
-        _ => default_memory_root(),
+    // Tier 1: env override.
+    if let Ok(s) = std::env::var("MEMORY_ROOT") {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return expand_tilde(trimmed);
+        }
     }
+
+    // Tier 2: GUI persisted settings store.
+    if let Some(root) = read_root_from_store() {
+        return root;
+    }
+
+    // Tier 3: compile-time default.
+    default_memory_root()
+}
+
+/// Attempt to read `memoryRoot` from the GUI's tauri-plugin-store JSON file.
+/// Returns `None` on any missing file, parse error, or missing/empty value.
+fn read_root_from_store() -> Option<PathBuf> {
+    let store_path = gui_store_path()?;
+    let raw = fs::read_to_string(&store_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // Store layout: { "settings": { "memoryRoot": "...", ... } }
+    let memory_root = json
+        .get("settings")
+        .and_then(|s| s.get("memoryRoot"))
+        .and_then(|v| v.as_str())?;
+    let trimmed = memory_root.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(expand_tilde(trimmed))
+}
+
+/// The OS path to the GUI's tauri-plugin-store file.
+/// On macOS: `~/Library/Application Support/com.tinyforestlabs.agent-studio/<store>`
+/// On Linux: `~/.config/com.tinyforestlabs.agent-studio/<store>`
+fn gui_store_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let home = std::path::Path::new(&home);
+
+    #[cfg(target_os = "macos")]
+    let config_dir = home.join("Library/Application Support/com.tinyforestlabs.agent-studio");
+
+    #[cfg(target_os = "linux")]
+    let config_dir = home.join(".config/com.tinyforestlabs.agent-studio");
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let config_dir = home.join(".config/com.tinyforestlabs.agent-studio");
+
+    Some(config_dir.join(STORE_FILE))
+}
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    if s == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(s)
 }
 
 /// Open the shared index DB under `root` and wrap it as a `Db` (the same managed
@@ -1087,6 +1157,99 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    // ── resolve_root (TIN-1736) ───────────────────────────────────────────────
+
+    /// Write a minimal GUI store JSON file to `path` with the given memory root.
+    fn write_store_json(path: &std::path::Path, memory_root: &str) {
+        let dir = path.parent().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        let store = serde_json::json!({
+            "settings": {
+                "memoryRoot": memory_root,
+                "promptsRoot": "",
+                "skillsRoot": "",
+                "transcriptsRoot": "",
+                "agents": []
+            }
+        });
+        fs::write(path, store.to_string()).unwrap();
+    }
+
+    #[test]
+    fn resolve_root_env_wins_over_store() {
+        let _guard = env_lock();
+
+        // Set up a store file pointing at a different path.
+        let store_dir = temp_root("rr-env-store");
+        let fake_store_path = store_dir.join("settings.json");
+        let store_root = temp_root("rr-env-store-root");
+        write_store_json(&fake_store_path, &store_root.to_string_lossy());
+
+        // Override HOME so gui_store_path() resolves to our fake store.
+        // We set MEMORY_ROOT to yet another path — it must win.
+        let env_root = temp_root("rr-env-root");
+        std::env::set_var("MEMORY_ROOT", &env_root);
+
+        // Point HOME at a fake dir so gui_store_path points at our temp store
+        // (we bypass this because MEMORY_ROOT is set — it short-circuits).
+        let result = resolve_root();
+        std::env::remove_var("MEMORY_ROOT");
+
+        assert_eq!(result, env_root, "MEMORY_ROOT env var wins over everything");
+    }
+
+    #[test]
+    fn resolve_root_store_wins_when_no_env() {
+        let _guard = env_lock();
+        // Ensure MEMORY_ROOT is clear.
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Stand up a fake store file.
+        let store_root = temp_root("rr-store-root");
+        let store_file = temp_root("rr-store-home")
+            .join("Library/Application Support/com.tinyforestlabs.agent-studio/settings.json");
+        write_store_json(&store_file, &store_root.to_string_lossy());
+
+        // Override HOME so our fake store is found.
+        let fake_home = store_file
+            .parent().unwrap()   // .../com.tinyforestlabs.agent-studio
+            .parent().unwrap()   // .../Application Support
+            .parent().unwrap()   // .../Library
+            .parent().unwrap();  // fake_home
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        std::env::set_var("HOME", fake_home);
+
+        let result = resolve_root();
+
+        std::env::set_var("HOME", real_home);
+
+        assert_eq!(result, store_root, "store value wins when env var is absent");
+    }
+
+    #[test]
+    fn resolve_root_falls_back_to_default_when_store_missing() {
+        let _guard = env_lock();
+        std::env::remove_var("MEMORY_ROOT");
+
+        // Point HOME at a tmp dir with no store file.
+        let empty_home = temp_root("rr-no-store");
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        std::env::set_var("HOME", &empty_home);
+
+        let result = resolve_root();
+
+        std::env::set_var("HOME", real_home);
+
+        // Should equal default_memory_root() in that (restored) HOME.
+        // After HOME is restored, default_memory_root() uses the real HOME.
+        // So just check the result ends with the expected suffix.
+        let result_str = result.to_string_lossy();
+        assert!(
+            result_str.ends_with("Projects/tfl/memory"),
+            "falls back to default memory root: {result_str}"
+        );
     }
 
     // ── add-memory core ───────────────────────────────────────────────────────
