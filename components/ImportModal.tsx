@@ -411,9 +411,11 @@ export default function ImportModal({
                         textAlign: 'left',
                         padding: '8px 16px',
                         background: isActive ? color.forestWash : 'transparent',
+                        // All-longhand borders (no `border` shorthand to reconcile).
                         borderLeft: isActive ? `2px solid ${color.forest}` : '2px solid transparent',
-                        border: 'none',
-                        borderLeftWidth: 2,
+                        borderRight: 'none',
+                        borderTop: 'none',
+                        borderBottom: 'none',
                         cursor: 'pointer',
                       }}
                       onMouseEnter={(e) => {
