@@ -158,7 +158,9 @@ export default function ChangesView({}: ChangesViewProps) {
                 height: 30,
                 padding: `0 ${space[3]}px`,
                 background: isActive ? color.bgRaised : 'transparent',
-                border: isActive ? `1px solid ${color.hair}` : '1px solid transparent',
+                // All-longhand borders (no `border` shorthand to reconcile on rerender).
+                borderLeft: isActive ? `1px solid ${color.hair}` : '1px solid transparent',
+                borderRight: isActive ? `1px solid ${color.hair}` : '1px solid transparent',
                 borderBottom: 'none',
                 borderTop: isActive ? `2px solid ${color.forest}` : '2px solid transparent',
                 borderTopLeftRadius: radius.md,

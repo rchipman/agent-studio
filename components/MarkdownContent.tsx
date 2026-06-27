@@ -207,7 +207,7 @@ export default function MarkdownContent({ content, onClick, onTicketClick }: Mar
             )
           },
           hr: () => (
-            <hr style={{ border: 'none', borderTop: '1px solid rgba(38,35,32,0.12)', margin: '2em 0' }} />
+            <hr style={{ borderTop: '1px solid rgba(38,35,32,0.12)', borderRight: 'none', borderBottom: 'none', borderLeft: 'none', margin: '2em 0' }} />
           ),
           table: ({ children }) => (
             <div style={{ overflowX: 'auto', marginBottom: '1em' }}>

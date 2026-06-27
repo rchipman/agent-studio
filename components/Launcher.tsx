@@ -755,8 +755,11 @@ export default function Launcher({ open, onClose, onRun, onOpenSettings, asView 
                       textAlign: 'left',
                       padding: '8px 16px',
                       background: active ? color.forestWash : 'transparent',
+                      // All-longhand borders (no `border` shorthand) so React never
+                      // reconciles shorthand against longhand on rerender (it warns).
                       borderLeft: active ? `2px solid ${color.forest}` : '2px solid transparent',
-                      border: 'none',
+                      borderRight: 'none',
+                      borderTop: 'none',
                       borderBottom: `1px solid ${color.hairSoft}`,
                       cursor: 'pointer',
                       fontFamily: font.sans,
