@@ -35,6 +35,7 @@ function setupInvoke() {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === 'get_settings') return Promise.resolve(MOCK_SETTINGS)
     if (cmd === 'embedding_key_status') return Promise.resolve('set')
+    if (cmd === 'gemini_key_status') return Promise.resolve('unset')
     if (cmd === 'set_settings') return Promise.resolve(undefined)
     if (cmd === 'linear_key_status') return Promise.resolve('unset')
     if (cmd === 'list_linear_teams') return Promise.resolve([])
@@ -59,6 +60,7 @@ describe('SettingsModal', () => {
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_settings'))
     expect(invoke).toHaveBeenCalledWith('embedding_key_status')
+    expect(invoke).toHaveBeenCalledWith('gemini_key_status')
   })
 
   it('renders the memoryRoot value after loading', async () => {

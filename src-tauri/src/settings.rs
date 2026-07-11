@@ -32,6 +32,17 @@ const SETTINGS_KEY: &str = "settings";
 pub const KEYCHAIN_SERVICE: &str = "com.agent-studio.embedding";
 pub const KEYCHAIN_ACCOUNT: &str = "embedding-api-key";
 
+/// Keychain account for the Gemini reasoning API key (TIN-1789). Reuses the same
+/// keychain *service* as the embedding/Linear keys (mirroring that precedent),
+/// with a distinct account name so the three secrets never collide. Consumed by
+/// `reason.rs` via [`resolve_gemini_key`]; like every other key it is NEVER
+/// written to the settings JSON store.
+pub const GEMINI_KEYCHAIN_ACCOUNT: &str = "gemini-api-key";
+
+/// Environment-variable fallback for the Gemini key, mirroring
+/// `STUDIO_EMBEDDING_API_KEY`. Lets headless/CI runs supply a key without the GUI.
+pub const GEMINI_API_KEY_ENV: &str = "STUDIO_GEMINI_API_KEY";
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /// A registered coding agent the launcher can spawn.
@@ -186,6 +197,32 @@ fn keychain_entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())
 }
 
+fn gemini_keychain_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, GEMINI_KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())
+}
+
+/// Resolve the Gemini reasoning API key: OS keychain first, then the
+/// `STUDIO_GEMINI_API_KEY` env var. Returns `None` when no key is available so
+/// `reason.rs` can fall back to Ollama (or degrade calmly). Mirrors
+/// `embeddings::resolve_api_key` exactly, with the Gemini account/env var.
+pub fn resolve_gemini_key() -> Option<String> {
+    if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, GEMINI_KEYCHAIN_ACCOUNT) {
+        if let Ok(secret) = entry.get_password() {
+            let trimmed = secret.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    if let Ok(val) = std::env::var(GEMINI_API_KEY_ENV) {
+        let trimmed = val.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -299,6 +336,56 @@ pub fn embedding_key_status() -> Result<String, String> {
 #[tauri::command]
 pub fn reveal_embedding_key() -> Result<String, String> {
     let entry = keychain_entry()?;
+    match entry.get_password() {
+        Ok(secret) => Ok(secret),
+        Err(keyring::Error::NoEntry) => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// ── Keychain (Gemini reasoning API key, TIN-1789) ────────────────────────────
+// Mirrors the embedding-key commands above exactly. The key is only ever stored
+// in the OS keychain, never in the settings JSON store.
+
+/// Input for `set_gemini_key`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetGeminiKeyInput {
+    pub key: String,
+}
+
+/// Store (or clear) the Gemini API key in the OS keychain. An empty key clears it.
+#[tauri::command]
+pub fn set_gemini_key(payload: SetGeminiKeyInput) -> Result<(), String> {
+    let entry = gemini_keychain_entry()?;
+    let key = payload.key.trim();
+    if key.is_empty() {
+        match entry.delete_credential() {
+            Ok(_) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        entry.set_password(key).map_err(|e| e.to_string())
+    }
+}
+
+/// Returns "set" or "unset" without revealing the key.
+#[tauri::command]
+pub fn gemini_key_status() -> Result<String, String> {
+    let entry = gemini_keychain_entry()?;
+    match entry.get_password() {
+        Ok(_) => Ok("set".to_string()),
+        Err(keyring::Error::NoEntry) => Ok("unset".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Returns the plaintext Gemini key on explicit demand only. Never call this
+/// except in response to a deliberate user "Reveal" action.
+#[tauri::command]
+pub fn reveal_gemini_key() -> Result<String, String> {
+    let entry = gemini_keychain_entry()?;
     match entry.get_password() {
         Ok(secret) => Ok(secret),
         Err(keyring::Error::NoEntry) => Ok(String::new()),

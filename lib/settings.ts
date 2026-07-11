@@ -75,6 +75,25 @@ export async function revealEmbeddingKey(): Promise<string> {
   return invoke<string>('reveal_embedding_key')
 }
 
+// ── Gemini reasoning key (TIN-1789) ─────────────────────────────────────────────
+
+export type GeminiKeyStatus = 'set' | 'unset'
+
+/** Whether a Gemini reasoning key is stored, without revealing it. */
+export async function geminiKeyStatus(): Promise<GeminiKeyStatus> {
+  return invoke<GeminiKeyStatus>('gemini_key_status')
+}
+
+/** Store the Gemini API key in the keychain. An empty key clears it. */
+export async function setGeminiKey(key: string): Promise<void> {
+  await invoke('set_gemini_key', { payload: { key } })
+}
+
+/** Reveal the plaintext Gemini key. Call only on explicit user action. */
+export async function revealGeminiKey(): Promise<string> {
+  return invoke<string>('reveal_gemini_key')
+}
+
 // ── Linear ────────────────────────────────────────────────────────────────────
 
 export type LinearKeyStatus = 'set' | 'unset'
