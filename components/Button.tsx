@@ -25,7 +25,7 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   variant?: Variant
   size?: Size
   tone?: Tone
-  /** Primary-only soft lift (the Launcher's Run north-star). */
+  /** Primary-only soft lift for a hero action. */
   glow?: boolean
   /** Drop horizontal padding for a truly inline link-in-a-sentence. */
   padding?: 'none'

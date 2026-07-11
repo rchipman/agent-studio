@@ -44,7 +44,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, Runtime, State};
 
 use crate::search::Db;
 
@@ -473,10 +473,16 @@ pub fn set_linear_key(payload: SetLinearKeyInput) -> Result<(), String> {
     }
 }
 
-/// Return the plaintext Linear API key. Only call in response to a deliberate
-/// user "Reveal" action.
+/// Return the plaintext Linear API key, gated behind a fresh native confirmation
+/// (see [`crate::settings::confirm_reveal`]) — same hardening as the embedding
+/// and Gemini keys (TIN-1793). A bare JS `invoke` can call this, but cannot
+/// approve the native prompt, so the key is only ever revealed on a real user
+/// action.
 #[tauri::command]
-pub fn reveal_linear_key() -> Result<String, String> {
+pub async fn reveal_linear_key<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    if !crate::settings::confirm_reveal(&app, "Linear API key").await {
+        return Err("Reveal cancelled.".to_string());
+    }
     let entry = linear_keychain_entry()?;
     match entry.get_password() {
         Ok(secret) => Ok(secret),

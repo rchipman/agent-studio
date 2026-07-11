@@ -6,15 +6,12 @@
  * The "Changes" rail destination — review what agents changed in your working
  * directories. Decoupled from notes entirely (a diff is repo state, not a face
  * of a document). Because Studio is used across several projects at once, it
- * carries a tab per working directory, seeded from the configured agents and
- * your recent launch directories, with an affordance to add more. Each tab shows
- * that repo's git diff.
+ * carries a tab per working directory, curated by the user via "Add" and
+ * persisted locally. Each tab shows that repo's git diff.
  */
 
 import { useEffect, useState } from 'react'
 import { color, space, radius, font, type as typeRamp } from '@/lib/tokens'
-import { getSettings } from '@/lib/settings'
-import { getRecentDirs } from '@/lib/launcher'
 import ViewBody from '@/components/ViewBody'
 import DiffView from '@/components/DiffView'
 import Button from '@/components/Button'
@@ -53,34 +50,14 @@ export default function ChangesView({}: ChangesViewProps) {
   // status — the calm "Refresh" the top bar offers. (TIN-1708)
   const [refreshKey, setRefreshKey] = useState(0)
 
-  // Seed once: a saved curated list if present, else the agents' working dirs +
-  // recent launch dirs. After that the list is the user's to curate.
+  // Load the user's curated, locally-persisted list. Empty on first run — the
+  // user adds working directories with "Add". (Before TIN-1793 this also seeded
+  // from the registered agents / recent launch dirs; that surface is gone.)
   useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      const saved = loadSaved()
-      if (saved.length > 0) {
-        if (!cancelled) {
-          setDirs(saved)
-          setActive(saved[0])
-        }
-        return
-      }
-      let agentDirs: string[] = []
-      try {
-        const s = await getSettings()
-        agentDirs = (s.agents ?? []).map((a) => a.cwd).filter(Boolean)
-      } catch {
-        /* no settings */
-      }
-      const seed = dedupe([...agentDirs, ...getRecentDirs()])
-      if (cancelled) return
-      setDirs(seed)
-      setActive(seed[0] ?? null)
-      if (seed.length > 0) saveSaved(seed)
-    })()
-    return () => {
-      cancelled = true
+    const saved = loadSaved()
+    if (saved.length > 0) {
+      setDirs(saved)
+      setActive(saved[0])
     }
   }, [])
 

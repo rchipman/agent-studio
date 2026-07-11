@@ -7,20 +7,16 @@
     "core:default",
     "core:path:default",
     "fs:default",
-    "fs:allow-home-read-recursive",
-    "fs:allow-home-write-recursive",
-    "fs:allow-mkdir",
     "fs:allow-watch",
     {
+      "comment": "TIN-1793: scoped down from the former blanket $HOME/** read+write. The webview fs plugin only reads/writes/watches markdown note files under the memory root (default ~/Projects/tfl/memory) and the app's own dot-dir. Hidden home dirs (.ssh, .aws, .config, keychains, …) are no longer reachable from the webview. Transcripts/archive are read on the Rust side, which is not gated by this scope.",
       "identifier": "fs:scope",
       "allow": [
-        { "path": "$HOME/**" },
-        { "path": "$HOME/.*/**" }
+        { "path": "$HOME/Projects/**" },
+        { "path": "$HOME/.agent-studio/**" },
+        { "path": "$HOME/.claude/**" }
       ]
     },
-    "shell:default",
-    "shell:allow-execute",
-    "shell:allow-spawn",
     "opener:default",
     "opener:allow-open-url",
     "dialog:default",

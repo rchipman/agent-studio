@@ -5,8 +5,6 @@ import dynamic from 'next/dynamic'
 import { invoke } from '@tauri-apps/api/core'
 import matter from 'gray-matter'
 import LinearPanel from '@/components/LinearPanel'
-import TerminalPanel, { RunRequest } from '@/components/TerminalPanel'
-import Launcher from '@/components/Launcher'
 import TranscriptBrowser from '@/components/TranscriptBrowser'
 import CommandPalette from '@/components/CommandPalette'
 import WorkspacePanel from '@/components/WorkspacePanel'
@@ -59,7 +57,7 @@ const otherSide = (side: PanelSide): PanelSide => (side === 'left' ? 'right' : '
 
 /** The app's top-level destinations — the workspace, or one of the full views
  *  reached from the nav rail. */
-type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'launch' | 'transcripts' | 'changes'
+type AppView = 'workspace' | 'graph' | 'frontmatter' | 'consistency' | 'transcripts' | 'changes'
 
 /** The room name shown in the persistent top bar's title slot (TIN-1708), per
  *  full view. The workspace uses the serif wordmark instead of a title. */
@@ -67,7 +65,6 @@ const ROOM_TITLE: Record<Exclude<AppView, 'workspace'>, string> = {
   graph: 'Graph',
   frontmatter: 'Fields',
   consistency: 'Check',
-  launch: 'Launch',
   transcripts: 'Sessions',
   changes: 'Changes',
 }
@@ -501,9 +498,6 @@ export default function Home() {
   const [toast, setToast] = useState<{ message: string; path: string } | null>(null)
   // Working directory the Diff tab inspects — defaults to the first registered
   // agent's cwd from settings (the launcher updates this when a session starts).
-  // Recorded on launch so it lands in recent dirs (the Changes view seeds from
-  // there); the workspace itself no longer needs the value.
-  const [, setActiveWorkingDir] = useState('')
   const [activeTicket, setActiveTicket] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // The full-view destinations live behind one `activeView` (the nav rail makes
@@ -522,13 +516,10 @@ export default function Home() {
   // Frontmatter manager (TIN-1638): import queue + drag affordance.
   const [importFiles, setImportFiles] = useState<{ path: string; content: string }[] | null>(null)
   const [draggingImport, setDraggingImport] = useState(false)
-  const [terminalOpen, setTerminalOpen] = useState(false)
   const [, setIsSaving] = useState(false)
   // The active full view's top-bar right-slot content, registered by the view via
   // the TopBarSlot context (TIN-1708). The workspace supplies its own slot inline.
   const [viewRight, setViewRight] = useState<ReactNode>(null)
-  const spawnClaudeRef = useRef<((filePath: string | null) => void) | null>(null)
-  const runRef = useRef<((req: RunRequest) => void) | null>(null)
 
   const searchRef = useRef<HTMLInputElement>(null)
   // One debounce timer per edited path, so editing two panels never drops a save.
@@ -1116,16 +1107,6 @@ export default function Home() {
 
   // ── Keyboard shortcuts ──
 
-  // Load the Diff tab's working directory from settings (first agent's cwd).
-  useEffect(() => {
-    getSettings()
-      .then((s) => {
-        const cwd = s.agents?.[0]?.cwd
-        if (cwd) setActiveWorkingDir(cwd)
-      })
-      .catch(() => {})
-  }, [])
-
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const isMac = navigator.platform.includes('Mac')
@@ -1193,24 +1174,9 @@ export default function Home() {
         setActiveView((v) => (v === 'changes' ? 'workspace' : 'changes'))
         return
       }
-      if (mod && (e.key === 'r' || e.key === 'R')) {
-        // Launch is a rail destination now (TIN-1707): ⌘R toggles the Launch view,
-        // mirroring ⌘G / ⌘T, not a modal open.
-        e.preventDefault()
-        setActiveView((v) => (v === 'launch' ? 'workspace' : 'launch'))
-        return
-      }
       if (mod && (e.key === 't' || e.key === 'T')) {
         e.preventDefault()
         setActiveView((v) => (v === 'transcripts' ? 'workspace' : 'transcripts'))
-        return
-      }
-      if (mod && (e.key === 'j' || e.key === 'J')) {
-        // Toggle the terminal side-dock (TIN-1709 / VS Code's panel-toggle key).
-        // The dock otherwise only opens as a side effect of launching a session,
-        // leaving no way to reopen it after closing — this is its entry point.
-        e.preventDefault()
-        setTerminalOpen((o) => !o)
         return
       }
       if (mod && (e.key === 'g' || e.key === 'G')) {
@@ -1241,13 +1207,6 @@ export default function Home() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [toggleRightPanel, selectSearch, closeDoc, cycleTab, goBack, goForward])
-
-  // The launcher hands a composed run to the terminal: slide it up, then spawn.
-  const handleLaunch = useCallback((req: RunRequest) => {
-    setTerminalOpen(true)
-    // Let the terminal mount/init before invoking its run handler.
-    setTimeout(() => runRef.current?.(req), 60)
-  }, [])
 
   // ── Derived ──
 
@@ -1439,15 +1398,6 @@ export default function Home() {
             onClose={() => setActiveView('workspace')}
           />
         )}
-        {activeView === 'launch' && (
-          <Launcher
-            asView
-            open
-            onClose={() => setActiveView('workspace')}
-            onRun={handleLaunch}
-            onOpenSettings={() => setShowSettings(true)}
-          />
-        )}
         {activeView === 'transcripts' && (
           <TranscriptBrowser onClose={() => setActiveView('workspace')} />
         )}
@@ -1475,13 +1425,7 @@ export default function Home() {
         memoryRoot={MEMORY_ROOT}
       />
 
-      {/* Terminal and Linear panels (unchanged) */}
-      <TerminalPanel
-        isOpen={terminalOpen}
-        onClose={() => setTerminalOpen(false)}
-        spawnRef={spawnClaudeRef}
-        runRef={runRef}
-      />
+      {/* Linear panel */}
       <LinearPanel
         ticketId={activeTicket}
         onClose={() => setActiveTicket(null)}

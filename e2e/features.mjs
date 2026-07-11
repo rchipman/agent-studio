@@ -73,14 +73,13 @@ try {
 
   await check('⌘K  command palette', [Key.Command, 'k'], ['Jump to file', 'ESC', 'No files found'])
   await check('⌘⇧N quick capture', [Key.Command, Key.Shift, 'n'], ['Quick capture', "What's on your mind"])
-  await check('⌘,  settings', [Key.Command, ','], ['Memory root', 'Embedding API key', 'Agents'])
-  await check('⌘R  launcher', [Key.Command, 'r'], ['Pick a prompt to begin', 'Prompts', 'Run'])
+  await check('⌘,  settings', [Key.Command, ','], ['Memory root', 'Embedding API key', 'Transcripts root'])
   // The view was renamed Transcripts → Sessions; its title/nav label is "Sessions"
   // (the "Search transcripts…" placeholder is an attribute getText can't see).
   await check('⌘T  sessions', [Key.Command, 't'], ['Sessions', 'No transcripts root configured', 'No sessions'])
   // 'LinksDiff' x2 confirms the right panel opened on its Diff tab; the diff
   // body then shows real git state (or the calm "Could not read git status"
-  // when no working directory is configured — first-run with no agents).
+  // when no working directory is configured — first-run with no dirs added).
   await check('⌘D  diff tab', [Key.Command, 'd'], ['Changes', 'Nothing changed yet', "isn't a git repository", 'Reading changes', 'Could not read git status'])
   await checkSplit() // ⌘\ now opens a second WorkspacePanel, not the old Links/Diff tabs
 } catch (e) {

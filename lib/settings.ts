@@ -12,14 +12,6 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
-/** A registered coding agent the launcher can spawn. */
-export interface Agent {
-  name: string
-  command: string
-  args: string[]
-  cwd: string
-}
-
 /**
  * Retention policy for the durable session archive (TIN-1759). Tagged on `kind`
  * to mirror the Rust enum's serde representation.
@@ -32,10 +24,7 @@ export type RetentionPolicy =
 /** The full persisted settings shape (secrets excluded). */
 export interface Settings {
   memoryRoot: string
-  promptsRoot: string
-  skillsRoot: string
   transcriptsRoot: string
-  agents: Agent[]
   archiveEnabled: boolean
   retentionPolicy: RetentionPolicy
 }
