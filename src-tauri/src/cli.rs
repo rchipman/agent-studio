@@ -314,6 +314,7 @@ pub fn run_add_memory(rest: &[String]) -> Result<serde_json::Value, String> {
         "continuityScore": score.continuity_score,
         "conflicts": score.conflicts,
         "superseded": false,
+        "degraded": score.degraded,
     }))
 }
 
@@ -1547,6 +1548,10 @@ mod tests {
         assert_eq!(out["superseded"], json!(false));
         assert!(out["continuityScore"].is_number());
         assert!(out["conflicts"].is_array());
+        // TIN-1790: `degraded` must be present so callers can distinguish
+        // "model down" (degraded=true) from "your note contradicts
+        // everything" (degraded=false, low score).
+        assert!(out["degraded"].is_boolean(), "degraded is a boolean");
 
         // The file exists under {root}/studio with valid frontmatter + body.
         let path = out["path"].as_str().unwrap();
