@@ -35,7 +35,6 @@ import {
   setRetentionPolicy,
   runRetentionCleanup,
   type Settings,
-  type Agent,
   type EmbeddingKeyStatus,
   type GeminiKeyStatus,
   type LinearKeyStatus,
@@ -51,10 +50,7 @@ interface SettingsModalProps {
 
 const EMPTY_SETTINGS: Settings = {
   memoryRoot: '',
-  promptsRoot: '',
-  skillsRoot: '',
   transcriptsRoot: '',
-  agents: [],
   archiveEnabled: true,
   retentionPolicy: { kind: 'sizeCap', maxBytes: 2_147_483_648 },
 }
@@ -364,28 +360,6 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }
 
-  // ── Agents ──
-  function addAgent() {
-    setSettingsState((prev) => ({
-      ...prev,
-      agents: [...prev.agents, { name: '', command: '', args: [], cwd: '' }],
-    }))
-  }
-
-  function updateAgent(index: number, patch: Partial<Agent>) {
-    setSettingsState((prev) => ({
-      ...prev,
-      agents: prev.agents.map((a, i) => (i === index ? { ...a, ...patch } : a)),
-    }))
-  }
-
-  function removeAgent(index: number) {
-    setSettingsState((prev) => ({
-      ...prev,
-      agents: prev.agents.filter((_, i) => i !== index),
-    }))
-  }
-
   // ── Persist ──
   async function persist(s: Settings) {
     await setSettings(s)
@@ -486,18 +460,6 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChoose={() => chooseFolder('memoryRoot', settings.memoryRoot)}
               />
               <ReindexRow state={reindex} setState={setReindex} onRebuild={doRebuild} />
-              <RootField
-                label="Prompts root"
-                value={settings.promptsRoot}
-                onChange={(v) => setRoot('promptsRoot', v)}
-                onChoose={() => chooseFolder('promptsRoot', settings.promptsRoot)}
-              />
-              <RootField
-                label="Skills root"
-                value={settings.skillsRoot}
-                onChange={(v) => setRoot('skillsRoot', v)}
-                onChoose={() => chooseFolder('skillsRoot', settings.skillsRoot)}
-              />
               <RootField
                 label="Transcripts root"
                 value={settings.transcriptsRoot}
@@ -721,50 +683,6 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                   </>
                 )}
               </div>
-            </Section>
-
-            {/* ── Agents ── */}
-            <Section label="Agents">
-              {settings.agents.length === 0 ? (
-                <div style={{ ...type.body, color: color.inkFaint, padding: `${space[2]}px 0` }}>
-                  No agents yet. Add one to launch sessions.
-                </div>
-              ) : (
-                settings.agents.map((agent, i) => (
-                  <AgentRow
-                    key={i}
-                    agent={agent}
-                    onChange={(patch) => updateAgent(i, patch)}
-                    onRemove={() => removeAgent(i)}
-                  />
-                ))
-              )}
-              <button
-                onClick={addAgent}
-                style={{
-                  ...type.body,
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  marginTop: space[3],
-                  padding: `${space[3]}px ${space[4]}px`,
-                  background: 'transparent',
-                  border: `1px dashed ${color.line}`,
-                  borderRadius: radius.card,
-                  color: color.inkSoft,
-                  cursor: 'pointer',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = color.bgFieldStrong
-                  e.currentTarget.style.color = color.ink
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent'
-                  e.currentTarget.style.color = color.inkSoft
-                }}
-              >
-                + Add agent
-              </button>
             </Section>
           </div>
         )}
@@ -1235,103 +1153,6 @@ function parseIsoDate(iso: string): Date | null {
   if (!m) return null
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
   return Number.isNaN(d.getTime()) ? null : d
-}
-
-// ── Agent row ───────────────────────────────────────────────────────────────────
-
-function AgentRow({
-  agent,
-  onChange,
-  onRemove,
-}: {
-  agent: Agent
-  onChange: (patch: Partial<Agent>) => void
-  onRemove: () => void
-}) {
-  return (
-    <div
-      style={{
-        padding: `${space[4]}px`,
-        marginBottom: space[3],
-        background: color.bgCard,
-        border: `1px solid ${color.hairSoft}`,
-        borderRadius: radius.card,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: space[3],
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: space[3] }}>
-        <AgentField
-          label="Name"
-          value={agent.name}
-          mono={false}
-          onChange={(v) => onChange({ name: v })}
-        />
-        <Button
-          variant="tertiary"
-          padding="none"
-          onClick={onRemove}
-          style={{ flexShrink: 0, alignSelf: 'flex-end' }}
-        >
-          Remove
-        </Button>
-      </div>
-      <AgentField
-        label="Command"
-        value={agent.command}
-        mono
-        onChange={(v) => onChange({ command: v })}
-      />
-      <AgentField
-        label="Arguments"
-        value={agent.args.join(' ')}
-        mono
-        placeholder="--print --model opus"
-        onChange={(v) => onChange({ args: v.split(/\s+/).filter(Boolean) })}
-      />
-      <AgentField
-        label="Default working directory"
-        value={agent.cwd}
-        mono
-        onChange={(v) => onChange({ cwd: v })}
-      />
-    </div>
-  )
-}
-
-function AgentField({
-  label,
-  value,
-  onChange,
-  mono,
-  placeholder,
-}: {
-  label: string
-  value: string
-  onChange: (v: string) => void
-  mono: boolean
-  placeholder?: string
-}) {
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: space[1] }}>
-      <label style={{ ...type.label, color: color.inkFaint }}>{label}</label>
-      <input
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={(e) => (e.currentTarget.style.borderColor = color.forest)}
-        onBlur={(e) => (e.currentTarget.style.borderColor = color.line)}
-        spellCheck={false}
-        style={{
-          ...fieldStyle,
-          fontFamily: mono ? font.mono : font.sans,
-          fontWeight: label === 'Name' ? 600 : 400,
-        }}
-      />
-    </div>
-  )
 }
 
 // ── Linear time helpers ─────────────────────────────────────────────────────────

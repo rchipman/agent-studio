@@ -2,7 +2,7 @@
 
 An open-source Tauri + Next.js desktop app for working with agentic memory and implementation sessions across development projects.
 
-Agent Studio is a fast, local-first workspace for the markdown "memory base" that coding agents read from and write to. It pairs a WYSIWYG markdown editor with full-text search over your memory files, a file tree, an embedded terminal for running implementation sessions, and a side panel for the Linear ticket you're working. Everything runs on your machine; nothing is sent anywhere.
+Agent Studio is a fast, local-first workspace for the markdown "memory base" that coding agents read from and write to — a brain for both humans and agents. It pairs a WYSIWYG markdown editor with full-text search over your memory files, a file tree, session-transcript history, and a side panel for the Linear ticket you're working. Everything runs on your machine; nothing is sent anywhere.
 
 ## Features
 
@@ -11,7 +11,8 @@ Agent Studio is a fast, local-first workspace for the markdown "memory base" tha
 - **Command palette** — `Cmd/Ctrl+K` to jump to any file by name or content.
 - **File tree** — browse, create, and pin files/folders; right-click context menu.
 - **New-file flow** — create a memory file with frontmatter (name, type, projects, tags) pre-filled.
-- **Terminal panel** — an embedded terminal (xterm.js) you can spawn against the active file to run an implementation/agent session.
+- **Sessions** — browse the durable, compressed archive of your Claude Code session transcripts.
+- **Changes** — per-working-directory git diffs of what your agents changed.
 - **Linear panel** — open the related Linear ticket inline beside your work.
 - **Recents** — recently opened files are remembered locally.
 
@@ -22,7 +23,6 @@ Agent Studio is a fast, local-first workspace for the markdown "memory base" tha
 | Desktop shell | [Tauri 2](https://tauri.app) (Rust) |
 | Frontend | [Next.js 16](https://nextjs.org) (App Router, React 19), static-exported |
 | Editor | [Milkdown](https://milkdown.dev) (Crepe) |
-| Terminal | [xterm.js](https://xtermjs.org) |
 | Search index | SQLite **FTS5** via [`rusqlite`](https://github.com/rusqlite/rusqlite) (bundled) |
 | Frontmatter | [`gray_matter`](https://crates.io/crates/gray_matter) (Rust), `gray-matter` (JS) |
 
@@ -39,7 +39,7 @@ React UI ──invoke('search' | 'create_file')──▶ Rust (src-tauri/src/sea
 ```
 
 - The index is built once at app startup and held in Tauri managed state (`Mutex<Connection>`).
-- File reads/writes use the Tauri filesystem plugin, scoped to your home directory.
+- File reads/writes from the webview use the Tauri filesystem plugin, scoped (see `src-tauri/capabilities/default.json`) to the memory/project roots the app actually uses — not all of `$HOME`.
 - The memory base is a tree of markdown files with YAML frontmatter:
 
   ```markdown
@@ -125,7 +125,7 @@ This symlinks `bin/agent-studio-memory` into `~/.local/bin` (override with `PREF
 
 ```
 app/                 Next.js app-router UI (page.tsx is the main workspace)
-components/           Editor, file tree, command palette, terminal, Linear panel
+components/           Editor, file tree, command palette, Sessions, Changes, Linear panel
 lib/                  Shared types and helpers
 src-tauri/
   src/lib.rs          Tauri builder — plugins, managed state, command registration

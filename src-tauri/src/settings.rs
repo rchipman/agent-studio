@@ -3,10 +3,10 @@
 //! Persisted JSON settings (via `tauri-plugin-store`) plus secure storage of the
 //! embedding API key (via the OS keychain, `keyring` crate — macOS Keychain).
 //!
-//! The store file holds only non-secret configuration: the four roots and the
-//! registered agents. The embedding API key is NEVER written to the store; it
-//! lives in the keychain and is only returned to the frontend on explicit
-//! `reveal_embedding_key`.
+//! The store file holds only non-secret configuration: the memory + transcripts
+//! roots and the session-archive retention policy. The embedding API key is
+//! NEVER written to the store; it lives in the keychain and is only returned to
+//! the frontend on explicit `reveal_embedding_key`.
 //!
 //! The search memory root is resolved from these settings (falling back to the
 //! default), so `search.rs` indexes the configured root rather than a hardcoded
@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_store::StoreExt;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -44,18 +45,6 @@ pub const GEMINI_KEYCHAIN_ACCOUNT: &str = "gemini-api-key";
 pub const GEMINI_API_KEY_ENV: &str = "STUDIO_GEMINI_API_KEY";
 
 // ── Types ────────────────────────────────────────────────────────────────────
-
-/// A registered coding agent the launcher can spawn.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Agent {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub cwd: String,
-}
 
 /// Retention policy for the durable session archive (TIN-1759). Serialised as a
 /// tagged object so the frontend can switch on `kind`:
@@ -91,11 +80,7 @@ fn default_retention_policy() -> RetentionPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub memory_root: String,
-    pub prompts_root: String,
-    pub skills_root: String,
     pub transcripts_root: String,
-    #[serde(default)]
-    pub agents: Vec<Agent>,
     /// TIN-1759: whether Studio copies each session out of Claude Code before it
     /// can prune them. Defaults to on for pre-existing stores.
     #[serde(default = "default_archive_enabled")]
@@ -109,10 +94,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             memory_root: default_memory_root_string(),
-            prompts_root: home_join("Projects/tfl/prompts"),
-            skills_root: home_join(".claude/skills"),
             transcripts_root: home_join(".claude/projects"),
-            agents: Vec::new(),
             archive_enabled: default_archive_enabled(),
             retention_policy: default_retention_policy(),
         }
@@ -223,6 +205,37 @@ pub fn resolve_gemini_key() -> Option<String> {
     None
 }
 
+// ── Reveal gate (hardening, TIN-1793) ────────────────────────────────────────
+//
+// A stored secret must never be handed back to the webview on a bare `invoke`.
+// Before returning any plaintext key, we require a FRESH, explicit user action:
+// a native OS confirmation dialog the user has to click through. Malicious or
+// accidental JS can call the command, but it cannot approve the native prompt on
+// the user's behalf — so a reveal only ever happens when a human just asked for
+// it. The dialog is shown via the non-blocking callback API (safe to call from
+// the command thread) and the result is awaited over a oneshot channel.
+
+/// Show a native "reveal this secret?" confirmation. Returns true only when the
+/// user explicitly clicks the reveal button. Any other outcome (Cancel, dialog
+/// dismissed, channel dropped) denies the reveal.
+pub async fn confirm_reveal<R: Runtime>(app: &AppHandle<R>, secret_label: &str) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(format!(
+            "Reveal the stored {secret_label} in plain text?\n\nOnly do this if you asked to see it. The key will be shown in the app window."
+        ))
+        .title("Reveal secret")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Reveal".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+    rx.await.unwrap_or(false)
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -331,10 +344,14 @@ pub fn embedding_key_status() -> Result<String, String> {
     }
 }
 
-/// Returns the plaintext key on explicit demand only. Never call this except in
-/// response to a deliberate user "Reveal" action.
+/// Returns the plaintext key, gated behind a fresh native confirmation (see
+/// [`confirm_reveal`]). A bare JS `invoke` cannot obtain the secret without a
+/// human clicking through the OS prompt.
 #[tauri::command]
-pub fn reveal_embedding_key() -> Result<String, String> {
+pub async fn reveal_embedding_key<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    if !confirm_reveal(&app, "embedding API key").await {
+        return Err("Reveal cancelled.".to_string());
+    }
     let entry = keychain_entry()?;
     match entry.get_password() {
         Ok(secret) => Ok(secret),
@@ -381,10 +398,13 @@ pub fn gemini_key_status() -> Result<String, String> {
     }
 }
 
-/// Returns the plaintext Gemini key on explicit demand only. Never call this
-/// except in response to a deliberate user "Reveal" action.
+/// Returns the plaintext Gemini key, gated behind a fresh native confirmation
+/// (see [`confirm_reveal`]) — same hardening as the embedding key.
 #[tauri::command]
-pub fn reveal_gemini_key() -> Result<String, String> {
+pub async fn reveal_gemini_key<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    if !confirm_reveal(&app, "Gemini API key").await {
+        return Err("Reveal cancelled.".to_string());
+    }
     let entry = gemini_keychain_entry()?;
     match entry.get_password() {
         Ok(secret) => Ok(secret),
@@ -417,25 +437,14 @@ mod tests {
     fn defaults_point_at_expected_roots() {
         let s = Settings::default();
         assert!(s.memory_root.ends_with("Projects/tfl/memory"));
-        assert!(s.prompts_root.ends_with("Projects/tfl/prompts"));
-        assert!(s.skills_root.ends_with(".claude/skills"));
         assert!(s.transcripts_root.ends_with(".claude/projects"));
-        assert!(s.agents.is_empty());
     }
 
     #[test]
     fn settings_round_trip_through_json() {
         let s = Settings {
             memory_root: "/m".into(),
-            prompts_root: "/p".into(),
-            skills_root: "/s".into(),
             transcripts_root: "/t".into(),
-            agents: vec![Agent {
-                name: "claude".into(),
-                command: "claude".into(),
-                args: vec!["--print".into()],
-                cwd: "/work".into(),
-            }],
             archive_enabled: true,
             retention_policy: RetentionPolicy::SizeCap { max_bytes: 1024 },
         };
@@ -443,8 +452,8 @@ mod tests {
         // camelCase on the wire.
         assert!(json.get("memoryRoot").is_some());
         let back: Settings = serde_json::from_value(json).unwrap();
-        assert_eq!(back.agents.len(), 1);
-        assert_eq!(back.agents[0].name, "claude");
+        assert_eq!(back.memory_root, "/m");
+        assert_eq!(back.transcripts_root, "/t");
         assert_eq!(
             back.retention_policy,
             RetentionPolicy::SizeCap { max_bytes: 1024 }
@@ -453,13 +462,16 @@ mod tests {
 
     #[test]
     fn archive_defaults_on_for_legacy_store() {
-        // A store written before TIN-1759 has neither field. Serde defaults must
-        // turn archiving on with the 2 GiB size cap.
+        // A store written before TIN-1759 lacks the archive fields. Serde defaults
+        // must turn archiving on with the 2 GiB size cap. Any extra keys a legacy
+        // store carried (e.g. the removed prompts/skills roots or agents) are
+        // ignored on deserialize.
         let legacy = serde_json::json!({
             "memoryRoot": "/m",
             "promptsRoot": "/p",
             "skillsRoot": "/s",
-            "transcriptsRoot": "/t"
+            "transcriptsRoot": "/t",
+            "agents": [{ "name": "claude", "command": "claude" }]
         });
         let s: Settings = serde_json::from_value(legacy).unwrap();
         assert!(s.archive_enabled);

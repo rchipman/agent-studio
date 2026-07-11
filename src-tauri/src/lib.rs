@@ -7,7 +7,6 @@ mod embeddings;
 mod frontmatter;
 mod git;
 mod hybrid;
-mod launcher;
 mod linear;
 mod links;
 mod local_embed;
@@ -20,7 +19,6 @@ mod salience;
 mod search;
 mod settings;
 mod suggestions;
-mod terminal;
 mod transcript;
 
 use std::sync::Mutex;
@@ -54,7 +52,6 @@ pub fn run() {
   let builder = tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
-    .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_store::Builder::default().build());
 
@@ -131,7 +128,6 @@ pub fn run() {
 
       app.manage(Db(Mutex::new(conn)));
       app.manage(MemoryRoot(Mutex::new(root)));
-      app.manage(terminal::TerminalState::default());
       app.manage(TaskControl::default());
 
       // Build the transcript index once at startup, on a background thread (it
@@ -157,10 +153,6 @@ pub fn run() {
       settings::reveal_gemini_key,
       git::git_status,
       git::git_diff,
-      launcher::list_prompts,
-      launcher::list_skills,
-      launcher::read_prompt,
-      launcher::write_prompt,
       links::file_links,
       links::link_suggest,
       links::graph_data,
@@ -200,9 +192,6 @@ pub fn run() {
       linear::reveal_linear_key,
       linear::list_linear_teams,
       linear::sync_linear,
-      terminal::spawn_agent,
-      terminal::terminal_write,
-      terminal::terminal_kill,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

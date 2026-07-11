@@ -46,7 +46,7 @@ if (!(await waitFor('http://127.0.0.1:4445/status', 30000))) { console.error('We
 // 4. Run the specs.
 let code = 0
 try {
-  execSync('node e2e/smoke.mjs && node e2e/features.mjs && node e2e/terminal-dock.mjs', { cwd: ROOT, stdio: 'inherit' })
+  execSync('node e2e/smoke.mjs && node e2e/features.mjs', { cwd: ROOT, stdio: 'inherit' })
 } catch (e) {
   code = e.status || 1
 }

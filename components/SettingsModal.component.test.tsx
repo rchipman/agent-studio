@@ -10,12 +10,7 @@ import SettingsModal from './SettingsModal'
 
 const MOCK_SETTINGS = {
   memoryRoot: '/home/user/memory',
-  promptsRoot: '/home/user/prompts',
-  skillsRoot: '/home/user/skills',
   transcriptsRoot: '/home/user/transcripts',
-  agents: [
-    { name: 'Claude', command: 'claude', args: ['--print'], cwd: '/projects' },
-  ],
   // TIN-1759: the backend always supplies these via serde defaults.
   archiveEnabled: true,
   retentionPolicy: { kind: 'sizeCap', maxBytes: 2_147_483_648 },
@@ -74,13 +69,6 @@ describe('SettingsModal', () => {
       const inputs = screen.getAllByDisplayValue('/home/user/memory')
       expect(inputs.length).toBeGreaterThan(0)
     })
-  })
-
-  it('renders the agent name in the Agents section', async () => {
-    render(<SettingsModal open onClose={() => {}} />)
-
-    await waitFor(() => screen.getByDisplayValue('Claude'))
-    expect(screen.getByDisplayValue('claude')).toBeInTheDocument()
   })
 
   it('calls invoke(set_settings) when Done is clicked and then calls onClose', async () => {
