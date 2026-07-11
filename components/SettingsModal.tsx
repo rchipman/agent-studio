@@ -23,6 +23,9 @@ import {
   setEmbeddingKey,
   embeddingKeyStatus,
   revealEmbeddingKey,
+  setGeminiKey,
+  geminiKeyStatus,
+  revealGeminiKey,
   linearKeyStatus,
   setLinearKey,
   revealLinearKey,
@@ -34,6 +37,7 @@ import {
   type Settings,
   type Agent,
   type EmbeddingKeyStatus,
+  type GeminiKeyStatus,
   type LinearKeyStatus,
   type LinearTeam,
   type ArchiveStatus,
@@ -93,6 +97,11 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [keyDraft, setKeyDraft] = useState<string | null>(null) // null = untouched
   const [revealed, setRevealed] = useState(false)
 
+  // Gemini reasoning key (TIN-1789)
+  const [geminiStatus, setGeminiStatus] = useState<GeminiKeyStatus>('unset')
+  const [geminiKeyDraft, setGeminiKeyDraft] = useState<string | null>(null) // null = untouched
+  const [geminiRevealed, setGeminiRevealed] = useState(false)
+
   const [reindex, setReindex] = useState<Reindex>({ kind: 'idle' })
 
   // Linear key
@@ -118,15 +127,18 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     setReindex({ kind: 'idle' })
     setKeyDraft(null)
     setRevealed(false)
+    setGeminiKeyDraft(null)
+    setGeminiRevealed(false)
     setLinearKeyDraft(null)
     setLinearRevealed(false)
     setLinearSync({ kind: 'idle' })
     setCleanup({ kind: 'idle' })
     ;(async () => {
       try {
-        const [s, status, linStatus, arch] = await Promise.all([
+        const [s, status, gemStatus, linStatus, arch] = await Promise.all([
           getSettings(),
           embeddingKeyStatus(),
+          geminiKeyStatus(),
           linearKeyStatus(),
           archiveStatus().catch(() => null),
         ])
@@ -134,6 +146,7 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
         setSettingsState(s)
         setInitialMemoryRoot(s.memoryRoot)
         setKeyStatus(status)
+        setGeminiStatus(gemStatus)
         setLinearStatus(linStatus)
         setArchive(arch)
         // Load teams if key is already set
@@ -248,6 +261,26 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     }
   }
 
+  // ── Gemini key (TIN-1789) ──
+  async function toggleGeminiReveal() {
+    if (geminiRevealed) {
+      setGeminiRevealed(false)
+      return
+    }
+    if (geminiKeyDraft !== null) {
+      // Showing the in-progress draft already.
+      setGeminiRevealed(true)
+      return
+    }
+    try {
+      const plain = await revealGeminiKey()
+      setGeminiKeyDraft(plain)
+      setGeminiRevealed(true)
+    } catch (err) {
+      console.error('[settings] gemini reveal', err)
+    }
+  }
+
   // ── Linear key ──
   async function toggleLinearReveal() {
     if (linearRevealed) {
@@ -359,6 +392,10 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
     if (keyDraft !== null) {
       await setEmbeddingKey(keyDraft)
       setKeyStatus(keyDraft.trim() ? 'set' : 'unset')
+    }
+    if (geminiKeyDraft !== null) {
+      await setGeminiKey(geminiKeyDraft)
+      setGeminiStatus(geminiKeyDraft.trim() ? 'set' : 'unset')
     }
     if (linearKeyDraft !== null) {
       await setLinearKey(linearKeyDraft)
@@ -533,6 +570,53 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
                   : keyStatus === 'set'
                     ? 'Set'
                     : 'Not set'}
+              </div>
+            </Section>
+
+            {/* ── Reasoning (TIN-1789) ── */}
+            <Section label="Reasoning">
+              <label style={{ ...type.label, color: color.inkSoft }}>Gemini API key</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: space[3], marginTop: space[2] }}>
+                <input
+                  type={geminiRevealed ? 'text' : 'password'}
+                  value={geminiRevealed ? geminiKeyDraft ?? '' : geminiKeyDraft !== null ? geminiKeyDraft : MASK}
+                  placeholder={geminiStatus === 'set' ? MASK : 'AIza…'}
+                  onChange={(e) => {
+                    setGeminiKeyDraft(e.target.value)
+                  }}
+                  onFocus={(e) => {
+                    if (geminiKeyDraft === null) {
+                      // First edit: clear the masked placeholder representation.
+                      setGeminiKeyDraft('')
+                    }
+                    e.currentTarget.style.borderColor = color.forest
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = color.line
+                  }}
+                  style={{
+                    flex: 1,
+                    ...fieldStyle,
+                    fontFamily: font.mono,
+                  }}
+                />
+                <Button variant="tertiary" padding="none" onClick={toggleGeminiReveal}>
+                  {geminiRevealed ? 'Hide' : 'Reveal'}
+                </Button>
+              </div>
+              <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[2] }}>
+                {geminiKeyDraft !== null
+                  ? geminiKeyDraft.trim()
+                    ? 'Set'
+                    : 'Not set'
+                  : geminiStatus === 'set'
+                    ? 'Set'
+                    : 'Not set'}
+              </div>
+              <div style={{ ...type.meta, color: color.inkFaint, marginTop: space[1] }}>
+                Continuity scoring, contradiction judging, and note summaries use Gemini&apos;s free
+                tier when a key is set. Without one, they fall back to a local Ollama model, or
+                degrade calmly if neither is available. Stored in your system keychain.
               </div>
             </Section>
 
