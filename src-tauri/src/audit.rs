@@ -233,17 +233,29 @@ price AND a color).
 Be conservative: only output CONFLICT when one note's value makes the other's \
 value impossible.";
 
-/// Extract `CONFLICT:` lines from a model response (case-insensitive, lenient).
+/// Extract `CONFLICT:` lines from a model response (case-insensitive, lenient
+/// on leading whitespace only — NOT a substring-anywhere match).
+///
+/// The output contract (see `AUDIT_SYSTEM`) is a single line that is either
+/// `CONFLICT: <reason>` or `NONE`. A verbose model can produce prose like
+/// "There is no conflict: both notes agree on the price" — matching
+/// `"conflict:"` as a substring anywhere in the line (the old behavior) would
+/// misparse that negation as a real conflict. Require the (trimmed) line to
+/// *start* with `CONFLICT:` instead. Once a leading `NONE` line is seen, stop
+/// scanning — anything the model appends after its verdict (e.g. rambling
+/// that happens to contain "conflict:") must not be picked up.
 pub(crate) fn parse_conflicts(resp: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in resp.lines() {
         let t = line.trim();
         let lower = t.to_lowercase();
-        if let Some(pos) = lower.find("conflict:") {
-            let desc = t[pos + "conflict:".len()..].trim();
+        if lower.starts_with("conflict:") {
+            let desc = t["conflict:".len()..].trim();
             if !desc.is_empty() {
                 out.push(desc.to_string());
             }
+        } else if lower == "none" {
+            break;
         }
     }
     out
@@ -453,6 +465,43 @@ mod tests {
         assert_eq!(parse_conflicts(resp), vec!["A says $9/mo but B says $12/mo."]);
         assert!(parse_conflicts("NONE").is_empty());
         assert!(parse_conflicts("These notes agree on everything.").is_empty());
+    }
+
+    /// Regression (TIN-1790): a verbose model negating a conflict — "There is
+    /// no conflict: ..." — must NOT be parsed as a real conflict. The old
+    /// implementation matched `"conflict:"` as a substring anywhere in the
+    /// line, so this exact phrasing produced a false positive; the fix
+    /// requires the (trimmed) line to *start* with `CONFLICT:`.
+    #[test]
+    fn parse_conflicts_ignores_negated_conflict_phrasing() {
+        let resp = "There is no conflict: both notes agree on the price.";
+        assert!(
+            parse_conflicts(resp).is_empty(),
+            "negation phrasing must not be parsed as a conflict"
+        );
+
+        // Same failure mode, mid-sentence rather than sentence-initial.
+        let resp2 = "Looking at both notes, there is no conflict: the prices match.";
+        assert!(parse_conflicts(resp2).is_empty());
+
+        // A real CONFLICT: line must still work even if it's not the whole
+        // response contract-perfectly — this must keep passing alongside the
+        // fix above.
+        let resp3 = "CONFLICT: A says $9/mo but B says $12/mo.";
+        assert_eq!(parse_conflicts(resp3), vec!["A says $9/mo but B says $12/mo."]);
+    }
+
+    /// Regression (TIN-1790): once a leading `NONE` verdict line is seen,
+    /// stop scanning — any trailing chatter that happens to contain the
+    /// substring "conflict:" must not be picked up after the model has
+    /// already delivered its NONE verdict.
+    #[test]
+    fn parse_conflicts_stops_scanning_after_leading_none() {
+        let resp = "NONE\nFor reference, a conflict: would look different than this.";
+        assert!(
+            parse_conflicts(resp).is_empty(),
+            "text appended after a leading NONE verdict must be ignored"
+        );
     }
 
     #[test]
