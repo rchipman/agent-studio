@@ -88,6 +88,14 @@ pub fn maybe_run() {
     let Some(cmd) = args.first() else { return };
     let rest = &args[1..];
 
+    // `--help`/`-h`/`help` always print usage and exit — this must be checked
+    // before dispatch so `agent-studio-memory --help` never falls through and
+    // boots the GUI.
+    if cmd == "--help" || cmd == "-h" || cmd == "help" {
+        print!("{}", usage());
+        std::process::exit(0);
+    }
+
     let result = match cmd.as_str() {
         "add-memory" => run_add_memory(rest),
         "supersede" => run_supersede(rest),
@@ -97,7 +105,16 @@ pub fn maybe_run() {
         "brief" => run_brief(rest),
         "story" => run_story(rest),
         "reindex" => run_reindex(rest),
-        _ => return, // not a headless command → fall through to the GUI
+        // A first arg WAS given but it isn't a recognised subcommand — a
+        // malformed CLI invocation, not the legitimate bare-invocation GUI-launch
+        // case (that one never reaches this match at all: `args.first()` is
+        // `None` and we `return` above). Fail fast instead of falling through
+        // into the Tauri GUI.
+        other => {
+            eprintln!("{}", json!({ "error": format!("unknown command: {other}") }));
+            eprintln!("run with --help for usage");
+            std::process::exit(2);
+        }
     };
 
     match result {
@@ -110,6 +127,65 @@ pub fn maybe_run() {
             std::process::exit(1);
         }
     }
+}
+
+/// Usage text for `--help`/`-h`/`help` and for the "run with --help" hint on an
+/// unknown command. Flags below are kept in sync with each `run_*` function's
+/// own arg parsing — see the doc comment on each for the authoritative contract.
+fn usage() -> String {
+    "agent-studio-memory — headless CLI for the TFL memory store\n\
+     \n\
+     USAGE:\n\
+     \x20 agent-studio-memory <command> [flags]\n\
+     \n\
+     COMMANDS:\n\
+     \x20 add-memory     Write a new memory note and get a continuity signal back.\n\
+     \x20                  --content <text>        Note body (or use --file)\n\
+     \x20                  --file <path>           Read note body from a file\n\
+     \x20                  --agent <name>          Required. Audit actor id.\n\
+     \x20                  --name <slug>           Override the generated note name\n\
+     \x20                  --type <type>           Override the suggested type\n\
+     \x20                  --project <project>     Override the suggested project\n\
+     \n\
+     \x20 recall          Search memory, or resolve settled context for a note/topic.\n\
+     \x20                  --query <text>          Keyword/semantic search\n\
+     \x20                  --project <p>           Filter by project\n\
+     \x20                  --type <t>              Filter by type\n\
+     \x20                  --k <n>                 Result count (default 8)\n\
+     \x20                  --about <file|name|topic>  Settled-context lookup instead of search\n\
+     \n\
+     \x20 check           Score content for continuity/conflicts without writing.\n\
+     \x20                  --content <text>        Required.\n\
+     \x20                  --project <p>           Accepted for symmetry with recall\n\
+     \n\
+     \x20 supersede       Mark an old note superseded by a new one (frontmatter only).\n\
+     \x20                  --old <path|name>       Required. Note being replaced.\n\
+     \x20                  --new <name>            Required. Replacement note.\n\
+     \n\
+     \x20 cornerstones    List top notes by salience (or neglected/archive candidates).\n\
+     \x20                  --project <p>           Restrict to one project\n\
+     \x20                  --k <n>                 Result count (default 12)\n\
+     \x20                  --neglected             Return low-salience notes instead\n\
+     \n\
+     \x20 brief           Synthesise a situation report: settled, contested, recent.\n\
+     \x20                  --project <p>           Restrict to one project\n\
+     \x20                  --about <topic>         Focus the brief on a topic\n\
+     \n\
+     \x20 story           Narrate how a decision evolved (chain + audit trail).\n\
+     \x20                  <note-name-or-path>     Positional, or use --topic\n\
+     \x20                  --topic <t>             Resolve by topic instead of a name/path\n\
+     \n\
+     \x20 reindex         Rebuild the on-disk index + embeddings for the whole root.\n\
+     \n\
+     \x20 --help, -h, help   Show this message and exit.\n\
+     \n\
+     All commands print one JSON object (or array) to stdout on success and exit\n\
+     0; on failure they print a JSON error to stderr and exit 1. An unrecognised\n\
+     command exits 2.\n\
+     \n\
+     Memory root resolution: $MEMORY_ROOT env var, then the GUI's persisted\n\
+     settings, then ~/Projects/tfl/memory.\n"
+        .to_string()
 }
 
 /// Resolve the memory root for the headless path.

@@ -49,7 +49,21 @@ pub fn run() {
   // Any other argv falls through to launch the GUI exactly as before.
   cli::maybe_run();
 
-  let builder = tauri::Builder::default()
+  let builder = tauri::Builder::default();
+
+  // Defense-in-depth against a stray second GUI launch (e.g. a malformed CLI
+  // invocation that fell through `cli::maybe_run()` before its guard was added,
+  // or a genuine double-launch): single-instance is desktop-only, so it must be
+  // registered before any other plugin and behind `#[cfg(desktop)]` — it would
+  // fail to compile on the mobile targets this crate also supports. When a
+  // second instance is launched, this callback fires in the FIRST instance
+  // instead of a new window opening; the second process exits immediately.
+  #[cfg(desktop)]
+  let builder = builder.plugin(tauri_plugin_single_instance::init(|_app, argv, _cwd| {
+    log::info!("[single-instance] blocked second launch, argv: {argv:?}");
+  }));
+
+  let builder = builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_opener::init())
