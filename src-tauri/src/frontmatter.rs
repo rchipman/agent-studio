@@ -763,7 +763,7 @@ fn compose_field(
             FieldConfidence { value: rule.to_string(), confidence: conf::RULE_ONLY, source: "rules".into() }
         }
         (false, Some((mv, score))) => {
-            let capped = score.min(conf::LLM_CAP).max(0.0);
+            let capped = score.clamp(0.0, conf::LLM_CAP);
             FieldConfidence { value: mv.trim().to_string(), confidence: capped, source: "model".into() }
         }
         (false, None) => {

@@ -13,7 +13,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node e2e/run.mjs",
-    "install-cli": "bash scripts/install-cli.sh"
+    "install-cli": "bash scripts/install-cli.sh",
+    "cargo:test": "cd src-tauri && cargo test",
+    "cargo:clippy": "cd src-tauri && cargo clippy --all-targets -- -D warnings",
+    "green": "npm run lint && npm run type-check && npm run test && npm run cargo:test && npm run cargo:clippy"
   },
   "dependencies": {
     "@fontsource-variable/literata": "^5.2.8",

@@ -528,6 +528,7 @@ struct ReadCtx<'a> {
 ///   1. live path exists  → read live (freshest; Claude Code may be appending),
 ///   2. else archived `.zst` exists → decode it,
 ///   3. else None.
+///
 /// With no ctx, only step 1 applies.
 fn read_transcript_text(path: &Path, ctx: Option<ReadCtx>) -> Option<String> {
     if path.exists() {
