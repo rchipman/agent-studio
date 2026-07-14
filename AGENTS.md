@@ -15,10 +15,15 @@ This version has breaking changes — APIs, conventions, and file structure may 
 | Rust tests | `cd src-tauri && cargo test` |
 | Production build | `npm run tauri build` (static-exports the frontend, bundles the binary) |
 
-This repo has no hosted CI — single-developer-plus-agents machine, no GitHub
-Actions. The gate is local instead: a `pre-push` git hook runs lint +
-type-check + `npm test` + `cargo test` + `cargo clippy` on every push and
-blocks it on failure. See "Local CI: the pre-push gate" below.
+The primary gate is local: a `pre-push` git hook runs lint + type-check +
+`npm test` + `cargo test` + `cargo clippy` on every push and blocks it on
+failure. See "Local CI: the pre-push gate" below. A light GitHub Actions
+workflow (`.github/workflows/ci.yml`) runs the same `npm run green` chain on
+`ubuntu-latest` as a PR backstop — it exists to catch a push that bypassed
+the hook (`--no-verify`, a clone without the hook installed), not to
+duplicate it as a second heavyweight suite. Keep it that way: single job,
+no matrix, cached deps, `npm run e2e` excluded for the same reason it's
+excluded from the hook.
 
 Testing strategy and the test pyramid: see `docs/metrics/agent-ledger.md` and the TIN-1641 epic. Test logic, not pixels; GUI E2E is intentionally deferred.
 
