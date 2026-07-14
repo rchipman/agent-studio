@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Local pre-push gate for agent-studio.
+#
+# This repo runs no hosted CI (single-developer-plus-agents machine, no
+# GitHub Actions) — this hook is the whole gate. It runs on every `git push`
+# and blocks the push if any check fails.
+#
+# Gate: lint -> type-check -> vitest -> cargo test -> cargo clippy.
+# Same gate as `npm run green` (see package.json) minus e2e.
+#
+# Deliberately EXCLUDED: `npm run e2e`. The desktop e2e suite drives the real
+# Tauri window, is slow, and needs a display — it does not belong in an
+# automated hook. Run it manually before a release: `npm run e2e`.
+#
+# Emergency bypass: `git push --no-verify`.
+#
+# Standard pre-push boilerplate: git passes the remote name/URL as $1/$2 and
+# streams "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin
+# (one per ref being pushed). We don't need any of that — the gate is the
+# same regardless of what's being pushed — so stdin is drained and ignored.
+set -euo pipefail
+
+cat >/dev/null || true
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
+
+fail() {
+  echo ""
+  echo "pre-push: FAILED — ${1}"
+  echo "pre-push: push blocked. Fix the issue above, or bypass in an emergency with:"
+  echo "  git push --no-verify"
+  exit 1
+}
+
+run_step() {
+  local name="$1"
+  shift
+  echo "pre-push: running ${name}..."
+  if ! "$@"; then
+    fail "${name}"
+  fi
+}
+
+start_ts=$(date +%s)
+
+run_step "npm run lint" npm run lint
+run_step "npm run type-check" npm run type-check
+run_step "npm run test" npm run test
+run_step "cargo test (src-tauri)" npm run cargo:test
+run_step "cargo clippy (src-tauri)" npm run cargo:clippy
+
+end_ts=$(date +%s)
+echo ""
+echo "pre-push: all checks passed in $((end_ts - start_ts))s. Pushing."
+exit 0

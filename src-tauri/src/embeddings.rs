@@ -244,17 +244,22 @@ fn upsert_chunk(
 /// Takes owned `Vec<String>` inputs and an owned `String` API key (owned to
 /// avoid higher-ranked lifetime issues with async closures), returns one
 /// `Vec<f32>` per input.
-pub type EmbedFn = fn(Vec<String>, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>>;
+pub type EmbedFn = fn(Vec<String>, String) -> EmbedFuture;
+
+/// The boxed future an [`EmbedFn`] returns — pulled out as its own alias
+/// because the inline `Pin<Box<dyn Future<...> + Send>>` spelling trips
+/// clippy's `type_complexity` lint at every call site.
+pub type EmbedFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>>;
 
 /// Wrapper around the OpenAI `embed` function with the `EmbedFn` signature.
-pub fn real_embed(chunks: Vec<String>, api_key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>> {
+pub fn real_embed(chunks: Vec<String>, api_key: String) -> EmbedFuture {
     Box::pin(async move { embed(chunks, &api_key).await })
 }
 
 /// Local (candle) embedder with the `EmbedFn` signature — runs the bundled model
 /// in-process; the API-key argument is ignored. CPU-bound, but it runs on the
 /// dedicated background embedding thread (or via `spawn_blocking` for queries).
-pub fn local_real_embed(chunks: Vec<String>, _api_key: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>> {
+pub fn local_real_embed(chunks: Vec<String>, _api_key: String) -> EmbedFuture {
     Box::pin(async move { crate::local_embed::embed(chunks) })
 }
 
@@ -398,7 +403,6 @@ mod tests {
     use crate::search::{init_db, insert_chunk, register_sqlite_vec, EMBEDDING_DIM};
     use rusqlite::Connection;
     use std::fs;
-    use std::pin::Pin;
 
     fn mem_db() -> Connection {
         register_sqlite_vec();
@@ -416,7 +420,7 @@ mod tests {
 
     /// Fake embedder with the `EmbedFn` signature — returns deterministic unit
     /// vectors without hitting the network.
-    fn fake_embed(chunks: Vec<String>, _key: String) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<Vec<f32>>>> + Send>> {
+    fn fake_embed(chunks: Vec<String>, _key: String) -> EmbedFuture {
         Box::pin(async move {
             let mut out = Vec::new();
             for (i, _) in chunks.iter().enumerate() {

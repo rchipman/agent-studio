@@ -15,9 +15,32 @@ This version has breaking changes — APIs, conventions, and file structure may 
 | Rust tests | `cd src-tauri && cargo test` |
 | Production build | `npm run tauri build` (static-exports the frontend, bundles the binary) |
 
-CI (`.github/workflows/ci.yml`) runs lint + type-check + `npm test` + build (frontend) and `cargo test` + `cargo build` (Rust) on every PR and push to `main`. Keep them green.
+This repo has no hosted CI — single-developer-plus-agents machine, no GitHub
+Actions. The gate is local instead: a `pre-push` git hook runs lint +
+type-check + `npm test` + `cargo test` + `cargo clippy` on every push and
+blocks it on failure. See "Local CI: the pre-push gate" below.
 
 Testing strategy and the test pyramid: see `docs/metrics/agent-ledger.md` and the TIN-1641 epic. Test logic, not pixels; GUI E2E is intentionally deferred.
+
+## Local CI: the pre-push gate
+
+Source of truth: `scripts/git-hooks/pre-push` (committed, version-controlled).
+Installed at `.git/hooks/pre-push` — git hooks aren't versioned by git itself,
+so re-run the install step below after cloning or if the hook goes missing:
+
+```bash
+cp scripts/git-hooks/pre-push .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+```
+
+Gate, in order: `npm run lint` -> `npm run type-check` -> `npm run test` ->
+`cargo test` -> `cargo clippy --all-targets -- -D warnings` (the two cargo
+steps run in `src-tauri/` via the `cargo:test` / `cargo:clippy` npm scripts).
+The same chain is available on demand as `npm run green`. `npm run e2e` is
+deliberately NOT part of the gate — the desktop e2e suite is slow and needs a
+display; run it manually before a release.
+
+Emergency bypass: `git push --no-verify`.
 
 ## Background build agents (worktrees)
 
