@@ -1,0 +1,61 @@
+name: CI
+
+# Light backstop, not a duplicate of the local gate. The primary fast-feedback
+# gate is the local `pre-push` git hook (scripts/git-hooks/pre-push, aka
+# `npm run green`) — see AGENTS.md "Local CI: the pre-push gate". This
+# workflow exists so a check runs even if a push bypassed the hook
+# (--no-verify, a fresh clone without the hook installed, etc.), on a repo
+# that's on GitHub's free tier for private repos (2,000 min/month). Keep it
+# to a single ubuntu-latest job with caching — do not grow this into a
+# second heavyweight suite.
+#
+# `npm run e2e` is deliberately excluded, same reasoning as the hook: it
+# drives the real Tauri window, is slow, and needs a display. Run it
+# manually before a release.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  green:
+    name: green (lint, type-check, test, cargo test, cargo clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Rust cache (src-tauri)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            libgtk-3-dev \
+            libxdo-dev
+
+      - name: Run the green gate (lint, type-check, test, cargo test, cargo clippy)
+        run: npm run green

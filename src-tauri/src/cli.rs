@@ -1433,11 +1433,7 @@ fn collect_supersede_chain(root: &Path, start: &Path) -> Vec<PathBuf> {
 
     // Walk forwards via `superseded_by` from start.
     let mut cursor = start.to_path_buf();
-    loop {
-        let raw = match fs::read_to_string(&cursor) {
-            Ok(r) => r,
-            Err(_) => break,
-        };
+    while let Ok(raw) = fs::read_to_string(&cursor) {
         let next_name = match frontmatter_field(&raw, "superseded_by") {
             Some(n) if !n.trim().is_empty() => n,
             _ => break,

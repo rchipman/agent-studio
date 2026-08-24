@@ -220,7 +220,14 @@ pub fn register_sqlite_vec() {
         // auto-extension entry point; the transmute only erases the typed fn
         // pointer to the `unsafe extern "C" fn()` that the FFI binding wants.
         unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
                 sqlite_vec::sqlite3_vec_init as *const (),
             )));
         }
@@ -278,7 +285,10 @@ pub struct ChunkHit {
 
 /// Insert a chunk and its embedding, returning the new row id. `embedding` must
 /// have [`EMBEDDING_DIM`] elements — sqlite-vec rejects a mismatched length.
-/// Used by the embeddings pipeline (TIN-1631).
+/// Used by the embeddings pipeline (TIN-1631). Currently only exercised from
+/// test modules in other files (embeddings.rs, continuity.rs) pending that
+/// pipeline being wired to call it directly, hence the explicit allow.
+#[allow(dead_code)]
 pub fn insert_chunk(
     conn: &Connection,
     file_path: &str,
